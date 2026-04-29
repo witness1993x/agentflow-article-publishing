@@ -1,0 +1,3206 @@
+"""TG review daemon — long-poll loop, callback router, timeout sweeper.
+
+Runs in foreground. ``af review-daemon`` is the entry point.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from agentflow.agent_review import (
+    auth,
+    pending_edits,
+    render as _render,
+    self_check,
+    short_id as _sid,
+    state,
+    tg_client,
+    timeout_state,
+)
+from agentflow.shared.bootstrap import agentflow_home
+from agentflow.shared.logger import get_logger
+from agentflow.shared.topic_profile_lifecycle import (
+    apply_suggestion,
+    build_patch_from_answers,
+    find_active_session_for_uid,
+    list_suggestions,
+    load_session,
+    review_suggestion,
+    save_session,
+    seed_profile,
+    normalize_output_language,
+    update_suggestion_status,
+    user_profile_bootstrap_state,
+)
+
+_log = get_logger("agent_review.daemon")
+_REVIEW_HOME = agentflow_home() / "review"
+
+_BOT_COMMANDS: list[dict[str, str]] = [
+    {"command": "start", "description": "注册/检查 review chat"},
+    {"command": "help", "description": "查看基础操作说明"},
+    {"command": "list", "description": "列出待处理 B/C/D/Ready 卡片"},
+    {"command": "published", "description": "列最近 N 天发布的文章 (default 7d)"},
+    {"command": "suggestions", "description": "查看待确认 profile 建议"},
+    {"command": "cancel", "description": "作废一个 pending short_id"},
+    {"command": "scan", "description": "主动触发 hotspots 扫描 (top-k)"},
+    {"command": "jobs", "description": "查看 cron 定时任务状态"},
+]
+
+_PROFILE_SETUP_STEPS: list[dict[str, str]] = [
+    {
+        "key": "brand",
+        "label": "Brand",
+        "prompt": (
+            "请输入品牌/账号显示名。后续问题会优先显示这个名称。\n"
+            "示例：Uniswap、ChainStream、你的个人专栏名。"
+        ),
+    },
+    {
+        "key": "writing_defaults",
+        "label": "Voice & Language",
+        "prompt": (
+            "确认写作身份和输出语言。可直接回复 skip 使用默认：first_party_brand + 简体中文。\n"
+            "也可以一行写完，例如：first_party_brand，简体中文，技术营销但少夸张。"
+        ),
+    },
+    {
+        "key": "source_materials",
+        "label": "Facts & Materials",
+        "prompt": (
+            "粘贴可学习语料/账号说明/产品事实/关键词，每行一条即可。\n"
+            "系统会自动拆成 product facts、core terms 和 search queries。\n"
+            "规则：写事实和名词，不写空泛口号。示例：AMM 协议；DEX liquidity；Uniswap v4 hooks。"
+        ),
+    },
+    {
+        "key": "rules",
+        "label": "Rules & Boundaries",
+        "prompt": (
+            "补充写作规则和边界，可多行，可跳过。\n"
+            "写法示例：\n"
+            "Do: 先讲协议机制，再讲市场影响\n"
+            "Don't: 不要承诺收益\n"
+            "Avoid: celebrity crypto, price prediction"
+        ),
+    },
+]
+
+
+def _config_path() -> Path:
+    p = _REVIEW_HOME / "config.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _offset_path() -> Path:
+    return _REVIEW_HOME / "poll_offset.json"
+
+
+def _audit_path() -> Path:
+    return _REVIEW_HOME / "audit.jsonl"
+
+
+def _read_json(p: Path, default: Any) -> Any:
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _write_json(p: Path, data: Any) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _audit(event: dict[str, Any]) -> None:
+    ap = _audit_path()
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    event = {**event, "audit_ts": datetime.now(timezone.utc).isoformat()}
+    with ap.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _heartbeat_path() -> Path:
+    return _REVIEW_HOME / "last_heartbeat.json"
+
+
+def _write_heartbeat() -> None:
+    try:
+        _write_json(_heartbeat_path(), {"timestamp": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass  # heartbeat is best-effort, never blocks the loop
+
+
+def _parse_profile_list_reply(text: str) -> list[str]:
+    raw = (text or "").replace("；", "\n").replace(";", "\n").replace("、", "\n")
+    lines = [line.strip(" -\t") for line in raw.splitlines()]
+    return [line for line in lines if line]
+
+
+def _is_skip_reply(text: str) -> bool:
+    return str(text or "").strip().lower() in {"", "skip", "跳过", "略过", "默认", "default"}
+
+
+def _split_profile_terms(text: str) -> list[str]:
+    raw = (
+        str(text or "")
+        .replace("；", "\n")
+        .replace(";", "\n")
+        .replace("、", "\n")
+        .replace(",", "\n")
+        .replace("，", "\n")
+    )
+    lines = [line.strip(" -\t") for line in raw.splitlines()]
+    return [line for line in lines if line]
+
+
+def _normalize_voice(text: str) -> str | None:
+    raw = str(text or "").strip().lower()
+    mapping = {
+        "first_party_brand": "first_party_brand",
+        "brand": "first_party_brand",
+        "observer": "observer",
+        "personal": "personal",
+    }
+    return mapping.get(raw)
+
+
+def _parse_writing_defaults(text: str) -> dict[str, Any]:
+    if _is_skip_reply(text):
+        return {"voice": "first_party_brand", "output_language": "zh-Hans"}
+    chunks = _split_profile_terms(text)
+    voice = None
+    output_language = None
+    do: list[str] = []
+    for chunk in chunks or [str(text or "").strip()]:
+        voice = voice or _normalize_voice(chunk)
+        output_language = output_language or normalize_output_language(chunk)
+        if _normalize_voice(chunk) is None and normalize_output_language(chunk) is None:
+            do.append(chunk)
+    return {
+        "voice": voice or "first_party_brand",
+        "output_language": output_language or "zh-Hans",
+        "do": do,
+    }
+
+
+def _parse_source_materials(text: str, *, brand: str) -> dict[str, list[str]]:
+    if _is_skip_reply(text):
+        return {
+            "product_facts": [f"{brand} topic profile"] if brand else [],
+            "core_terms": [brand] if brand else [],
+            "search_queries": [brand] if brand else [],
+        }
+    items = _split_profile_terms(text)
+    if not items:
+        return {"product_facts": [], "core_terms": [], "search_queries": []}
+    core_terms = items[:8]
+    search_queries = [item for item in items if " " in item or "-" in item][:6]
+    if not search_queries:
+        search_queries = items[:4]
+    if brand and brand not in core_terms:
+        core_terms.insert(0, brand)
+    return {
+        "product_facts": items,
+        "core_terms": core_terms[:8],
+        "search_queries": search_queries,
+    }
+
+
+def _parse_rules(text: str) -> dict[str, list[str]]:
+    if _is_skip_reply(text):
+        return {"do": [], "dont": [], "avoid_terms": []}
+    do: list[str] = []
+    dont: list[str] = []
+    avoid: list[str] = []
+    for item in _split_profile_terms(text):
+        low = item.lower()
+        if low.startswith(("do:", "do：")):
+            value = item.split(":", 1)[-1].split("：", 1)[-1].strip()
+            if value:
+                do.append(value)
+        elif low.startswith(("don't:", "dont:", "don’t:", "不要", "禁止")):
+            value = item.split(":", 1)[-1].split("：", 1)[-1].strip()
+            dont.append(value or item)
+        elif low.startswith(("avoid:", "avoid：")):
+            value = item.split(":", 1)[-1].split("：", 1)[-1].strip()
+            avoid.extend(_split_profile_terms(value))
+        elif any(marker in item for marker in ["不要", "避免", "禁止"]):
+            dont.append(item)
+        else:
+            do.append(item)
+    return {"do": do, "dont": dont, "avoid_terms": avoid}
+
+
+def _session_display_name(session: dict[str, Any]) -> str:
+    answers = session.get("answers") or {}
+    if isinstance(answers, dict):
+        brand = str(answers.get("brand") or "").strip()
+        if brand:
+            return brand
+    return str(session.get("profile_id") or "")
+
+
+def _send_profile_setup_question(session: dict[str, Any]) -> None:
+    chat_id = session.get("active_chat_id")
+    if chat_id is None:
+        return
+    step_index = int(session.get("step_index") or 0)
+    if step_index >= len(_PROFILE_SETUP_STEPS):
+        return
+    step = _PROFILE_SETUP_STEPS[step_index]
+    text = _render.render_profile_setup_question(
+        profile_id=str(session.get("profile_id") or ""),
+        display_name=_session_display_name(session),
+        step_label=str(step.get("label") or step.get("key") or "Field"),
+        prompt=str(step.get("prompt") or ""),
+        step_index=step_index + 1,
+        total_steps=len(_PROFILE_SETUP_STEPS),
+    )
+    tg_client.send_message(chat_id, text, parse_mode="MarkdownV2")
+
+
+def _spawn_apply_profile_session(session_id: str, chat_id: int | str | None) -> None:
+    import subprocess
+
+    def _run() -> None:
+        if chat_id is None:
+            return
+        try:
+            session = load_session(session_id)
+            from agentflow.agent_review.triggers import _af_argv
+
+            cmd = str(session.get("mode") or "update")
+            profile_id = str(session.get("profile_id") or "")
+            result = subprocess.run(
+                _af_argv(
+                    "topic-profile",
+                    cmd,
+                    "--profile",
+                    profile_id,
+                    "--from-session",
+                    session_id,
+                    "--json",
+                ),
+                env=os.environ.copy(),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ profile setup failed: {result.stderr or result.stdout}"[:3500]),
+                    parse_mode="MarkdownV2",
+                )
+                session["status"] = "failed"
+                save_session(session)
+                return
+            session["status"] = "applied"
+            save_session(session)
+            tg_client.send_message(
+                chat_id,
+                _render.escape_md2(
+                    f"✅ profile setup applied for {profile_id}. You can now re-run hotspots/search with this profile."
+                ),
+                parse_mode="MarkdownV2",
+            )
+        except Exception as err:
+            _log.warning("profile session apply crashed for %s: %s", session_id, err)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _maybe_handle_profile_session_reply(
+    *,
+    chat_id: int | None,
+    uid: int | None,
+    text: str,
+) -> bool:
+    if uid is None:
+        return False
+    session = find_active_session_for_uid(uid)
+    if not session:
+        return False
+    step_index = int(session.get("step_index") or 0)
+    if step_index >= len(_PROFILE_SETUP_STEPS):
+        return False
+    step = _PROFILE_SETUP_STEPS[step_index]
+    key = str(step.get("key") or "")
+    answers = session.get("answers") or {}
+    if not isinstance(answers, dict):
+        answers = {}
+
+    if key == "brand":
+        value = str(text or "").strip()
+    elif key == "writing_defaults":
+        parsed = _parse_writing_defaults(text)
+        answers["voice"] = parsed["voice"]
+        answers["output_language"] = parsed["output_language"]
+        if parsed.get("do"):
+            answers["do"] = [*list(answers.get("do") or []), *list(parsed["do"])]
+        value = str(text or "").strip()
+    elif key == "source_materials":
+        parsed = _parse_source_materials(
+            text,
+            brand=str(answers.get("brand") or session.get("profile_id") or ""),
+        )
+        for field, parsed_value in parsed.items():
+            if parsed_value:
+                answers[field] = [*list(answers.get(field) or []), *parsed_value]
+        value = str(text or "").strip()
+    elif key == "rules":
+        parsed = _parse_rules(text)
+        for field, parsed_value in parsed.items():
+            if parsed_value:
+                answers[field] = [*list(answers.get(field) or []), *parsed_value]
+        value = str(text or "").strip()
+    else:
+        value = _parse_profile_list_reply(text)
+    answers[key] = value
+    session["answers"] = answers
+    session["step_index"] = step_index + 1
+    if int(session["step_index"]) >= len(_PROFILE_SETUP_STEPS):
+        existing = user_profile_bootstrap_state(str(session.get("profile_id") or "")).get("current_profile")
+        session["profile_patch"] = build_patch_from_answers(
+            str(session.get("profile_id") or ""),
+            answers,
+            existing_profile=existing if isinstance(existing, dict) else seed_profile(str(session.get("profile_id") or "")),
+        )
+        session["status"] = "completed"
+        save_session(session)
+        tg_client.send_message(
+            chat_id,
+            "🧾 已收集完成，正在调用 CLI 落盘…",
+            parse_mode="MarkdownV2",
+        )
+        _spawn_apply_profile_session(str(session.get("id") or ""), chat_id)
+        return True
+    session["status"] = "collecting"
+    save_session(session)
+    _send_profile_setup_question(session)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# chat_id resolution
+# ---------------------------------------------------------------------------
+
+
+def get_review_chat_id() -> int | None:
+    """Resolve chat id from (in priority order):
+    1. ``TELEGRAM_REVIEW_CHAT_ID`` env var
+    2. ``~/.agentflow/review/config.json::review_chat_id``
+    """
+    env = os.environ.get("TELEGRAM_REVIEW_CHAT_ID", "").strip()
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    cfg = _read_json(_config_path(), {}) or {}
+    cid = cfg.get("review_chat_id")
+    return int(cid) if cid is not None else None
+
+
+def set_review_chat_id(chat_id: int) -> None:
+    cfg = _read_json(_config_path(), {}) or {}
+    cfg["review_chat_id"] = int(chat_id)
+    cfg["captured_at"] = datetime.now(timezone.utc).isoformat()
+    _write_json(_config_path(), cfg)
+
+
+def configure_bot_menu(chat_id: int | None = None) -> None:
+    """Best-effort Telegram command menu setup for the operator bot."""
+    try:
+        tg_client.set_my_commands(_BOT_COMMANDS)
+        tg_client.set_chat_menu_button(chat_id=chat_id, menu_button={"type": "commands"})
+        _log.info("configured Telegram bot command menu")
+    except Exception as err:  # pragma: no cover - menu setup must never block daemon
+        _log.warning("Telegram bot menu setup skipped: %s", err)
+
+
+# ---------------------------------------------------------------------------
+# Update routing
+# ---------------------------------------------------------------------------
+
+
+def _handle_message(update: dict[str, Any]) -> None:
+    msg = update.get("message") or {}
+    text = (msg.get("text") or "").strip()
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    sender = msg.get("from") or {}
+    uid = sender.get("id")
+    if text == "/start":
+        # First /start ever — capture as operator (chat_id == uid in DM).
+        if get_review_chat_id() is None and chat_id is not None:
+            set_review_chat_id(int(chat_id))
+            configure_bot_menu(int(chat_id))
+            tg_client.send_message(
+                chat_id,
+                "✅ chat\\_id 已记录\\. 此后 Gate A/B/C 通知会发到这个会话\\.\n"
+                "也可以把这个 id 写到 \\.env 的 `TELEGRAM\\_REVIEW\\_CHAT\\_ID` 持久化\\.",
+                parse_mode="MarkdownV2",
+            )
+            _log.info("captured review chat_id: %s", chat_id)
+            _audit({"kind": "start", "chat_id": chat_id, "uid": uid, "captured_operator": True})
+            return
+        # Subsequent /start — gate by uid auth.
+        if not auth.is_authorized(uid):
+            tg_client.send_message(
+                chat_id,
+                f"❌ 未授权\\. 你的 uid 是 `{uid}`\\.\n"
+                f"请操作员在终端运行: `af review-auth-add {uid}`",
+                parse_mode="MarkdownV2",
+            )
+            _log.warning("unauthorized /start from uid=%s chat_id=%s", uid, chat_id)
+            _audit({"kind": "start_unauthorized", "uid": uid, "chat_id": chat_id})
+            return
+        tg_client.send_message(chat_id, "review bot 在线\\.", parse_mode="MarkdownV2")
+        _audit({"kind": "start", "chat_id": chat_id, "uid": uid})
+        return
+
+    # Non-/start text: check if this uid is in the middle of an ✏️ edit flow.
+    if not auth.is_authorized(uid):
+        # Silent — anonymous chitchat is ignored, /start is the only allowed
+        # path for unauthorized users (handled above).
+        return
+
+    # Slash command dispatch — must run BEFORE pending_edits.take() so a user
+    # who fires `/list` while an edit-reply is queued doesn't have it eaten.
+    if text.startswith("/help"):
+        try:
+            help_text = (
+                "*Commands*\n"
+                "• `/start` — 注册当前会话为 review chat\n"
+                "• `/list [all|B|C|D|ready|publish]` — 列出当前 pending 卡片 \\(B/C/D/Ready\\)\n"
+                "• `/published [days]` — 列最近 N 天发布的文章 \\(default 7d, max 90d\\)\n"
+                "• `/scan [top-k]` — 主动触发 hotspots 扫描 \\(default top\\-3, max 10\\)\n"
+                "• `/jobs` — 查看 cron 定时任务状态\n"
+                "• `/suggestions [profile]` — 列出待确认 profile 更新建议\n"
+                "• `/help` — 这条帮助\n"
+                "• `/cancel <short_id>` — 作废一个 pending callback short\\_id"
+            )
+            tg_client.send_message(chat_id, help_text, parse_mode="MarkdownV2")
+        except Exception:
+            pass
+        _audit({"kind": "slash_command", "cmd": "/help", "uid": uid})
+        return
+
+    if text.startswith("/list"):
+        list_filter = "all"
+        total = 0
+        try:
+            all_states = [
+                state.STATE_DRAFT_PENDING_REVIEW,
+                state.STATE_IMAGE_PENDING_REVIEW,
+                state.STATE_CHANNEL_PENDING_REVIEW,
+                state.STATE_READY_TO_PUBLISH,
+            ]
+            states_by_filter = {
+                "all": all_states,
+                "b": [state.STATE_DRAFT_PENDING_REVIEW],
+                "c": [state.STATE_IMAGE_PENDING_REVIEW],
+                "d": [state.STATE_CHANNEL_PENDING_REVIEW],
+                "ready": [state.STATE_READY_TO_PUBLISH],
+                "publish": [state.STATE_READY_TO_PUBLISH],
+            }
+            parts = text.split(maxsplit=1)
+            list_filter = parts[1].strip().lower() if len(parts) > 1 else "all"
+            pending_states = states_by_filter.get(list_filter)
+            if pending_states is None:
+                help_text = (
+                    "用法: /list [all|B|C|D|ready|publish]\n"
+                    "Examples: /list, /list B, /list ready"
+                )
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(help_text),
+                    parse_mode="MarkdownV2",
+                )
+                _audit({
+                    "kind": "slash_command",
+                    "cmd": "/list",
+                    "uid": uid,
+                    "filter": list_filter,
+                    "total": total,
+                })
+                return
+
+            articles = state.articles_in_state(pending_states) or []
+            # Group by current state.
+            buckets: dict[str, list[str]] = {st: [] for st in all_states}
+            for aid in articles:
+                try:
+                    cur = state.current_state(aid)
+                except Exception:
+                    cur = None
+                if cur in buckets:
+                    buckets[cur].append(aid)
+
+            def _title_for(aid: str) -> str:
+                try:
+                    data = json.loads(
+                        (agentflow_home() / "drafts" / aid / "metadata.json")
+                        .read_text(encoding="utf-8")
+                    ) or {}
+                    return str(data.get("title") or "(no title)")
+                except Exception:
+                    return "(no title)"
+
+            label_for = {
+                state.STATE_DRAFT_PENDING_REVIEW: "B",
+                state.STATE_IMAGE_PENDING_REVIEW: "C",
+                state.STATE_CHANNEL_PENDING_REVIEW: "D",
+                state.STATE_READY_TO_PUBLISH: "Ready",
+            }
+            lines: list[str] = []
+            max_rows = 20
+            for st in all_states:
+                aids = buckets.get(st, [])
+                if not aids:
+                    continue
+                gate_label = label_for.get(st, "?")
+                for aid in sorted(aids):
+                    total += 1
+                    if len(lines) >= max_rows:
+                        continue
+                    aid_short = aid[:8] if len(aid) > 8 else aid
+                    title = _title_for(aid)
+                    age_str = "(?h)"
+                    try:
+                        history = state.gate_history(aid)
+                        if history:
+                            last_ts = datetime.fromisoformat(
+                                str(history[-1].get("timestamp") or "").replace("Z", "+00:00")
+                            )
+                            if last_ts.tzinfo is None:
+                                last_ts = last_ts.replace(tzinfo=timezone.utc)
+                            hrs = (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
+                            if hrs >= 24:
+                                age_str = f"({int(hrs / 24)}d+)"
+                            elif hrs >= 1:
+                                age_str = f"({int(hrs)}h+)"
+                            else:
+                                age_str = f"({int(hrs * 60)}m+)"
+                    except Exception:
+                        pass
+                    line = (
+                        f"• {_render.escape_md2(gate_label)}: "
+                        f"`{_render.escape_md2(aid_short)}` — "
+                        f"{_render.escape_md2(title)} "
+                        f"{_render.escape_md2(age_str)}"
+                    )
+                    lines.append(line)
+            if total == 0:
+                body = "✨ no pending cards"
+            else:
+                remaining = total - len(lines)
+                if remaining > 0:
+                    lines.append(
+                        _render.escape_md2(
+                            f"还有 {remaining} 条，使用 /list <gate> 过滤"
+                        )
+                    )
+                body = "\n".join(lines)
+            tg_client.send_message(chat_id, body, parse_mode="MarkdownV2")
+        except Exception:
+            pass
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/list",
+            "uid": uid,
+            "filter": list_filter,
+            "total": total,
+        })
+        return
+
+    if text.startswith("/published"):
+        parts = text.split(maxsplit=1)
+        days = 7
+        if len(parts) > 1:
+            try:
+                days = max(1, min(90, int(parts[1].strip())))
+            except ValueError:
+                try:
+                    tg_client.send_message(
+                        chat_id,
+                        _render.escape_md2(
+                            "❌ /published 参数应是天数 (1-90), 如 /published 14"
+                        ),
+                        parse_mode="MarkdownV2",
+                    )
+                except Exception:
+                    pass
+                _audit({
+                    "kind": "slash_command",
+                    "cmd": "/published",
+                    "uid": uid,
+                    "error": "bad_arg",
+                })
+                return
+
+        items: list[dict[str, Any]] = []
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            published_articles = state.articles_in_state([state.STATE_PUBLISHED]) or []
+
+            for aid in published_articles:
+                try:
+                    meta = json.loads(
+                        (agentflow_home() / "drafts" / aid / "metadata.json")
+                        .read_text(encoding="utf-8")
+                    ) or {}
+                    published_at_str = meta.get("published_at")
+                    if not published_at_str:
+                        continue
+                    pub_dt = datetime.fromisoformat(
+                        str(published_at_str).replace("Z", "+00:00")
+                    )
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                    if pub_dt < cutoff:
+                        continue
+
+                    title = meta.get("title", "(no title)")
+                    pub_urls = meta.get("published_url", {})
+                    if isinstance(pub_urls, str):  # legacy fallback
+                        pub_urls = {"medium": pub_urls}
+                    if not isinstance(pub_urls, dict):
+                        pub_urls = {}
+                    platforms = list(meta.get("published_platforms") or pub_urls.keys())
+
+                    age_d = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 86400
+
+                    items.append({
+                        "aid": aid,
+                        "title": title,
+                        "age_d": age_d,
+                        "platforms": platforms,
+                        "urls": pub_urls,
+                    })
+                except Exception:
+                    continue
+
+            # sort by recency (smallest age first)
+            items.sort(key=lambda x: x["age_d"])
+
+            cap = 20
+            truncated = len(items) > cap
+            items = items[:cap]
+
+            if not items:
+                body = f"📭 最近 {days}d 无 published 文章"
+            else:
+                header = (
+                    f"📌 *Published* — 最近 {days}d  ·  {len(items)} 篇"
+                    + (" (前 20)" if truncated else "")
+                )
+                lines = [header]
+                for it in items:
+                    aid_short = it["aid"][:8] if len(it["aid"]) > 8 else it["aid"]
+                    title = it["title"]
+                    age_d_val = it["age_d"]
+                    age = (
+                        f"{int(age_d_val)}d"
+                        if age_d_val >= 1
+                        else f"{int(age_d_val * 24)}h"
+                    )
+                    plats = it["platforms"] or []
+                    plat_csv = ",".join(plats[:3]) + ("…" if len(plats) > 3 else "")
+                    lines.append(
+                        f"• `{_render.escape_md2(aid_short)}` — "
+                        f"{_render.escape_md2(title)} "
+                        f"{_render.escape_md2(f'({age} on {plat_csv})')}"
+                    )
+                body = "\n".join(lines)
+
+            try:
+                tg_client.send_message(chat_id, body, parse_mode="MarkdownV2")
+            except Exception:
+                pass
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /published 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/published",
+            "uid": uid,
+            "days": days,
+            "total": len(items),
+        })
+        return
+
+    if text.startswith("/scan"):
+        parts = text.split(maxsplit=1)
+        top_k = 3
+        if len(parts) > 1:
+            try:
+                top_k = max(1, min(10, int(parts[1].strip())))
+            except ValueError:
+                try:
+                    tg_client.send_message(
+                        chat_id,
+                        _render.escape_md2(
+                            "❌ /scan 参数应是 top-k (1-10), 如 /scan 5"
+                        ),
+                        parse_mode="MarkdownV2",
+                    )
+                except Exception:
+                    pass
+                _audit({
+                    "kind": "slash_command",
+                    "cmd": "/scan",
+                    "uid": uid,
+                    "error": "bad_arg",
+                })
+                return
+
+        try:
+            tg_client.send_message(
+                chat_id,
+                _render.escape_md2(
+                    f"⏳ 主动扫描 hotspots 中... 预计 ~60-90s, top-{top_k}"
+                ),
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+        try:
+            _spawn_hotspots(top_k=top_k)
+        except Exception as err:  # pragma: no cover — defensive
+            _log.warning("_spawn_hotspots failed to start: %s", err)
+            try:
+                _notify_spawn_failure("hotspots", "manual_scan", None, str(err))
+            except Exception:
+                pass
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/scan",
+            "uid": uid,
+            "top_k": top_k,
+        })
+        return
+
+    if text.startswith("/jobs"):
+        try:
+            from agentflow.agent_review.triggers import _af_argv, _run_subprocess
+            res = _run_subprocess(
+                _af_argv("review-cron-status"),
+                env=os.environ.copy(),
+                timeout=10,
+                label="cron-status",
+            )
+            if res is None or getattr(res, "returncode", 1) != 0:
+                try:
+                    tg_client.send_message(
+                        chat_id,
+                        _render.escape_md2(
+                            "❌ /jobs 查询失败 (af review-cron-status 错)"
+                        ),
+                        parse_mode="MarkdownV2",
+                    )
+                except Exception:
+                    pass
+            else:
+                # review-cron-status emits text only (launchd / macOS-only):
+                #   plist:    <path> (present|missing)
+                #   status:   loaded|not loaded
+                #   <launchctl list output, on success>
+                raw = (res.stdout or "").strip() or "(无输出)"
+                installed = "present" in raw and "loaded" in raw and "not loaded" not in raw
+                header = (
+                    "⏰ Cron 定时任务 (launchd)"
+                    if installed
+                    else "⏰ 无 cron 定时任务 (用 `af review-cron-install --times \"09:00,18:00\"` 装)"
+                )
+                # cap raw output to keep TG messages short.
+                snippet = "\n".join(raw.splitlines()[:20])[:1500]
+                body = (
+                    _render.escape_md2(header)
+                    + "\n```\n"
+                    + _render.escape_md2(snippet)
+                    + "\n```"
+                )
+                try:
+                    tg_client.send_message(
+                        chat_id, body, parse_mode="MarkdownV2"
+                    )
+                except Exception:
+                    # Fallback: plain text if MarkdownV2 escaping trips up.
+                    try:
+                        tg_client.send_message(chat_id, raw[:1500], parse_mode=None)
+                    except Exception:
+                        pass
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /jobs 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+
+        _audit({"kind": "slash_command", "cmd": "/jobs", "uid": uid})
+        return
+
+    if text.startswith("/suggestions"):
+        parts = text.split(maxsplit=1)
+        profile_id = parts[1].strip() if len(parts) > 1 else None
+        try:
+            suggestions = list_suggestions(profile_id=profile_id, status="pending")
+            body, kb = _render.render_suggestion_list(suggestions=suggestions)
+            tg_client.send_message(chat_id, body, reply_markup=kb, parse_mode="MarkdownV2")
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ suggestions failed: {err}"[:3500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        _audit({"kind": "slash_command", "cmd": "/suggestions", "uid": uid})
+        return
+
+    if text.startswith("/cancel "):
+        short_id = text[len("/cancel "):].strip()
+        try:
+            entry = _sid.resolve(short_id) if short_id else None
+            if not entry:
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ short\\_id 已失效或不存在: `{_render.escape_md2(short_id)}`",
+                    parse_mode="MarkdownV2",
+                )
+            else:
+                _sid.revoke(short_id)
+                tg_client.send_message(
+                    chat_id,
+                    f"🚫 已取消 short\\_id\\=`{_render.escape_md2(short_id)}`",
+                    parse_mode="MarkdownV2",
+                )
+        except Exception:
+            pass
+        _audit({"kind": "slash_command", "cmd": "/cancel", "uid": uid})
+        return
+
+    if _maybe_handle_profile_session_reply(
+        chat_id=chat_id,
+        uid=uid,
+        text=text,
+    ):
+        _audit({"kind": "profile_session_reply", "uid": uid})
+        return
+
+    pending = pending_edits.take(int(uid)) if uid is not None else None
+    if pending and text and not auth.is_authorized(uid, action="edit"):
+        # The uid was *cleared* of the pending edit by .take(); re-register
+        # so a teammate with the right grant can still pick it up if the
+        # operator re-routes. Cheap belt-and-suspenders.
+        try:
+            pending_edits.register(
+                uid=int(uid),
+                article_id=pending.get("article_id"),
+                gate=pending.get("gate") or "B",
+                short_id=pending.get("short_id") or "",
+                ttl_minutes=30,
+            )
+        except Exception:
+            pass
+        try:
+            tg_client.send_message(
+                chat_id,
+                f"❌ 未授权 \\(action\\=edit, uid\\=`{uid}`\\)\\. "
+                "请联系操作员授权 `edit` 动作\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+        _audit({"kind": "edit_reply_denied", "uid": uid, "pending": pending})
+        return
+    if pending and text:
+        # Q6: PR (publish-mark) — operator's reply is the Medium URL.
+        if pending.get("gate") == "PR":
+            url = (text or "").strip().split()[0] if (text or "").strip() else ""
+            if not url.startswith(("http://", "https://")):
+                try:
+                    tg_client.send_message(
+                        chat_id,
+                        "❌ URL 格式错误 (需 http/https)。重试 [📌 我已粘贴]",
+                        parse_mode=None,
+                    )
+                except Exception:
+                    pass
+                return
+            _audit({
+                "kind": "publish_mark_reply",
+                "uid": uid,
+                "article_id": pending.get("article_id"),
+                "url": url,
+            })
+            _spawn_publish_mark(pending.get("article_id"), url)
+            try:
+                tg_client.send_message(
+                    chat_id, "📌 URL 已收到, mark 中…", parse_mode=None,
+                )
+            except Exception:
+                pass
+            return
+        _audit({"kind": "edit_reply", "uid": uid, "pending": pending, "text_head": text[:60]})
+        _spawn_edit(
+            article_id=pending.get("article_id"),
+            instruction=text,
+            chat_id=chat_id,
+        )
+        try:
+            tg_client.send_message(
+                chat_id,
+                "📝 编辑指令已收到, 改写中…完成后会发新一版 Gate B 卡\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+
+
+def _handle_callback(update: dict[str, Any]) -> None:
+    cb = update.get("callback_query") or {}
+    cb_id = cb.get("id")
+    data = (cb.get("data") or "").strip()
+    msg = cb.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    sender = cb.get("from") or {}
+    uid = sender.get("id")
+    if not auth.is_authorized(uid):
+        tg_client.answer_callback_query(
+            cb_id, text=f"❌ 未授权 (uid={uid})", show_alert=True
+        )
+        _log.warning("unauthorized callback from uid=%s data=%r", uid, data)
+        _audit({"kind": "callback_unauthorized", "uid": uid, "callback_data": data})
+        return
+    parts = data.split(":", 3)
+    if len(parts) < 3:
+        tg_client.answer_callback_query(cb_id, text="格式错误", show_alert=False)
+        return
+    gate, action, sid = parts[0], parts[1], parts[2]
+    extra = parts[3] if len(parts) > 3 else ""
+
+    entry = _sid.resolve(sid)
+    if not entry:
+        # Three distinct failure modes hide behind a None resolve. Folding
+        # them into one alarming "已失效" message trains the operator to
+        # ignore real failures.
+        #   (a) Recently soft-revoked → action already ran, this is a replay
+        #       (TG retransmit on flaky networks; user double-click).
+        #   (b) sid present but TTL'd naturally → card sat in chat too long.
+        #   (c) sid never existed in index → daemon was down when card sent,
+        #       index file was nuked, or sid is forged.
+        if _sid.was_recently_revoked(sid, within_seconds=600.0):
+            tg_client.answer_callback_query(
+                cb_id, text="✓ 已处理（重复点击）", show_alert=False
+            )
+            _audit({"kind": "callback_replay", "callback_data": data})
+            return
+        raw = _sid.peek_raw(sid)
+        if raw is not None:
+            # Case (b): sid in index but expired (or revoked >10min ago).
+            age_hint = ""
+            try:
+                from datetime import datetime, timezone
+                ts = raw.get("expires_at") or raw.get("created_at")
+                if ts:
+                    age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds() / 3600.0
+                    age_hint = f"（{abs(age_h):.0f}h 前）"
+            except Exception:
+                pass
+            tg_client.answer_callback_query(
+                cb_id,
+                text=f"卡片已超时{age_hint}，用 /list 查看可操作卡片",
+                show_alert=True,
+            )
+            _audit({"kind": "callback_ttl_expired", "callback_data": data, "raw_gate": raw.get("gate")})
+        else:
+            # Case (c): sid completely unknown.
+            tg_client.answer_callback_query(
+                cb_id,
+                text="未知按键（sid 不在索引中）。daemon 可能重启过——用 /list 查看当前活动卡片",
+                show_alert=True,
+            )
+            _audit({"kind": "callback_unknown_sid", "callback_data": data})
+        return
+    # PD:* (dispatch-preview confirm chain) reuses the D-gate sid minted at
+    # post_gate_d time, so we accept "PD" callbacks against gate=="D" entries.
+    entry_gate = entry.get("gate")
+    if entry_gate != gate and not (gate == "PD" and entry_gate == "D"):
+        tg_client.answer_callback_query(cb_id, text="gate 不匹配", show_alert=True)
+        return
+
+    _audit({
+        "kind": "callback",
+        "gate": gate,
+        "action": action,
+        "short_id": sid,
+        "extra": extra,
+        "entry": entry,
+        "chat_id": chat_id,
+        "message_id": message_id,
+    })
+
+    try:
+        _route(gate, action, sid, extra, entry, cb_id, chat_id, message_id, uid)
+    except Exception as err:  # pragma: no cover
+        _log.exception("callback routing failed: %s", err)
+        tg_client.answer_callback_query(
+            cb_id, text=f"处理失败: {err}"[:180], show_alert=True
+        )
+
+
+# KNOWN STUB CALLBACKS — these go through the catch-all "已记录" branch at
+# the end of _route. Buttons appear but pressing them does NOT change state
+# or trigger any code path. Wire them up before relying on them in flows:
+#   A:expand / A:defer / B:diff / B:defer
+#   C:regen / C:relogo / C:full / C:defer
+# (mirrored in templates/state_machine.md → "Known stubs" section).
+#
+# (gate, action) → required action verb. Anything not in this map falls
+# through to the legacy "any authorized uid is fine" check (safe default
+# since unmapped actions are stubs that don't mutate state).
+_ACTION_REQ: dict[tuple[str, str], str] = {
+    ("P", "start"): "review",
+    ("P", "later"): "review",
+    ("S", "review"): "review",
+    ("S", "apply"): "review",
+    ("S", "dismiss"): "review",
+    ("A", "write"): "write",
+    ("A", "reject_all"): "review",
+    ("A", "expand"): "review",
+    ("A", "defer"): "review",
+    ("B", "approve"): "review",
+    ("B", "reject"): "review",
+    ("B", "rewrite"): "edit",
+    ("B", "edit"): "edit",
+    ("B", "diff"): "review",
+    ("B", "defer"): "review",
+    ("C", "approve"): "review",
+    ("C", "skip"): "review",
+    ("C", "regen"): "image",
+    ("C", "relogo"): "image",
+    ("C", "full"): "review",
+    ("C", "defer"): "review",
+    # Gate D — channel selection. ``confirm`` requires ``publish`` because it
+    # actually fires the D4 dispatch (LinkedIn / Twitter / webhook). Toggle +
+    # cancel are review-level actions (no live writes).
+    ("D", "toggle"): "review",
+    ("D", "confirm"): "publish",
+    ("D", "cancel"): "review",
+    ("D", "retry"): "publish",
+    # Gate D quick-select / save-default / resume / extend (Q1/Q2/Q5/Q6).
+    # All four mutate UI/metadata only — no live publish — so review-grade.
+    ("D", "select_all"):   "review",
+    ("D", "clear_all"):    "review",
+    ("D", "save_default"): "review",
+    ("D", "resume"):       "review",
+    ("D", "extend"):       "review",
+    # PD:* — preview-confirm chain spawned by D:confirm. ``dispatch`` is the
+    # actual publish trigger (publish-grade); ``cancel`` rewinds without
+    # firing D4 (review-grade).
+    ("PD", "dispatch"):    "publish",
+    ("PD", "cancel"):      "review",
+    # Gate L — manual takeover after rewrite-round limit (>=2). critique +
+    # give_up are review-level; edit needs the ``edit`` grant since the next
+    # plain-text reply is parsed as an edit instruction.
+    ("L", "critique"): "review",
+    ("L", "edit"): "edit",
+    ("L", "give_up"): "review",
+    # Image-gate picker (soft prompt sent after Gate B ✅). cover_only /
+    # cover_plus_body actually fire `af image-gate`, so they need the image
+    # grant. ``none`` just walks state to image_skipped + posts Gate D.
+    ("I", "cover_only"): "image",
+    ("I", "cover_plus_body"): "image",
+    ("I", "none"): "review",
+    # Q6 — publish-mark entry. Captures Medium URL after manual paste; the
+    # follow-up plain-text reply is handled by ``_handle_message`` (PR gate).
+    ("PR", "mark"): "publish",
+}
+
+
+def _route(
+    gate: str,
+    action: str,
+    sid: str,
+    extra: str,
+    entry: dict[str, Any],
+    cb_id: str,
+    chat_id: int | None,
+    message_id: int | None,
+    uid: int | None = None,
+) -> None:
+    article_id = entry.get("article_id")
+
+    required = _ACTION_REQ.get((gate, action))
+    if required is not None and not auth.is_authorized(uid, action=required):
+        tg_client.answer_callback_query(
+            cb_id,
+            text=f"❌ 未授权 (action={required}, uid={uid})",
+            show_alert=True,
+        )
+        _log.warning(
+            "callback action denied: gate=%s action=%s required=%s uid=%s",
+            gate, action, required, uid,
+        )
+        _audit({
+            "kind": "callback_action_denied",
+            "gate": gate,
+            "action": action,
+            "required": required,
+            "uid": uid,
+            "short_id": sid,
+        })
+        return
+
+    # Gate A — pick a slot and kick off the write+fill pipeline as a
+    # background subprocess. The Gate B card lands automatically when fill
+    # completes (af fill has the auto-trigger glue).
+    if gate == "A" and action == "write":
+        batch_path = entry.get("batch_path")
+        if not batch_path:
+            tg_client.answer_callback_query(cb_id, text="批次缺失", show_alert=True)
+            return
+        slot = 0
+        if extra and extra.startswith("slot="):
+            try:
+                slot = int(extra.split("=", 1)[1])
+            except ValueError:
+                slot = 0
+        try:
+            with open(batch_path, "r", encoding="utf-8") as fh:
+                batch_data = json.load(fh)
+        except Exception as err:
+            tg_client.answer_callback_query(
+                cb_id, text=f"批次读取失败: {err}"[:180], show_alert=True
+            )
+            return
+        hotspots = batch_data.get("hotspots") or []
+        if slot >= len(hotspots):
+            tg_client.answer_callback_query(cb_id, text="slot 越界", show_alert=True)
+            return
+        hotspot_id = (hotspots[slot] or {}).get("id")
+        if not hotspot_id:
+            tg_client.answer_callback_query(cb_id, text="hotspot id 缺失", show_alert=True)
+            return
+        _audit({
+            "kind": "spawn_write",
+            "hotspot_id": hotspot_id,
+            "slot": slot,
+            "batch_path": batch_path,
+        })
+        _spawn_write_and_fill(hotspot_id)
+        tg_client.answer_callback_query(cb_id, text=f"#{slot + 1} 起稿中… 完成后会推 Gate B")
+        # Disable buttons on the card so the user doesn't double-click.
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        return
+
+    if gate == "A" and action == "reject_all":
+        # Hotspots haven't become articles yet, so there's no article_id to
+        # transition. Instead we flag every hotspot in the batch with
+        # ``status="rejected_batch"`` so the next ``af hotspots`` scan skips
+        # them. Errors here MUST NOT crash the daemon — we degrade to an
+        # audit-only ack so the user still gets feedback.
+        batch_path = entry.get("batch_path")
+        rejected_count = 0
+        io_err: str | None = None
+        if batch_path:
+            try:
+                with open(batch_path, "r", encoding="utf-8") as fh:
+                    batch_data = json.load(fh) or {}
+                hotspots = batch_data.get("hotspots") or []
+                if isinstance(hotspots, list):
+                    for hs in hotspots:
+                        if isinstance(hs, dict):
+                            hs["status"] = "rejected_batch"
+                            rejected_count += 1
+                    batch_data["hotspots"] = hotspots
+                    with open(batch_path, "w", encoding="utf-8") as fh:
+                        json.dump(batch_data, fh, ensure_ascii=False, indent=2)
+            except Exception as err:  # graceful: never raise
+                io_err = str(err)[:200]
+                _log.warning(
+                    "A:reject_all batch write failed (path=%s): %s",
+                    batch_path, err,
+                )
+        else:
+            io_err = "missing batch_path"
+
+        _audit({
+            "kind": "batch_rejected",
+            "batch_path": batch_path,
+            "hotspot_count": rejected_count,
+            "uid": uid,
+            "short_id": sid,
+            **({"io_error": io_err} if io_err else {}),
+        })
+
+        _sid.revoke(sid)
+        if io_err:
+            tg_client.answer_callback_query(
+                cb_id,
+                text="⚠️ 已记录但 batch 文件读失败"[:180],
+                show_alert=False,
+            )
+        else:
+            tg_client.answer_callback_query(
+                cb_id, text=f"🚫 整批已拒绝 ({rejected_count})"
+            )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        return
+
+    if gate == "P" and action == "start":
+        session_path = entry.get("batch_path")
+        if not session_path:
+            tg_client.answer_callback_query(cb_id, text="session 缺失", show_alert=True)
+            return
+        try:
+            session = load_session(Path(session_path).stem)
+        except Exception as err:
+            tg_client.answer_callback_query(cb_id, text=f"session 读取失败: {err}"[:180], show_alert=True)
+            return
+        session["status"] = "collecting"
+        session["active_uid"] = uid
+        session["active_chat_id"] = chat_id
+        session["step_index"] = 0
+        save_session(session)
+        tg_client.answer_callback_query(cb_id, text="开始采集 profile 约束")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _send_profile_setup_question(session)
+        return
+
+    if gate == "P" and action == "later":
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="稍后再补 profile")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        return
+
+    if gate == "S" and action == "review":
+        suggestion_id = str((entry.get("extra") or {}).get("suggestion_id") or "")
+        if not suggestion_id:
+            tg_client.answer_callback_query(cb_id, text="suggestion 缺失", show_alert=True)
+            return
+        try:
+            payload = review_suggestion(suggestion_id)
+            text, kb, _ = _render.render_suggestion_review(
+                suggestion=payload["suggestion"],
+                preview_profile=payload["preview_profile"],
+            )
+            if chat_id is not None:
+                tg_client.send_message(chat_id, text, reply_markup=kb, parse_mode="MarkdownV2")
+            tg_client.answer_callback_query(cb_id, text="已打开 suggestion review")
+        except Exception as err:
+            tg_client.answer_callback_query(cb_id, text=f"review 失败: {err}"[:180], show_alert=True)
+        return
+
+    if gate == "S" and action == "apply":
+        suggestion_id = str((entry.get("extra") or {}).get("suggestion_id") or "")
+        if not suggestion_id:
+            tg_client.answer_callback_query(cb_id, text="suggestion 缺失", show_alert=True)
+            return
+        try:
+            payload = apply_suggestion(suggestion_id)
+            profile_id = str(payload["suggestion"].get("profile_id") or "?")
+            tg_client.answer_callback_query(cb_id, text="✅ suggestion 已应用")
+            if chat_id is not None:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"✅ Applied suggestion {suggestion_id} to profile {profile_id}."),
+                    parse_mode="MarkdownV2",
+                )
+            if chat_id is not None and message_id is not None:
+                try:
+                    tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+                except Exception:
+                    pass
+            _sid.revoke(sid)
+        except Exception as err:
+            tg_client.answer_callback_query(cb_id, text=f"apply 失败: {err}"[:180], show_alert=True)
+        return
+
+    if gate == "S" and action == "dismiss":
+        suggestion_id = str((entry.get("extra") or {}).get("suggestion_id") or "")
+        if not suggestion_id:
+            tg_client.answer_callback_query(cb_id, text="suggestion 缺失", show_alert=True)
+            return
+        try:
+            update_suggestion_status(suggestion_id, "dismissed")
+            tg_client.answer_callback_query(cb_id, text="已忽略 suggestion")
+            if chat_id is not None and message_id is not None:
+                try:
+                    tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+                except Exception:
+                    pass
+            _sid.revoke(sid)
+        except Exception as err:
+            tg_client.answer_callback_query(cb_id, text=f"dismiss 失败: {err}"[:180], show_alert=True)
+        return
+
+    # Gate B
+    if gate == "B" and action == "approve" and article_id:
+        state.transition(
+            article_id,
+            gate="B",
+            to_state=state.STATE_DRAFT_APPROVED,
+            actor="human",
+            decision="approve",
+            tg_chat_id=chat_id,
+            tg_message_id=message_id,
+            callback_data=f"{gate}:{action}:{sid}",
+        )
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="✅ 草稿已通过")
+        if chat_id is not None and message_id is not None:
+            tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+        # Q3/Q4: send image-gate picker card (soft prompt, can be ignored).
+        # State stays at draft_approved until the user picks a mode or runs
+        # `af image-gate` from the CLI.
+        _spawn_image_gate_picker(article_id)
+        return
+
+    if gate == "B" and action == "reject" and article_id:
+        state.transition(
+            article_id,
+            gate="B",
+            to_state=state.STATE_DRAFT_REJECTED,
+            actor="human",
+            decision="reject",
+            tg_chat_id=chat_id,
+            tg_message_id=message_id,
+            callback_data=f"{gate}:{action}:{sid}",
+        )
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="🚫 草稿已拒绝", show_alert=True)
+        if chat_id is not None and message_id is not None:
+            tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+        return
+
+    # Gate C
+    if gate == "C" and action == "approve" and article_id:
+        state.transition(
+            article_id,
+            gate="C",
+            to_state=state.STATE_IMAGE_APPROVED,
+            actor="human",
+            decision="approve",
+            tg_chat_id=chat_id,
+            tg_message_id=message_id,
+            callback_data=f"{gate}:{action}:{sid}",
+        )
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="✅ 封面已通过, 选择分发渠道…")
+        if chat_id is not None and message_id is not None:
+            tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+        # Auto-advance: post the Gate D channel-selection card. The user
+        # toggles channels then clicks Confirm to fire the actual dispatch.
+        # Runs in a daemon thread so the callback handler returns fast.
+        _spawn_gate_d(article_id)
+        return
+
+    if gate == "C" and action == "skip" and article_id:
+        state.transition(
+            article_id,
+            gate="C",
+            to_state=state.STATE_IMAGE_SKIPPED,
+            actor="human",
+            decision="skip",
+            tg_chat_id=chat_id,
+            tg_message_id=message_id,
+            callback_data=f"{gate}:{action}:{sid}",
+        )
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="🚫 不用图, 选择分发渠道…")
+        if chat_id is not None and message_id is not None:
+            tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+        # Gate D still fires after image_skipped — user picks channels even
+        # without a cover.
+        _spawn_gate_d(article_id)
+        return
+
+    # Gate C — 🔁 re-run AtlasCloud cover generation (overwrites cover.png).
+    # The CLI's image-gate command self-triggers post_gate_c when generation
+    # finishes, so a fresh Gate C card lands automatically.
+    if gate == "C" and action == "regen" and article_id:
+        tg_client.answer_callback_query(cb_id, text="🔁 重跑 Atlas (cover-only)…")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_image_gate(article_id, mode="cover-only")
+        return
+
+    # Gate C — 🎨 cycle the brand_overlay anchor on the existing cover (no
+    # AtlasCloud re-call). Re-applies the wordmark at the next anchor in the
+    # cycle and re-posts Gate C.
+    if gate == "C" and action == "relogo" and article_id:
+        tg_client.answer_callback_query(cb_id, text="🎨 重叠 logo (cycle anchor)…")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_relogo(article_id)
+        return
+
+    # Gate D — channel selection (multi-select toggle + confirm/cancel)
+    if gate == "D" and action == "toggle" and article_id:
+        if not extra.startswith("p="):
+            tg_client.answer_callback_query(cb_id, text="格式错误", show_alert=False)
+            return
+        platform = extra.split("=", 1)[1]
+        bag = entry.get("extra") or {}
+        available = list(bag.get("available") or [])
+        if platform not in available:
+            tg_client.answer_callback_query(
+                cb_id, text=f"{platform} 不可用", show_alert=True
+            )
+            return
+        selected = set(bag.get("selected") or [])
+        if platform in selected:
+            selected.discard(platform)
+            now_on = False
+        else:
+            selected.add(platform)
+            now_on = True
+        # Persist back into the short_id entry so the next click sees the
+        # updated state, then edit the keyboard in place. We only need the
+        # markup — body text is unchanged on toggles.
+        _sid.set_extra(sid, "selected", sorted(selected))
+        try:
+            _, kb = _render.render_gate_d(
+                article_id=article_id, title="",
+                available=available, selected=selected, short_id=sid,
+            )
+            if chat_id is not None and message_id is not None:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup=kb)
+        except Exception as err:  # pragma: no cover
+            _log.warning("gate D toggle re-render failed: %s", err)
+        tg_client.answer_callback_query(
+            cb_id, text=f"切换 {platform}: {'on' if now_on else 'off'}"
+        )
+        return
+
+    # Gate D quick-select / quick-clear (Q1) — flips ``selected`` to either
+    # the full ``available`` list or empty, persists via set_extra, and
+    # re-renders the keyboard in place (same body text). Mirrors the toggle
+    # branch but bulk.
+    if gate == "D" and action in {"select_all", "clear_all"} and article_id:
+        bag = entry.get("extra") or {}
+        available = list(bag.get("available") or [])
+        if action == "select_all":
+            selected = list(available)
+            msg = f"⚡ 全选 ({len(selected)} 平台)"
+        else:
+            selected = []
+            msg = "✖ 已清空"
+        _sid.set_extra(sid, "selected", sorted(selected))
+        try:
+            _, kb = _render.render_gate_d(
+                article_id=article_id, title="",
+                available=available, selected=set(selected), short_id=sid,
+            )
+            if chat_id is not None and message_id is not None:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup=kb,
+                )
+        except Exception as err:
+            _log.warning("gate D %s re-render failed: %s", action, err)
+        tg_client.answer_callback_query(cb_id, text=msg)
+        return
+
+    # Gate D save-as-default (Q2) — writes the current ``selected`` set into
+    # metadata.metadata_overrides.gate_d.default_platforms so future Gate D
+    # cards for this article preselect the same set. Read-modify-write of
+    # metadata.json; failures are surfaced as a callback toast (no crash).
+    if gate == "D" and action == "save_default" and article_id:
+        bag = entry.get("extra") or {}
+        selected = list(bag.get("selected") or [])
+        if not selected:
+            tg_client.answer_callback_query(
+                cb_id, text="⚠ 当前未选任何渠道", show_alert=True,
+            )
+            return
+        try:
+            meta_path = (
+                agentflow_home() / "drafts" / article_id / "metadata.json"
+            )
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) or {}
+            meta.setdefault("metadata_overrides", {}).setdefault(
+                "gate_d", {}
+            )["default_platforms"] = list(selected)
+            meta_path.write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            _audit({
+                "kind": "gate_d_save_default",
+                "article_id": article_id,
+                "platforms": list(selected),
+            })
+            tg_client.answer_callback_query(
+                cb_id,
+                text=f"✅ 已保存默认 ({len(selected)} 平台)",
+                show_alert=False,
+            )
+        except Exception as err:
+            _log.warning("gate D save_default failed: %s", err)
+            tg_client.answer_callback_query(
+                cb_id, text=f"❌ 保存失败: {err}"[:180],
+            )
+        return
+
+    # Gate D confirm (Q4) — does NOT directly fire publish anymore. Instead
+    # we spawn a dispatch-preview card (PD:dispatch / PD:cancel) that reuses
+    # the same sid. State stays at channel_pending_review until the operator
+    # makes the real decision on the preview card.
+    if gate == "D" and action == "confirm" and article_id:
+        bag = entry.get("extra") or {}
+        selected = list(bag.get("selected") or [])
+        if not selected:
+            tg_client.answer_callback_query(
+                cb_id, text="请至少选一个渠道", show_alert=True
+            )
+            return
+        tg_client.answer_callback_query(
+            cb_id, text="📋 生成 dispatch preview…",
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        # IMPORTANT: do NOT revoke sid — the preview card's PD:* buttons
+        # need the same sid to resolve back to this Gate D entry.
+        _spawn_dispatch_preview(article_id, selected, short_id=sid)
+        return
+
+    # Gate D cancel (Q5) — instead of just clearing the keyboard, edit (or
+    # send) a "🚫 已取消" notice with a [🔄 恢复 Gate D] button so the user
+    # can recover without leaving the chat. State still rewinds to
+    # image_approved, but the sid is NOT fully revoked yet — D:resume reads
+    # article_id back from it.
+    if gate == "D" and action == "cancel" and article_id:
+        try:
+            state.transition(
+                article_id,
+                gate="D",
+                to_state=state.STATE_IMAGE_APPROVED,
+                actor="human",
+                decision="cancel",
+                tg_chat_id=chat_id,
+                tg_message_id=message_id,
+                callback_data=f"{gate}:{action}:{sid}",
+                force=True,
+            )
+        except state.StateError as err:
+            _log.warning("Gate D cancel transition failed: %s", err)
+        # soft-revoke so PD:* / D:toggle on the original card no longer
+        # resolve, but mint a fresh sid for the resume button (so it never
+        # races the revoke window).
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="🚫 已取消 Gate D")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+            try:
+                resume_sid = _sid.register(
+                    gate="D",
+                    article_id=article_id,
+                    ttl_hours=12,
+                    extra={"resume_only": True},
+                )
+                resume_text = (
+                    f"🚫 已取消 Gate D · article=`{_render.escape_md2(article_id)}`\n\n"
+                    "点 🔄 恢复重新选择渠道。"
+                )
+                resume_kb = {
+                    "inline_keyboard": [[
+                        {
+                            "text": "🔄 恢复 Gate D",
+                            "callback_data": f"D:resume:{resume_sid}",
+                        }
+                    ]]
+                }
+                tg_client.send_message(
+                    chat_id, resume_text, reply_markup=resume_kb,
+                    parse_mode="MarkdownV2",
+                )
+            except Exception as err:
+                _log.warning("Gate D cancel resume-card send failed: %s", err)
+        return
+
+    # Gate D resume (Q5 follow-up) — rebuild a fresh Gate D card. State is
+    # already at image_approved (the cancel branch put it there); post_gate_d
+    # walks it back to channel_pending_review.
+    if gate == "D" and action == "resume" and article_id:
+        tg_client.answer_callback_query(cb_id, text="🔄 恢复 Gate D…")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_gate_d(article_id)
+        return
+
+    # Gate D extend (Q6) — operator-driven 12h extension after the auto-
+    # cancel ping has fired. Max 1 extension per article (extended_count
+    # field on timeout_state). Resets the per-article timeout markers
+    # (first_pinged_at / second_action_taken_at) so the sweeper restarts
+    # the clock, force-rewinds state back to channel_pending_review, and
+    # re-posts a fresh Gate D card.
+    if gate == "D" and action == "extend" and article_id:
+        try:
+            state_data = timeout_state._read()
+        except Exception as err:
+            _log.warning("Gate D extend read state failed: %s", err)
+            state_data = {}
+        art_state = dict(state_data.get(article_id) or {})
+        if int(art_state.get("extended_count", 0)) >= 1:
+            tg_client.answer_callback_query(
+                cb_id, text="⚠ 已延期过 1 次, 不可再延", show_alert=True,
+            )
+            return
+        art_state["extended_count"] = int(art_state.get("extended_count", 0)) + 1
+        art_state.pop("second_action_taken_at", None)
+        art_state.pop("first_pinged_at", None)
+        try:
+            state_data[article_id] = art_state
+            timeout_state._write(state_data)
+        except Exception as err:
+            _log.warning("Gate D extend write state failed: %s", err)
+        try:
+            state.transition(
+                article_id, gate="D",
+                to_state=state.STATE_CHANNEL_PENDING_REVIEW,
+                actor="human", decision="extend_timeout",
+                force=True,
+            )
+        except state.StateError as err:
+            _log.warning("Gate D extend transition failed: %s", err)
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(
+            cb_id, text="✅ 已延 12h, 重新计时", show_alert=False,
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        _spawn_gate_d(article_id)
+        return
+
+    # Dispatch-preview confirm chain (Q4) — PD:dispatch is the real publish
+    # trigger; PD:cancel rewinds the same way as D:cancel.
+    if gate == "PD" and action == "dispatch" and article_id:
+        bag = entry.get("extra") or {}
+        selected = list(bag.get("selected") or [])
+        if not selected:
+            tg_client.answer_callback_query(
+                cb_id, text="⚠ 没有选中渠道", show_alert=True,
+            )
+            return
+        tg_client.answer_callback_query(
+            cb_id, text=f"🚀 分发中... {', '.join(selected)}",
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_publish_dispatch(article_id, selected)
+        return
+
+    if gate == "PD" and action == "cancel" and article_id:
+        try:
+            state.transition(
+                article_id, gate="D", to_state=state.STATE_IMAGE_APPROVED,
+                actor="human", decision="preview_cancel", force=True,
+            )
+        except state.StateError as err:
+            _log.warning("PD cancel transition failed: %s", err)
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(
+            cb_id, text="🚫 已取消 (preview)", show_alert=True,
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        return
+
+    if gate == "D" and action == "retry" and article_id:
+        bag = entry.get("extra") or {}
+        failed = list(bag.get("failed") or [])
+        if not failed:
+            tg_client.answer_callback_query(
+                cb_id, text="无失败渠道可重试", show_alert=True
+            )
+            return
+        tg_client.answer_callback_query(
+            cb_id, text=f"🔁 重试中: {', '.join(failed)}"
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_publish_retry(article_id, failed)
+        return
+
+    # Image-gate picker (soft prompt sent after Gate B ✅). Each branch just
+    # spawns ``af image-gate <aid> --mode <X>`` — the CLI's own glue
+    # transitions state and posts Gate C / Gate D when it finishes.
+    if (
+        gate == "I"
+        and action in {"cover_only", "cover_plus_body", "none"}
+        and article_id
+    ):
+        mode_map = {
+            "cover_only": "cover-only",
+            "cover_plus_body": "cover-plus-body",
+            "none": "none",
+        }
+        mode = mode_map[action]
+        tg_client.answer_callback_query(cb_id, text=f"📸 image-gate mode={mode}…")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_image_gate(article_id, mode=mode)
+        return
+
+    # Gate B — 🔁 rewrite: re-fill the same article with stored title/opening/closing.
+    # After 2 prior rewrite rounds (i.e. count>=2 on the 3rd click), bump the
+    # article to drafting_locked_human and fire the manual-takeover card
+    # instead of running another fill.
+    if gate == "B" and action == "rewrite" and article_id:
+        try:
+            history = state.gate_history(article_id) or []
+        except Exception as err:
+            _log.warning("gate_history read failed for %s: %s", article_id, err)
+            history = []
+        rewrite_count = sum(
+            1 for h in history
+            if isinstance(h, dict) and h.get("decision") == "rewrite_round"
+        )
+        if rewrite_count >= 2:
+            try:
+                state.transition(
+                    article_id,
+                    gate="B",
+                    to_state=state.STATE_DRAFTING_LOCKED_HUMAN,
+                    actor="daemon",
+                    decision="locked_takeover_after_rewrites",
+                    tg_chat_id=chat_id,
+                    tg_message_id=message_id,
+                    callback_data=f"{gate}:{action}:{sid}",
+                    notes=f"rewrite_count={rewrite_count}",
+                    force=True,
+                )
+            except state.StateError as err:
+                _log.warning("locked transition failed for %s: %s", article_id, err)
+            _sid.revoke(sid)
+            tg_client.answer_callback_query(
+                cb_id,
+                text="🔒 已重写 2 次，转 manual takeover",
+                show_alert=True,
+            )
+            if chat_id is not None and message_id is not None:
+                try:
+                    tg_client.edit_message_reply_markup(
+                        chat_id, message_id, reply_markup={}
+                    )
+                except Exception:
+                    pass
+            _spawn_locked_takeover(article_id)
+            return
+        # Round 1 (count==0) or round 2 (count==1) — normal rewrite path,
+        # with a heads-up on the second click that the next round will lock.
+        warning = " ⚠ 下一轮起 manual takeover" if rewrite_count == 1 else ""
+        tg_client.answer_callback_query(
+            cb_id, text=f"🔁 重写中… 完成后发新一版 Gate B{warning}",
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        _sid.revoke(sid)
+        _spawn_rewrite(article_id)
+        return
+
+    # Gate B — ✏️ edit: register a pending-edit entry; the user's NEXT plain-text
+    # reply will be parsed as the edit instruction.
+    if gate == "B" and action == "edit" and article_id:
+        # Fall back to chat_id (DM uid == chat_id)
+        edit_uid = uid
+        if edit_uid is None and chat_id is not None:
+            edit_uid = int(chat_id)
+        if edit_uid is None:
+            tg_client.answer_callback_query(
+                cb_id, text="无法识别用户 (uid 缺失)", show_alert=True,
+            )
+            return
+        pending_edits.register(
+            uid=int(edit_uid),
+            article_id=article_id,
+            gate="B",
+            short_id=sid,
+            ttl_minutes=30,
+        )
+        tg_client.answer_callback_query(
+            cb_id,
+            text="✏️ 请回复: <scope> <改写指令> (scope=title/opening/closing/整数)",
+        )
+        try:
+            tg_client.send_message(
+                chat_id,
+                "✏️ 编辑模式\\. 请回复一条消息, 格式:\n"
+                "`<scope> <改写指令>`\n"
+                "scope 可以是: `title` / `opening` / `closing` / 第几节的整数 \\(0\\-based\\)\n\n"
+                "例:\n"
+                "• `title 标题再尖锐一点`\n"
+                "• `opening 开头加一个数据点`\n"
+                "• `closing 结尾收得更狠一点`\n"
+                "• `2 第二节改得更口语化`\n\n"
+                "30 分钟内有效, 之后会自动作废\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+        return
+
+    # Manual takeover (L:*) — fires after rewrite round-limit reached. The
+    # article state is already drafting_locked_human at this point.
+    if gate == "L" and action == "critique" and article_id:
+        tg_client.answer_callback_query(cb_id, text="🧠 critique 中…")
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        # Do NOT revoke sid here — operator may still click L:edit / L:give_up
+        # on the takeover card. (sid is L-gate, ttl=30 days.)
+        _spawn_locked_critique(article_id)
+        return
+
+    if gate == "L" and action == "edit" and article_id:
+        uid_l = uid
+        if uid_l is None and chat_id is not None:
+            uid_l = int(chat_id)
+        if uid_l is None:
+            tg_client.answer_callback_query(
+                cb_id, text="无法识别用户 (uid 缺失)", show_alert=True,
+            )
+            return
+        try:
+            pending_edits.register(
+                uid=int(uid_l),
+                article_id=article_id,
+                gate="L",
+                short_id=sid,
+                ttl_minutes=999999,  # essentially永久 — manual takeover has no TTL
+            )
+        except Exception as err:
+            _log.warning("L:edit pending_edits register failed: %s", err)
+        tg_client.answer_callback_query(
+            cb_id,
+            text="✏️ 请回复: <scope> <改写指令> (永久窗口)",
+        )
+        try:
+            tg_client.send_message(
+                chat_id,
+                "✏️ Manual takeover 编辑模式\\. 请回复一条消息, 格式:\n"
+                "`<scope> <改写指令>`\n"
+                "scope 可以是: `title` / `opening` / `closing` / 第几节的整数 \\(0\\-based\\)\\.\n"
+                "无 TTL — 任何时候 reply 都会处理\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+        return
+
+    if gate == "L" and action == "give_up" and article_id:
+        try:
+            state.transition(
+                article_id,
+                gate="L",
+                to_state=state.STATE_DRAFT_REJECTED,
+                actor="human",
+                decision="give_up",
+                tg_chat_id=chat_id,
+                tg_message_id=message_id,
+                callback_data=f"{gate}:{action}:{sid}",
+                force=True,
+            )
+        except state.StateError as err:
+            _log.warning("give_up transition failed: %s", err)
+        _sid.revoke(sid)
+        tg_client.answer_callback_query(cb_id, text="🚫 已放弃", show_alert=True)
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
+            except Exception:
+                pass
+        return
+
+    # Q6 — publish-mark callback. Registers a no-TTL pending_edits entry
+    # under gate="PR"; the operator's next plain-text reply (the Medium URL)
+    # is consumed by ``_handle_message`` and dispatched to mark_published.
+    if gate == "PR" and action == "mark" and article_id:
+        pr_uid = uid
+        if pr_uid is None and chat_id is not None:
+            pr_uid = int(chat_id)
+        if pr_uid is None:
+            tg_client.answer_callback_query(
+                cb_id, text="无法识别用户 (uid 缺失)", show_alert=True,
+            )
+            return
+        try:
+            pending_edits.register(
+                uid=int(pr_uid),
+                article_id=article_id,
+                gate="PR",
+                short_id=sid,
+                ttl_minutes=999999,  # essentially永久 — manual paste has no TTL
+            )
+        except Exception as err:
+            _log.warning("PR:mark pending_edits register failed: %s", err)
+        tg_client.answer_callback_query(
+            cb_id, text="📌 请回复 URL (复制 medium 浏览器地址)",
+        )
+        try:
+            tg_client.send_message(
+                chat_id,
+                "📌 *Publish Mark 模式*\n\n"
+                "请回复 medium 文章 URL（http\\:// 或 https\\://）\\.\n"
+                "无 TTL — 任何时候 reply 都会处理\\.",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+        return
+
+    # Defer / expand / diff / full / regen / relogo are still stubs — these
+    # are usability sugar, not blocking the core publish loop.
+    tg_client.answer_callback_query(
+        cb_id, text=f"{action} 已记录（动作链下一轮接通）", show_alert=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+
+_STOP = threading.Event()
+
+
+def _notify_spawn_failure(
+    label: str,
+    target_id: str,
+    returncode: int | None,
+    stderr_tail: str,
+) -> None:
+    """Best-effort TG notification when a spawned subprocess fails.
+
+    Without this, subprocess crashes / timeouts only land in the daemon log;
+    the operator just sees their card never appear. This surfaces failures
+    in-band so they know to investigate. Never raises (best-effort).
+    """
+    try:
+        chat_id = get_review_chat_id()
+        if chat_id is None:
+            return
+        rc = "timeout/oserr" if returncode is None else str(returncode)
+        tail = (stderr_tail or "").strip()
+        tail = tail[-500:] if tail else "(no stderr)"
+        text = (
+            f"❌ {label} 失败  ·  target={target_id} exit={rc}\n\n"
+            f"{tail}"
+        )
+        # parse_mode=None avoids Markdown-escape headaches for arbitrary stderr.
+        tg_client.send_message(chat_id, text, parse_mode=None)
+        _audit({
+            "kind": "spawn_failure",
+            "label": label,
+            "target_id": target_id,
+            "returncode": returncode,
+            "stderr_tail": tail,
+        })
+    except Exception as err:  # pragma: no cover — must never raise
+        _log.warning("spawn failure notify failed: %s", err)
+
+
+def _spawn_rewrite(article_id: str) -> None:
+    """Re-run `af fill` on the same article with the stored title/opening/closing
+    indices. After fill completes, the existing Gate B auto-trigger fires a
+    fresh review card.
+    """
+    import json
+    import subprocess
+    import sys
+
+    def _run() -> None:
+        try:
+            meta_path = (
+                agentflow_home() / "drafts" / article_id / "metadata.json"
+            )
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) or {}
+            t = int(meta.get("chosen_title_index", 0) or 0)
+            o = int(meta.get("chosen_opening_index", 0) or 0)
+            c = int(meta.get("chosen_closing_index", 0) or 0)
+            # Force state back to drafting so the post_gate_b state advance
+            # walks cleanly to draft_pending_review again. (transition is
+            # idempotent; guarded by force=True in triggers._ensure_state.)
+            try:
+                state.transition(
+                    article_id, gate="B",
+                    to_state=state.STATE_DRAFTING,
+                    actor="daemon", decision="rewrite_round",
+                    notes="rewrite via TG 🔁",
+                    force=True,
+                )
+            except state.StateError:
+                pass
+            from agentflow.agent_review.triggers import _af_argv
+            try:
+                result = subprocess.run(
+                    _af_argv(
+                        "fill", article_id,
+                        "--title", str(t), "--opening", str(o), "--closing", str(c),
+                    ),
+                    env=os.environ.copy(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                _notify_spawn_failure(
+                    "rewrite", article_id, None, "timeout"
+                )
+                return
+            if result.returncode != 0:
+                _notify_spawn_failure(
+                    "rewrite",
+                    article_id,
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+        except Exception as err:  # pragma: no cover
+            _log.warning("rewrite subprocess crashed for %s: %s", article_id, err)
+            _notify_spawn_failure("rewrite", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_edit(article_id: str | None, instruction: str, chat_id: int | str | None) -> None:
+    """Parse an inbound edit reply, run `af edit`, and post a fresh Gate B.
+
+    Scope tokens supported:
+        - ``title`` / ``opening`` / ``closing`` — meta-level rewrites
+        - non-negative integer N — section-level rewrite (legacy)
+    """
+    import re as _re
+    import subprocess
+    import sys
+
+    if not article_id or not instruction:
+        return
+    text = instruction.strip()
+    m = _re.match(
+        r"^(title|opening|closing|\d+)\s+(.*)$",
+        text,
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
+    if not m:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    "格式不对\\. 请回复:\n"
+                    "`<scope> <改写指令>`\n"
+                    "scope 可以是 `title` / `opening` / `closing` / 第几节的整数 \\(0\\-based\\)\\.\n"
+                    "例: `title 标题再尖锐一点` / `2 第二节改得更口语化`",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        return
+    scope, body = m.group(1).lower(), m.group(2).strip()
+    if scope in {"title", "opening", "closing"}:
+        edit_args = ["--target", scope, "--command", body]
+    else:
+        edit_args = ["--section", scope, "--command", body]
+
+    def _run() -> None:
+        try:
+            from agentflow.agent_review.triggers import _af_argv
+            try:
+                result = subprocess.run(
+                    _af_argv("edit", article_id, *edit_args),
+                    env=os.environ.copy(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                _notify_spawn_failure("edit", article_id or "?", None, "timeout")
+                return
+            if result.returncode != 0:
+                _notify_spawn_failure(
+                    "edit",
+                    article_id or "?",
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+                return
+            # After edit, re-trigger Gate B so the user sees the new version.
+            from agentflow.agent_review import triggers as _triggers
+            _triggers.post_gate_b(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning("edit subprocess crashed for %s: %s", article_id, err)
+            _notify_spawn_failure("edit", article_id or "?", None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_publish_ready(article_id: str) -> None:
+    """Run preview + medium-package + final TG post in a background thread."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_publish_ready(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning("publish-ready failed for %s: %s", article_id, err)
+            _notify_spawn_failure("publish-ready", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_hotspots(top_k: int = 3) -> None:
+    """Run `af hotspots` in a background thread.
+
+    The CLI auto-triggers `post_gate_a` on completion (existing behaviour),
+    so this fn just shells out and surfaces failure via _notify_spawn_failure.
+    """
+    import subprocess
+
+    def _run() -> None:
+        try:
+            from agentflow.agent_review.triggers import _af_argv
+            try:
+                result = subprocess.run(
+                    _af_argv("hotspots", "--gate-a-top-k", str(top_k)),
+                    env=os.environ.copy(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                _notify_spawn_failure("hotspots", "manual_scan", None, "timeout 300s")
+                return
+            if result.returncode != 0:
+                _notify_spawn_failure(
+                    "hotspots",
+                    "manual_scan",
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+        except Exception as err:  # pragma: no cover
+            _log.warning("hotspots subprocess crashed: %s", err)
+            _notify_spawn_failure("hotspots", "manual_scan", None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_publish_mark(article_id: str, url: str) -> None:
+    """Q6: run mark_published in a background thread.
+
+    Triggered by the operator's URL reply after a [📌 我已粘贴 + URL] click.
+    Failures (including dedupe / IO) are surfaced via _notify_spawn_failure
+    so the user always sees feedback in the TG chat.
+    """
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.mark_published(
+                article_id, published_url=url, platform="medium",
+            )
+        except Exception as err:  # pragma: no cover
+            _log.warning("mark_published failed for %s: %s", article_id, err)
+            try:
+                _notify_spawn_failure("publish-mark", article_id, None, str(err))
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_locked_takeover(article_id: str) -> None:
+    """Post the Manual Takeover card (3 buttons: critique / edit / give_up)
+    in a background thread. Fires after the rewrite round-limit kicks in."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_locked_takeover(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning("post_locked_takeover failed for %s: %s", article_id, err)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_locked_critique(article_id: str) -> None:
+    """Run LLM critique on the draft, send it to the operator, and register
+    a pending_edits entry so a follow-up reply is parsed as an edit. Runs in
+    a background thread so the L:critique callback returns immediately."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_critique(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning("post_critique failed for %s: %s", article_id, err)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_gate_d(article_id: str) -> None:
+    """Post the Gate D channel-selection card in a background thread."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_gate_d(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning("post_gate_d failed for %s: %s", article_id, err)
+            _notify_spawn_failure("gate-d", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_dispatch_preview(
+    article_id: str, selected: list[str], *, short_id: str,
+) -> None:
+    """Post the dispatch-preview card (Q4) in a background thread.
+
+    Reuses the original D-gate ``short_id`` so the preview's PD:* buttons
+    resolve back to the same Gate D entry.
+    """
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_dispatch_preview(
+                article_id, list(selected), short_id=short_id,
+            )
+        except Exception as err:  # pragma: no cover
+            _log.warning(
+                "post_dispatch_preview failed for %s: %s", article_id, err
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_image_gate(article_id: str, mode: str) -> None:
+    """Run ``af image-gate <aid> --mode <X>`` in the background. The CLI's
+    own glue self-triggers post_gate_c when generation completes (or
+    post_gate_d when ``--mode none``), so this helper just spawns and
+    surfaces failures."""
+    import subprocess
+
+    def _run() -> None:
+        try:
+            from agentflow.agent_review.triggers import _af_argv
+            try:
+                result = subprocess.run(
+                    _af_argv("image-gate", article_id, "--mode", mode),
+                    env=os.environ.copy(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                _notify_spawn_failure("image-gate", article_id, None, "timeout")
+                return
+            if result.returncode != 0:
+                _notify_spawn_failure(
+                    "image-gate",
+                    article_id,
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+        except Exception as err:  # pragma: no cover
+            _log.warning("image-gate subprocess crashed for %s: %s", article_id, err)
+            _notify_spawn_failure("image-gate", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_image_gate_picker(article_id: str) -> None:
+    """Send the image-gate picker card (Q3/Q4) in a background thread."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_image_gate_picker(article_id)
+        except Exception as err:  # pragma: no cover
+            _log.warning(
+                "post_image_gate_picker failed for %s: %s", article_id, err
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_relogo(article_id: str) -> None:
+    """Cycle brand_overlay anchor on the existing cover image (no AtlasCloud
+    re-call). Re-applies the wordmark at the next anchor in the cycle, writes
+    the updated cover.png, and re-triggers Gate C so a fresh card appears.
+
+    Anchor cycle: bottom_left → bottom_right → top_left → top_right → center
+    → bottom_left.
+    """
+    def _run() -> None:
+        try:
+            anchors = [
+                "bottom_left",
+                "bottom_right",
+                "top_left",
+                "top_right",
+                "center",
+            ]
+            meta_path = (
+                agentflow_home() / "drafts" / article_id / "metadata.json"
+            )
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                meta = {}
+
+            # Locate the cover-role placeholder + its resolved_path. This is
+            # the canonical cover image on disk (image_generator writes it).
+            cover_path: str | None = None
+            placeholders = meta.get("image_placeholders") or []
+            for ph in placeholders:
+                if isinstance(ph, dict) and ph.get("role") == "cover":
+                    cover_path = ph.get("resolved_path")
+                    break
+            if not cover_path or not Path(cover_path).exists():
+                _notify_spawn_failure(
+                    "relogo", article_id, None,
+                    "cover image not on disk (no resolved_path)",
+                )
+                return
+
+            # Pick the next anchor in the cycle, falling back to bottom_left
+            # when the current value is missing or unrecognized.
+            cur = (meta.get("brand_overlay") or {}).get("anchor") or "bottom_left"
+            try:
+                idx = anchors.index(cur)
+            except ValueError:
+                idx = -1
+            next_anchor = anchors[(idx + 1) % len(anchors)]
+
+            # Build the brand_overlay config — start from preferences (logo
+            # path + width/padding ratios) and override the anchor to the
+            # next slot in the cycle. Without a logo_path there's nothing to
+            # overlay; bail with a notify so the operator knows why.
+            try:
+                from agentflow.shared import preferences as _prefs
+                prefs = _prefs.load() or {}
+            except Exception as err:
+                _notify_spawn_failure(
+                    "relogo", article_id, None,
+                    f"preferences load failed: {err}",
+                )
+                return
+            base_cfg = (
+                ((prefs.get("image_generation") or {}).get("brand_overlay")) or {}
+            )
+            if not base_cfg.get("logo_path"):
+                _notify_spawn_failure(
+                    "relogo", article_id, None,
+                    "preferences.image_generation.brand_overlay.logo_path missing",
+                )
+                return
+            cfg = dict(base_cfg)
+            cfg["anchor"] = next_anchor
+
+            try:
+                from agentflow.agent_d2 import brand_overlay as _bo
+            except ImportError as err:
+                _notify_spawn_failure(
+                    "relogo", article_id, None,
+                    f"brand_overlay import failed: {err}",
+                )
+                return
+            try:
+                _bo.apply_overlay(cover_path, cfg)
+            except Exception as err:
+                _notify_spawn_failure("relogo", article_id, None, str(err))
+                return
+
+            # Persist the new anchor so the next 🎨 click cycles forward
+            # rather than restarting from base_cfg's default.
+            try:
+                meta.setdefault("brand_overlay", {})["anchor"] = next_anchor
+                meta["brand_overlay_applied"] = True
+                meta_path.write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as err:
+                _log.warning("relogo metadata write failed: %s", err)
+
+            try:
+                from agentflow.agent_review import triggers as _triggers
+                _triggers.post_gate_c(article_id)
+            except Exception as err:
+                _log.warning("relogo post_gate_c failed: %s", err)
+        except Exception as err:  # pragma: no cover
+            _log.warning("_spawn_relogo crashed for %s: %s", article_id, err)
+            _notify_spawn_failure("relogo", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_publish_dispatch(article_id: str, platforms: list[str]) -> None:
+    """Run the multi-channel dispatch (preview + publish + medium-package)
+    triggered by Gate D ✅ Confirm. Runs in a background thread so the
+    callback handler returns immediately."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_publish_dispatch(article_id, platforms)
+        except Exception as err:  # pragma: no cover
+            # post_publish_dispatch normally posts its own summary card (incl.
+            # per-platform failures). Only notify here when it never returned
+            # cleanly — otherwise we'd double-report.
+            _log.warning("post_publish_dispatch failed for %s: %s", article_id, err)
+            _notify_spawn_failure("dispatch", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_publish_retry(article_id: str, failed_platforms: list[str]) -> None:
+    """Re-run publish for the previously-failed platforms only. Posts a fresh
+    dispatch summary message (with a new retry kb if anything still fails)."""
+    from agentflow.agent_review import triggers as _triggers
+
+    def _run() -> None:
+        try:
+            _triggers.post_publish_retry(article_id, failed_platforms)
+        except Exception as err:  # pragma: no cover
+            # Same rationale as dispatch: retry posts its own summary, only
+            # surface here when the call itself blew up.
+            _log.warning("post_publish_retry failed for %s: %s", article_id, err)
+            _notify_spawn_failure("retry", article_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _spawn_write_and_fill(hotspot_id: str) -> None:
+    """Detach an `af write <id> --auto-pick` subprocess from the callback
+    handler so the user gets quick feedback while the LLM crunches.
+
+    The auto-pick path runs skeleton + fill in one shot. ``af fill`` in turn
+    triggers the Gate B post (see triggers.post_gate_b). Result: user clicks
+    Gate A ✅ 起稿 #N, then 30-90s later Gate B lands automatically.
+    """
+    import subprocess
+    import sys
+
+    def _run() -> None:
+        try:
+            from agentflow.agent_review.triggers import _af_argv
+            try:
+                result = subprocess.run(
+                    _af_argv("write", hotspot_id, "--auto-pick"),
+                    env=os.environ.copy(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                _notify_spawn_failure("write+fill", hotspot_id, None, "timeout")
+                return
+            if result.returncode != 0:
+                _notify_spawn_failure(
+                    "write+fill",
+                    hotspot_id,
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+        except Exception as err:  # pragma: no cover
+            _log.warning("write+fill subprocess crashed: %s", err)
+            _notify_spawn_failure("write+fill", hotspot_id, None, str(err))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _signal_handler(signum: int, frame: Any) -> None:  # pragma: no cover
+    _log.info("got signal %s, stopping daemon", signum)
+    _STOP.set()
+
+
+def _acquire_singleton_lock() -> Any:
+    """Acquire an exclusive flock on a daemon lock file.
+
+    Prevents two daemons from racing the same TG long-poll (which manifests as
+    repeated 409 Conflict warnings and missed callbacks). Returns the open
+    file handle — the caller MUST keep it alive for the daemon lifetime;
+    flock is released when the file is closed or the process exits.
+    """
+    import fcntl
+    lock_path = _REVIEW_HOME / "daemon.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        raise SystemExit(
+            f"another review-daemon already holds {lock_path}.\n"
+            "if you're sure no other daemon is running (e.g. after a hard kill), "
+            f"remove the file and retry: rm {lock_path}"
+        )
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
+def _detect_downtime_and_notify() -> None:
+    """If the previous heartbeat is stale, surface a TG warning so the operator
+    knows that any TG buttons clicked during the gap silently no-op'd."""
+    try:
+        from datetime import datetime, timezone
+        path = _heartbeat_path()
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+        ts = data.get("timestamp")
+        if not ts:
+            return
+        last = datetime.fromisoformat(ts)
+        gap_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
+        if gap_minutes < 60:
+            return
+        chat_id = get_review_chat_id()
+        if chat_id is None:
+            return
+        tg_client.send_message(
+            chat_id,
+            f"⚠ daemon 重启了\\. 上次 heartbeat: `{_render.escape_md2(ts[:19])}` "
+            f"\\({gap_minutes/60:.1f}h ago\\)\\. "
+            "期间所有 TG 按键都已被 Telegram 投递但 daemon 未响应——"
+            "用 /list 查看哪些卡片还在等操作\\.",
+        )
+        _log.warning(
+            "daemon downtime detected: %.1fh gap since last heartbeat",
+            gap_minutes / 60.0,
+        )
+    except Exception as err:
+        _log.warning("downtime detection failed (non-fatal): %s", err)
+
+
+def _warn_if_mock_mode_active() -> None:
+    """Loudly warn if we'd silently use mock fixtures or fake publish URLs.
+
+    A production daemon should never run in mock mode — but the bundled
+    .env.template historically defaulted MOCK_LLM=true, and operators who
+    ``cp .env.template .env`` without reading would unwittingly publish
+    ``https://medium.com/@mock/...`` URLs into publish_history.
+    """
+    flags = []
+    if os.environ.get("MOCK_LLM", "").strip().lower() == "true":
+        flags.append("MOCK_LLM=true (D0/D1/D2/D3 use deterministic fixtures)")
+    if os.environ.get("AGENTFLOW_MOCK_PUBLISHERS", "").strip().lower() == "true":
+        flags.append("AGENTFLOW_MOCK_PUBLISHERS=true (publishers return fake URLs)")
+    if not flags:
+        return
+    banner = " | ".join(flags)
+    _log.warning("⚠ MOCK MODE ACTIVE: %s", banner)
+    try:
+        chat_id = get_review_chat_id()
+        if chat_id is not None:
+            tg_client.send_message(
+                chat_id,
+                "⚠ *Mock mode active*\n"
+                + "\n".join(f"• `{_render.escape_md2(f)}`" for f in flags)
+                + "\n\nUnset these in `.env` and restart the daemon for production runs\\.",
+            )
+    except Exception:
+        pass
+
+
+def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> None:
+    """Foreground daemon. Blocks until SIGINT / SIGTERM."""
+    _LOCK_FILE_HANDLE = _acquire_singleton_lock()  # noqa: F841 — keep alive
+
+    if not skip_preflight:
+        from agentflow.agent_review import preflight as _pf
+
+        try:
+            _pf.assert_ready_for_review_daemon()
+        except _pf.PreflightError as err:
+            _log.error("preflight failed: %s", err)
+            raise SystemExit(
+                f"preflight failed: {err}\n"
+                "run `af doctor` for details, or `af review-daemon --skip-preflight` "
+                "to bypass."
+            )
+
+    interval = poll_interval if poll_interval is not None else float(
+        os.environ.get("TELEGRAM_POLL_INTERVAL_SECONDS", "5")
+    )
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    me = tg_client.get_me()
+    _log.info("review daemon started for @%s", me.get("username"))
+    chat_id = get_review_chat_id()
+    configure_bot_menu(chat_id)
+    if chat_id is None:
+        _log.warning(
+            "no TELEGRAM_REVIEW_CHAT_ID configured — send /start to @%s "
+            "in Telegram to capture it",
+            me.get("username"),
+        )
+    else:
+        _log.info("review chat_id=%s", chat_id)
+
+    # Surface non-fatal warnings BEFORE we start consuming updates so the
+    # operator sees them immediately. Keep these best-effort — a TG hiccup
+    # must not prevent the daemon from coming up.
+    _detect_downtime_and_notify()
+    _warn_if_mock_mode_active()
+
+    offset_state = _read_json(_offset_path(), {}) or {}
+    offset = offset_state.get("offset")
+
+    last_gc = time.monotonic()
+    last_timeout_scan = time.monotonic()
+
+    while not _STOP.is_set():
+        _write_heartbeat()
+        try:
+            updates = tg_client.get_updates(offset=offset, timeout=25)
+        except Exception as err:
+            _log.warning("get_updates failed: %s", err)
+            time.sleep(min(interval * 2, 15))
+            continue
+
+        for upd in updates:
+            try:
+                if "message" in upd:
+                    _handle_message(upd)
+                elif "callback_query" in upd:
+                    _handle_callback(upd)
+            except Exception as err:  # pragma: no cover
+                _log.exception("update handler crashed: %s", err)
+            offset = int(upd["update_id"]) + 1
+            _write_json(_offset_path(), {"offset": offset})
+
+        # housekeeping every ~60s
+        now = time.monotonic()
+        if now - last_gc > 60:
+            removed = _sid.gc()
+            if removed:
+                _log.info("short_id GC removed %d expired entries", removed)
+            last_gc = now
+        if now - last_timeout_scan > 60:
+            _scan_timeouts()
+            last_timeout_scan = now
+
+        if not updates:
+            time.sleep(interval)
+
+
+def _gate_a_timeout_state_path() -> Path:
+    """Per-sid timeout book-keeping for Gate A (no article_id exists yet, so
+    we can't reuse ``timeout_state`` which is keyed by article_id and gets
+    GC'd against ``articles_in_state``)."""
+    p = _REVIEW_HOME / "gate_a_timeout_state.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _scan_timeouts() -> None:
+    """Walk every ``*_pending_review`` article; for each one past the
+    first-ping or second-action cutoff, ping the operator (Gate B) or
+    auto-fallback to ``image_skipped`` (Gate C). Idempotent — uses
+    ``timeout_state`` so re-running every ~60s never re-spams.
+
+    Also scans Gate A short_id entries (which have no article_id yet) and
+    pings / auto-rejects the batch via a sid-keyed state file.
+
+    Cutoffs come from env (defaults match templates/state_machine.md):
+      REVIEW_GATE_A_PING_HOURS         (default 12)
+      REVIEW_GATE_A_AUTOREJECT_HOURS   (default 24)
+      REVIEW_GATE_B_PING_HOURS         (default 12)
+      REVIEW_GATE_B_SECOND_PING_HOURS  (default 24)
+      REVIEW_GATE_C_PING_HOURS         (default 6)
+      REVIEW_GATE_C_AUTOSKIP_HOURS     (default 12)
+    """
+    def _hrs(env_key: str, default: float) -> float:
+        try:
+            return float(os.environ.get(env_key, "") or default)
+        except ValueError:
+            return default
+
+    a_first = _hrs("REVIEW_GATE_A_PING_HOURS", 12)
+    a_autoreject = _hrs("REVIEW_GATE_A_AUTOREJECT_HOURS", 24)
+    b_first = _hrs("REVIEW_GATE_B_PING_HOURS", 12)
+    b_second = _hrs("REVIEW_GATE_B_SECOND_PING_HOURS", 24)
+    c_first = _hrs("REVIEW_GATE_C_PING_HOURS", 6)
+    c_autoskip = _hrs("REVIEW_GATE_C_AUTOSKIP_HOURS", 12)
+    d_autocancel = _hrs("REVIEW_GATE_D_AUTOCANCEL_HOURS", 12)
+
+    pending_states = {
+        state.STATE_DRAFT_PENDING_REVIEW,
+        state.STATE_IMAGE_PENDING_REVIEW,
+        state.STATE_CHANNEL_PENDING_REVIEW,
+    }
+    pending = state.articles_in_state(list(pending_states))
+
+    # Clear stale book-keeping for any tracked article that has since left a
+    # *_pending_review state (so a future re-entry pings from scratch).
+    try:
+        tracked = list(timeout_state._read().keys())  # type: ignore[attr-defined]
+    except Exception:
+        tracked = []
+    for aid in tracked:
+        # Q2: ``__digest__`` is the special daily-digest cooldown meta key —
+        # never article-keyed, never to be GC'd by the per-article cleanup.
+        if aid.startswith("__"):
+            continue
+        if aid in pending:
+            continue
+        try:
+            cur = state.current_state(aid)
+        except Exception:
+            cur = None
+        if cur not in pending_states:
+            timeout_state.clear(aid)
+
+    if not pending:
+        return
+
+    chat_id = get_review_chat_id()
+    now = datetime.now(timezone.utc)
+
+    def _safe_send(text: str) -> bool:
+        if chat_id is None:
+            return False
+        try:
+            tg_client.send_message(chat_id, text, parse_mode="MarkdownV2")
+            return True
+        except Exception as err:  # pragma: no cover
+            _log.warning("timeout sweeper TG send failed: %s", err)
+            return False
+
+    def _title_of(aid: str) -> str:
+        try:
+            data = json.loads(
+                (agentflow_home() / "drafts" / aid / "metadata.json")
+                .read_text(encoding="utf-8")
+            ) or {}
+            return str(data.get("title") or "(no title)")
+        except Exception:
+            return "(no title)"
+
+    for aid in pending:
+        try:
+            history = state.gate_history(aid)
+        except Exception:
+            continue
+        if not history:
+            continue
+        last = history[-1]
+        cur = str(last.get("to_state") or "")
+        try:
+            ts = datetime.fromisoformat(last.get("timestamp") or "")
+        except ValueError:
+            continue
+        hrs = (now - ts).total_seconds() / 3600.0
+        title = _title_of(aid)
+        title_md = _render.escape_md2(title)
+        aid_md = _render.escape_md2(aid)
+
+        if cur == state.STATE_DRAFT_PENDING_REVIEW:
+            if hrs >= b_first and not timeout_state.has_first_pinged(aid):
+                text = (
+                    f"⏰ 12h\\+ 未审\n\n"
+                    f"*{title_md}*\n"
+                    f"`{aid_md}`\n"
+                    f"请处理 Gate B 卡片\\."
+                )
+                if _safe_send(text):
+                    timeout_state.mark_first_pinged(aid)
+                    _audit({
+                        "kind": "timeout_first_ping",
+                        "gate": "B",
+                        "article_id": aid,
+                        "hrs": round(hrs, 2),
+                    })
+            if (
+                hrs >= b_second
+                and timeout_state.has_first_pinged(aid)
+                and not timeout_state.has_second_action(aid)
+            ):
+                text = (
+                    f"⏰ 已等 24h\\+，请尽快处理或显式拒绝\n\n"
+                    f"*{title_md}*\n"
+                    f"`{aid_md}`"
+                )
+                if _safe_send(text):
+                    timeout_state.mark_second_action(aid)
+                    _audit({
+                        "kind": "timeout_second_ping",
+                        "gate": "B",
+                        "article_id": aid,
+                        "hrs": round(hrs, 2),
+                    })
+
+        elif cur == state.STATE_IMAGE_PENDING_REVIEW:
+            if hrs >= c_first and not timeout_state.has_first_pinged(aid):
+                text = (
+                    f"⏰ Cover 6h\\+ 未审\n\n"
+                    f"*{title_md}*\n"
+                    f"`{aid_md}`\n"
+                    f"请处理 Gate C 卡片\\."
+                )
+                if _safe_send(text):
+                    timeout_state.mark_first_pinged(aid)
+                    _audit({
+                        "kind": "timeout_first_ping",
+                        "gate": "C",
+                        "article_id": aid,
+                        "hrs": round(hrs, 2),
+                    })
+            if hrs >= c_autoskip and not timeout_state.has_second_action(aid):
+                try:
+                    state.transition(
+                        aid,
+                        gate="C",
+                        to_state=state.STATE_IMAGE_SKIPPED,
+                        actor="daemon",
+                        decision="auto_skip_timeout",
+                        notes=f"hrs={hrs:.1f}",
+                        force=True,
+                    )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("auto_skip transition failed for %s: %s", aid, err)
+                    continue
+                _safe_send(
+                    f"⏰ Cover 12h 未审 → 自动 fallback 到无封面，state→image\\_skipped\n\n"
+                    f"*{title_md}*\n"
+                    f"`{aid_md}`"
+                )
+                # Trigger Gate D card after auto-skip so the article doesn't stall.
+                try:
+                    _spawn_gate_d(aid)
+                except Exception as err:  # pragma: no cover
+                    _log.warning("_spawn_gate_d after auto_skip failed for %s: %s", aid, err)
+                timeout_state.mark_second_action(aid)
+                _audit({
+                    "kind": "timeout_auto_skip",
+                    "gate": "C",
+                    "article_id": aid,
+                    "hrs": round(hrs, 2),
+                })
+
+        elif cur == state.STATE_CHANNEL_PENDING_REVIEW:
+            if hrs >= d_autocancel and not timeout_state.has_second_action(aid):
+                try:
+                    state.transition(
+                        aid, gate="D",
+                        to_state=state.STATE_IMAGE_APPROVED,
+                        actor="daemon",
+                        decision="auto_cancel_timeout",
+                        notes=f"hrs={hrs:.1f}",
+                        force=True,
+                    )
+                except Exception as err:
+                    _log.warning("auto_cancel transition failed for %s: %s", aid, err)
+                    continue
+                # Attach a [⏰ 再延 12h] extend button (Q6). Mint a fresh
+                # sid for the extend callback (12h TTL — matches the new
+                # extension window). The handler enforces the per-article
+                # 1-extension cap via timeout_state.extended_count.
+                extend_text = (
+                    f"⏰ Gate D 12h 未确认 → 自动 cancel, state→image\\_approved\n\n"
+                    f"*{title_md}*\n"
+                    f"`{aid_md}`\n\n"
+                    f"想继续？点击 ⏰ 延 12h（限 1 次）。"
+                )
+                extend_kb: dict[str, Any] | None = None
+                try:
+                    extend_sid = _sid.register(
+                        gate="D",
+                        article_id=aid,
+                        ttl_hours=12,
+                        extra={"extend_only": True},
+                    )
+                    extend_kb = {
+                        "inline_keyboard": [[
+                            {
+                                "text": "⏰ 再延 12h",
+                                "callback_data": f"D:extend:{extend_sid}",
+                            }
+                        ]]
+                    }
+                except Exception as err:
+                    _log.warning(
+                        "Gate D extend sid mint failed for %s: %s", aid, err
+                    )
+                if chat_id is not None and extend_kb is not None:
+                    try:
+                        tg_client.send_message(
+                            chat_id, extend_text, reply_markup=extend_kb,
+                            parse_mode="MarkdownV2",
+                        )
+                    except Exception as err:
+                        _log.warning(
+                            "Gate D auto_cancel extend ping failed for %s: %s",
+                            aid, err,
+                        )
+                        _safe_send(extend_text)
+                else:
+                    _safe_send(extend_text)
+                timeout_state.mark_second_action(aid)
+                _audit({
+                    "kind": "timeout_auto_cancel",
+                    "gate": "D",
+                    "article_id": aid,
+                    "hrs": round(hrs, 2),
+                })
+
+    # ── Gate A timeout sweep ────────────────────────────────────────────
+    # Hotspots have no article_id yet, so we drive purely off the short_id
+    # index entry's ``created_at`` and a sid-keyed timeout state file.
+    try:
+        sid_index = _sid._read()  # type: ignore[attr-defined]
+    except Exception as err:  # graceful: never crash the daemon loop
+        _log.warning("Gate A sweep: short_id read failed: %s", err)
+        sid_index = {}
+
+    try:
+        ga_path = _gate_a_timeout_state_path()
+        ga_state: dict[str, dict[str, Any]] = (
+            _read_json(ga_path, {}) if ga_path.exists() else {}
+        ) or {}
+    except Exception as err:
+        _log.warning("Gate A sweep: state file read failed: %s", err)
+        ga_state = {}
+
+    ga_dirty = False
+    for sid, gentry in list(sid_index.items()):
+        if not isinstance(gentry, dict):
+            continue
+        if gentry.get("gate") != "A":
+            continue
+        created_at = gentry.get("created_at")
+        if not created_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(created_at)
+        except ValueError:
+            continue
+        ga_hrs = (now - ts).total_seconds() / 3600.0
+        ga_entry = ga_state.get(sid) or {}
+        first_pinged = bool(ga_entry.get("first_pinged_at"))
+        second_done = bool(ga_entry.get("second_action_taken_at"))
+        batch_path = gentry.get("batch_path") or ""
+        batch_md = _render.escape_md2(str(batch_path) or "(no batch)")
+
+        if ga_hrs >= a_first and not first_pinged:
+            text = (
+                f"⏰ Gate A 12h\\+ 未审，请处理 hotspots batch\n\n"
+                f"`{batch_md}`"
+            )
+            if _safe_send(text):
+                ga_entry["first_pinged_at"] = datetime.now(timezone.utc).isoformat()
+                ga_state[sid] = ga_entry
+                ga_dirty = True
+                _audit({
+                    "kind": "timeout_first_ping",
+                    "gate": "A",
+                    "short_id": sid,
+                    "batch_path": batch_path,
+                    "hrs": round(ga_hrs, 2),
+                })
+
+        if ga_hrs >= a_autoreject and not second_done:
+            # Auto-reject the batch: flag every hotspot as rejected_batch
+            # (mirrors the A:reject_all callback path), revoke the sid, and
+            # ping the operator. All file-IO is graceful.
+            rejected_count = 0
+            io_err: str | None = None
+            if batch_path:
+                try:
+                    with open(batch_path, "r", encoding="utf-8") as fh:
+                        batch_data = json.load(fh) or {}
+                    hotspots = batch_data.get("hotspots") or []
+                    if isinstance(hotspots, list):
+                        for hs in hotspots:
+                            if isinstance(hs, dict):
+                                hs["status"] = "rejected_batch"
+                                rejected_count += 1
+                        batch_data["hotspots"] = hotspots
+                        with open(batch_path, "w", encoding="utf-8") as fh:
+                            json.dump(batch_data, fh, ensure_ascii=False, indent=2)
+                except Exception as err:
+                    io_err = str(err)[:200]
+                    _log.warning(
+                        "Gate A auto-reject batch write failed (path=%s): %s",
+                        batch_path, err,
+                    )
+            else:
+                io_err = "missing batch_path"
+
+            try:
+                _sid.revoke(sid)
+            except Exception as err:
+                _log.warning("Gate A auto-reject sid revoke failed (sid=%s): %s", sid, err)
+
+            _audit({
+                "kind": "timeout_auto_reject_batch",
+                "gate": "A",
+                "short_id": sid,
+                "batch_path": batch_path,
+                "hotspot_count": rejected_count,
+                "hrs": round(ga_hrs, 2),
+                **({"io_error": io_err} if io_err else {}),
+            })
+            _safe_send(
+                "⏰ Gate A 24h 未审 → 整批自动拒绝（重新跑 `af hotspots` 可恢复）\n\n"
+                f"`{batch_md}`"
+            )
+            ga_entry["second_action_taken_at"] = datetime.now(timezone.utc).isoformat()
+            ga_state[sid] = ga_entry
+            ga_dirty = True
+
+    # Best-effort: drop sid entries that no longer appear in the index
+    # (covers manual revoke / GC), so the file doesn't grow unboundedly.
+    for stale_sid in [s for s in ga_state.keys() if s not in sid_index]:
+        ga_state.pop(stale_sid, None)
+        ga_dirty = True
+
+    if ga_dirty:
+        try:
+            _write_json(_gate_a_timeout_state_path(), ga_state)
+        except Exception as err:
+            _log.warning("Gate A sweep: state file write failed: %s", err)
+
+    # ── Q2: 每日 publish-mark digest (24h cooldown) ────────────────────────
+    # Stored under the special ``__digest__`` key in timeout_state.json so we
+    # don't collide with article-keyed entries (article_ids never start with
+    # underscores in the AgentFlow corpus).
+    try:
+        state_data = timeout_state._read()  # type: ignore[attr-defined]
+        digest_meta = state_data.get("__digest__") or {}
+        last_digest = digest_meta.get("last_digest_at")
+        should_run = False
+        if not last_digest:
+            should_run = True
+        else:
+            try:
+                last_dt = datetime.fromisoformat(last_digest)
+                elapsed_hours = (
+                    datetime.now(timezone.utc) - last_dt
+                ).total_seconds() / 3600
+                if elapsed_hours >= 24:
+                    should_run = True
+            except ValueError:
+                should_run = True
+
+        if should_run:
+            from agentflow.agent_review import triggers as _triggers
+            try:
+                result = _triggers.post_publish_digest()
+                digest_meta["last_digest_at"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                digest_meta["last_count"] = (result or {}).get("count", 0)
+                state_data["__digest__"] = digest_meta
+                timeout_state._write(state_data)  # type: ignore[attr-defined]
+            except Exception as err:
+                _log.warning("daily digest failed: %s", err)
+    except Exception:
+        pass

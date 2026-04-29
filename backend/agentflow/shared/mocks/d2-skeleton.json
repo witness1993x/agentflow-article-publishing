@@ -1,0 +1,102 @@
+{
+  "title_candidates": [
+    {
+      "text": "subagent 是 context 经济学的新单位",
+      "style": "declarative",
+      "rationale": "直接给结论,读者一眼看到立场"
+    },
+    {
+      "text": "为什么 Claude Code 的 subagent 不是加速器,而是一种新单位?",
+      "style": "question",
+      "rationale": "反直觉问题拉住读者注意力"
+    },
+    {
+      "text": "我用 subagent 重写了一周的工作,发现的 5 个反常识",
+      "style": "narrative",
+      "rationale": "场景式标题,第一人称加可量化"
+    }
+  ],
+  "opening_candidates": [
+    {
+      "opening_text": "上周花了 40 小时把一个 6000 行的 agent 原型拆成了 12 个 subagent,结果端到端耗时从 18 分钟降到 4 分钟。但真正让我停下来的不是这个数字,是我第一次意识到自己其实一直在以错误的单位衡量 LLM 工作量。",
+      "style": "data",
+      "hook_strength": "strong"
+    },
+    {
+      "opening_text": "我最初以为 subagent 就是并发执行。3 月跑了 20 个 POC 之后,才发现这个直觉错得很离谱:subagent 真正改变的不是执行速度,是你怎么划分任务边界这件事本身。",
+      "style": "story",
+      "hook_strength": "medium"
+    },
+    {
+      "opening_text": "如果 LLM 的 token 是最小成本单位,那 subagent 是什么?这个问题在我心里卡了三个月,直到上周用 Claude Code 做完第三版重写,答案才浮出来。",
+      "style": "question",
+      "hook_strength": "strong"
+    }
+  ],
+  "section_outline": [
+    {
+      "heading": "我最初理解的 subagent(并且错了)",
+      "key_arguments": [
+        "我以为 subagent 是并行执行器,类似线程池",
+        "这个理解让我设计出来的 agent 反而更慢",
+        "真正的瓶颈不在并发,在上下文切换的隐性代价"
+      ],
+      "estimated_words": 380,
+      "section_purpose": "让读者看到作者的错误起点,建立信任"
+    },
+    {
+      "heading": "subagent 改变的其实是任务划分单位",
+      "key_arguments": [
+        "传统 agent 以'一个推理链'为单位,subagent 把这个单位拆成更细",
+        "这个更细的单位不等同于 function call,它仍然携带'意图'",
+        "对比微服务拆分,边界不是接口契约,而是意图边界"
+      ],
+      "estimated_words": 520,
+      "section_purpose": "提出核心论点:subagent 是新的划分单位"
+    },
+    {
+      "heading": "用 subagent 重写项目的 3 个反常识",
+      "key_arguments": [
+        "拆得太细反而损失性能(context 重入成本)",
+        "subagent 之间共享记忆比共享 prompt 更重要",
+        "debug subagent 需要一种新的 trace 视角"
+      ],
+      "estimated_words": 540,
+      "section_purpose": "把抽象论点落到可操作细节"
+    },
+    {
+      "heading": "对小团队的隐性成本",
+      "key_arguments": [
+        "subagent 放大决策延迟:每个子任务的分发都是一个决策点",
+        "小团队的优势是决策链短,subagent 架构会抵消这个优势",
+        "什么场景下小团队应该抵制 subagent 化的诱惑"
+      ],
+      "estimated_words": 420,
+      "section_purpose": "提醒读者这不是万能解"
+    },
+    {
+      "heading": "下一步我要试的三件事",
+      "key_arguments": [
+        "用 subagent 做 context 回放而不是并发执行",
+        "把 subagent 边界与 git commit 单位对齐",
+        "记录一个 subagent 反模式清单"
+      ],
+      "estimated_words": 340,
+      "section_purpose": "给读者可以复制的行动,承接 closing"
+    }
+  ],
+  "closing_candidates": [
+    {
+      "closing_text": "如果你在做 agent 产品,这周可以做一个最小动作:挑一个你现在最长的 prompt chain,不重写,只是把它画成 subagent 图,看看哪些节点其实可以独立。",
+      "style": "cta"
+    },
+    {
+      "closing_text": "一个我还没答案的问题:subagent 的终点是不是一种新的编程范式?还是它只是工具链成熟期的一次重构?我倾向前者,但证据还不够。",
+      "style": "open"
+    },
+    {
+      "closing_text": "所有这些讨论最后指向一个更大的东西:LLM 工程正在从'怎么让模型更聪明'转向'怎么组织模型的工作单位'。这可能是 2026 年最重要的范式迁移,而我们才刚刚看清第一层。",
+      "style": "elevation"
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "bridge_version": "1.0",
+  "descriptor_schema": {
+    "type": "object",
+    "required": [
+      "bridge_version",
+      "event_webhook_enabled",
+      "command_endpoint_enabled",
+      "dangerous_commands_enabled",
+      "read_auth_env",
+      "command_auth_env",
+      "commands"
+    ]
+  },
+  "command_request_schema": {
+    "type": "object",
+    "required": ["command"],
+    "properties": {
+      "request_id": { "type": "string" },
+      "command": {
+        "type": "string",
+        "enum": [
+          "doctor",
+          "review_status",
+          "review_list",
+          "draft_show",
+          "memory_tail",
+          "intent_show",
+          "hotspots",
+          "write",
+          "fill",
+          "image_gate",
+          "preview",
+          "medium_package",
+          "review_post_d",
+          "review_publish_mark",
+          "publish"
+        ]
+      },
+      "params": { "type": "object" },
+      "options": { "type": "object" }
+    }
+  },
+  "event_envelope_schema": {
+    "type": "object",
+    "required": [
+      "schema_version",
+      "event_id",
+      "occurred_at",
+      "ingested_at",
+      "source",
+      "event_type",
+      "payload"
+    ],
+    "properties": {
+      "schema_version": { "type": "integer" },
+      "event_id": { "type": "string" },
+      "occurred_at": { "type": "string" },
+      "ingested_at": { "type": "string" },
+      "source": {
+        "type": "string",
+        "enum": ["memory", "gate", "publish", "api"]
+      },
+      "event_type": { "type": "string" },
+      "article_id": { "type": ["string", "null"] },
+      "hotspot_id": { "type": ["string", "null"] },
+      "payload": { "type": "object" }
+    }
+  }
+}

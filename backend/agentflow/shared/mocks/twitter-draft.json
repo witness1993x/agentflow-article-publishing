@@ -1,0 +1,42 @@
+{
+  "form": "thread",
+  "tweets": [
+    {
+      "index": 0,
+      "text": "[mock] 很多人把 subagent 当成工具调用的变种。它不是。工具只能做一件事然后返回；subagent 可以有自己的循环、自己的记忆、自己的中断点。差的不是一个层级，是一个数量级。",
+      "char_count": 92,
+      "image_slot": "cover",
+      "image_hint": "subagent 架构对比图"
+    },
+    {
+      "index": 1,
+      "text": "[mock] 最典型的误用：把一段长流程拆成 20 个 tool call。模型每次都要重新装上下文，代价惊人。subagent 让你说 '这一段你自己跑，跑完把结论告诉我'。",
+      "char_count": 88,
+      "image_slot": null,
+      "image_hint": null
+    },
+    {
+      "index": 2,
+      "text": "[mock] Claude Code 的 subagent 和 Anthropic API 的 computer use 走的是两条路。前者是编辑器里的 agent，后者是桌面上的 agent。架构目标不一样，UX 也不一样。",
+      "char_count": 105,
+      "image_slot": null,
+      "image_hint": null
+    },
+    {
+      "index": 3,
+      "text": "[mock] 判断一个 subagent 实现好不好，看三件事：有没有独立的 context window，有没有中断/恢复机制，父 agent 能不能不干涉地等它跑完。三者缺一，就还是个大 tool。",
+      "char_count": 100,
+      "image_slot": null,
+      "image_hint": null
+    },
+    {
+      "index": 4,
+      "text": "[mock] 我的判断是：2025 年下半年会出现第一批'专门给 subagent 调度设计'的框架。通用 LLM orchestration 会被这一波吃掉——不是性能问题，是抽象层次对了。",
+      "char_count": 98,
+      "image_slot": null,
+      "image_hint": null
+    }
+  ],
+  "intended_hook": "技术方向判断，钩对 agent orchestration 有实操经验的开发者",
+  "source_refs": [0, 1]
+}

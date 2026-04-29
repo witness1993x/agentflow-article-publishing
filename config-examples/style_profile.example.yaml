@@ -1,0 +1,210 @@
+# Mobius's Style Profile Example
+# 复制到 ~/.agentflow/style_profile.yaml 后按需调整
+
+version: "1.0"
+last_updated: "2026-04-22"
+author_id: "mobius_y"
+
+# ============================================================
+# 身份定位
+# ============================================================
+identity:
+  name: "Mobius"
+  handle: "@Mobius_Y"
+  positioning: "AI-Native Web3 Product Builder"
+  persona: |
+    实操派产品经理 + 独立写作者。
+    关注 AI + Web3 + 产品工程化。
+    写作偏好: 实操胜过理论,诚实失败胜过包装成功。
+
+# ============================================================
+# 三个内容系列
+# ============================================================
+content_matrix:
+  series_A:
+    name: "Builder's Playbook"
+    theme: "产品执行复盘"
+    typical_length_words: [1500, 2500]
+    primary_language: "zh"
+    language_mix_ratio: 0.6
+    opening_style: "scenario_driven"
+    closing_style: "action_reflection"
+    typical_sections:
+      - "背景场景"
+      - "决策过程"
+      - "执行细节"
+      - "复盘与教训"
+    target_platforms_primary:
+      - "wechat_official"
+      - "substack"
+    target_platforms_secondary:
+      - "linkedin_article"
+    target_platforms_skip:
+      - "medium"
+
+  series_B:
+    name: "AI×Web3 Workflow"
+    theme: "AI 工具链实操"
+    typical_length_words: [1000, 2000]
+    primary_language: "en"
+    language_mix_ratio: 0.3
+    opening_style: "tool_or_problem"
+    closing_style: "next_steps"
+    typical_sections:
+      - "问题陈述"
+      - "工具链设计"
+      - "实际执行"
+      - "效果对比"
+    target_platforms_primary:
+      - "medium"
+      - "substack"
+      - "x_longform"
+    target_platforms_secondary:
+      - "linkedin_article"
+    target_platforms_skip:
+      - "wechat_official"
+
+  series_C:
+    name: "Crypto Insights"
+    theme: "行业分析"
+    typical_length_words: [2000, 4000]
+    primary_language: "bilingual"
+    opening_style: "data_or_event"
+    closing_style: "open_question"
+    typical_sections:
+      - "事件/数据导入"
+      - "多方解读"
+      - "我的判断"
+      - "开放问题"
+    target_platforms_primary:
+      - "substack"
+      - "medium"
+      - "wechat_official"
+    target_platforms_secondary:
+      - "linkedin_article"
+      - "x_longform"
+
+# ============================================================
+# 声音原则 (所有系列通用)
+# ============================================================
+voice_principles:
+  - key: "show_dont_tell"
+    description: |
+      用案例不用说教。不说"这个方法有效",
+      而是"我 3 月用这个方法,省了 40 小时"。
+
+  - key: "practice_over_theory"
+    description: |
+      能跑的 demo 胜过理论推演。
+      每个观点最好有具体执行过的证据。
+
+  - key: "honest_failure"
+    description: |
+      坦诚失败过程胜过包装成功。
+      写"我最初理解错了 X,后来发现..."比"一上来就做对"更真。
+
+  - key: "desensitized_not_distorted"
+    description: |
+      关键数据脱敏 (不写具体 $ 金额),
+      但逻辑完整 (保留决策推理)。
+
+# ============================================================
+# 禁用词与禁用句式
+# ============================================================
+taboos:
+  vocabulary:
+    # 空洞商业话术
+    - "赋能"
+    - "生态闭环"
+    - "价值链"
+    - "赛道"
+    - "蓝海"
+    - "颠覆"
+    - "改变世界"
+    - "终极"
+    - "next big thing"
+    - "掀起浪潮"
+    - "百亿市场"
+    - "重塑"
+    # 过度修辞
+    - "绝对"
+    - "完全"
+    - "彻底"
+    - "最佳实践"   # 换成 "我用过的做法"
+    - "革命性"
+
+  sentence_patterns:
+    - "综上所述"
+    - "总的来说"
+    - "值得注意的是"
+    - "毋庸置疑"
+    - "不可否认"
+    - "首先...其次...最后"   # AI 典型结构化
+    - "一方面...另一方面"     # AI 典型对仗
+    - "正如我们所见"
+    - "事实证明"
+    - "众所周知"
+
+  contexts:
+    - "在技术文章里不谈融资"
+    - "在复盘里不写未验证的预测"
+    - "不用'我认为'开头 (直接陈述观点更有力)"
+    - "不用'总体而言'收尾"
+    - "不给自己贴标签 (不说'作为产品经理')"
+
+# ============================================================
+# 语气强度
+# ============================================================
+tone:
+  default_intensity: "medium"
+  intensity_by_series:
+    series_A: "medium"
+    series_B: "medium_sharp"
+    series_C: "sharp"
+  # 选项: gentle / medium / medium_sharp / sharp / very_sharp
+
+# ============================================================
+# 段落偏好
+# ============================================================
+paragraph_preferences:
+  average_length_words: 60
+  max_length_words: 100
+  min_length_words: 15
+  prefer_short_sentences: true
+  use_bullet_lists: "moderate"
+  use_numbered_lists: "low"
+
+# ============================================================
+# emoji 偏好 (分平台)
+# ============================================================
+emoji_preferences:
+  default_density: "low"
+  density_by_platform:
+    wechat_official: "high"
+    linkedin_article: "medium"
+    substack: "medium"
+    medium: "low"
+    x_longform: "medium"
+    ghost_wordpress: "low"
+
+# ============================================================
+# 引用偏好
+# ============================================================
+citation_preferences:
+  external_sources_frequency: "medium"   # 每 3-5 段引用一次
+  prefer_primary_sources: true
+  quote_style: "direct_quote_with_link"
+
+# ============================================================
+# 样稿参考 (用于风格自学习 v1.5+)
+# ============================================================
+reference_samples:
+  - path: "samples/B1-chinese-v3.md"
+    weight: 1.0
+    series: "B"
+  - path: "samples/A1-v4-draft.md"
+    weight: 1.0
+    series: "A"
+  - path: "samples/B3-a2a-protocol.md"
+    weight: 0.8
+    series: "B"

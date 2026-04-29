@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+pip-log.txt
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project-specific
+.agentflow-local/
+_legacy/
+.cache/
+*.bak.*
+backend/.env_copy
+
+# Build artifacts of scripts/build_deploy_bundle.sh — produce locally, don't commit
+agentflow-deploy-*.tar.gz
+
+# learn-style corpus (never commit user articles)
+samples/*
+!samples/README.md

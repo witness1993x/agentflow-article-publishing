@@ -1,0 +1,127 @@
+# Content Matrix Configuration Example
+# 如果你想把系列配置与 style_profile 分开管理, 复制到 ~/.agentflow/content_matrix.yaml
+#
+# 注意: 如果 style_profile.yaml 里已经有 content_matrix 字段, 会以 style_profile 为准,
+# 本文件可以不存在. 这份示例是给想独立管理系列配置的场景用的.
+
+version: "1.0"
+last_updated: "2026-04-22"
+
+series_A:
+  name: "Builder's Playbook"
+  theme: "产品执行复盘"
+  description: |
+    记录真实的产品决策过程和执行细节,
+    偏重"过程复盘"而非"成功展示".
+    目标读者: 产品经理 / 创业者 / 工程负责人.
+
+  typical_length_words: [1500, 2500]
+  primary_language: "zh"
+  language_mix_ratio: 0.6
+
+  opening_style: "scenario_driven"
+  # 例: "上周三,我们在审一个 GraphQL IDE 的 QA 清单..."
+
+  closing_style: "action_reflection"
+  # 例: "如果让我重做一次,我会先 X 再 Y"
+
+  typical_sections:
+    - "背景场景"
+    - "决策过程"
+    - "执行细节"
+    - "复盘与教训"
+
+  target_platforms_primary:
+    - "wechat_official"
+    - "substack"
+  target_platforms_secondary:
+    - "linkedin_article"
+  target_platforms_skip:
+    - "medium"               # A 系列中文为主,不发 Medium
+
+  # 发布节奏
+  publishing_cadence:
+    target_per_month: 4      # 每月 4 篇 = 每周 1 篇 A 系列
+
+
+series_B:
+  name: "AI×Web3 Workflow"
+  theme: "AI 工具链实操"
+  description: |
+    AI 工具如何融入 Web3 产品开发工作流的实际操作.
+    重技术细节, 重可复用性, 重实测数据.
+    目标读者: 独立开发者 / 小团队技术 leader / AI-Native PM.
+
+  typical_length_words: [1000, 2000]
+  primary_language: "en"
+  language_mix_ratio: 0.3
+
+  opening_style: "tool_or_problem"
+  # 例: "Claude Code 的 MCP 接口藏了一个几乎没人讨论的特性:"
+
+  closing_style: "next_steps"
+  # 例: "下一步我要试的是 X, 需要解决的三个未知是:"
+
+  typical_sections:
+    - "问题陈述"
+    - "工具链设计"
+    - "实际执行"
+    - "效果对比"
+
+  target_platforms_primary:
+    - "medium"
+    - "substack"
+    - "x_longform"
+  target_platforms_secondary:
+    - "linkedin_article"
+  target_platforms_skip:
+    - "wechat_official"      # B 系列英文为主
+
+  publishing_cadence:
+    target_per_month: 6      # 每月 6 篇 = 每周 1.5 篇 B 系列
+
+
+series_C:
+  name: "Crypto Insights"
+  theme: "行业分析"
+  description: |
+    Web3 / Crypto 行业现象与趋势的独立判断.
+    重立场, 重数据支撑, 重长期视角.
+    目标读者: 投资人 / 分析师 / 行业从业者.
+
+  typical_length_words: [2000, 4000]
+  primary_language: "bilingual"
+  # bilingual 模式: 中英双语并行 (不是翻译,是双语重写)
+
+  opening_style: "data_or_event"
+  # 例: "2026 年 Q1, Polymarket 的月交易量首次超过 Kalshi..."
+
+  closing_style: "open_question"
+  # 例: "一个我还没答案的问题:..."
+
+  typical_sections:
+    - "事件/数据导入"
+    - "多方解读"
+    - "我的判断"
+    - "开放问题"
+
+  target_platforms_primary:
+    - "substack"
+    - "medium"
+    - "wechat_official"
+  target_platforms_secondary:
+    - "linkedin_article"
+    - "x_longform"
+
+  publishing_cadence:
+    target_per_month: 2      # 每月 2 篇 C 系列 (长文)
+
+# ============================================================
+# 月度总产出目标
+# ============================================================
+# A 4 + B 6 + C 2 = 12 篇 / 月 = 3 篇 / 周
+# 这个目标与 v1.0 的核心指标 "周更 3 篇" 对齐
+
+monthly_target:
+  total_articles: 12
+  cross_platform_total: ~48  # 12 篇 × 平均 4 平台 = 48 次发布

@@ -1,0 +1,28 @@
+{
+  "topic_one_liner": "Claude Code 的 subagent 机制对开发者工作流的影响",
+  "mainstream_views": [
+    "subagent 是并行加速器",
+    "主要用于减少 context 污染"
+  ],
+  "overlooked_angles": [
+    "subagent 设计其实暗示了 LLM 工程范式从 monolithic 向微服务迁移",
+    "小团队用 subagent 会放大决策延迟"
+  ],
+  "recommended_series": "B",
+  "series_confidence": 0.82,
+  "suggested_angles": [
+    {
+      "angle": "subagent 是 context 经济学的新单位",
+      "fit_explanation": "B 系列关注工程实践与哲学,这个角度有具体执行过的证据",
+      "depth": "deep",
+      "difficulty": "medium"
+    },
+    {
+      "angle": "用 subagent 重写我上周的项目,省了 6 小时",
+      "fit_explanation": "符合 show_dont_tell 原则,有具体数字",
+      "depth": "medium",
+      "difficulty": "easy"
+    }
+  ],
+  "depth_potential": "deep"
+}

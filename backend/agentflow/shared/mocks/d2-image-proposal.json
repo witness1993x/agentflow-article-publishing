@@ -1,0 +1,46 @@
+{
+  "images": [
+    {
+      "position": {
+        "anchor": "after_opening",
+        "rationale": "开篇第一张图作为 cover, 承担社媒分享缩略图"
+      },
+      "role": "cover",
+      "description": {
+        "en": "subagent architecture diagram, blue and white, technical illustration",
+        "zh": "subagent 架构示意图, 蓝白配色, 技术图解"
+      },
+      "style_hint": "diagram",
+      "source_hint": "local_library",
+      "priority": "required"
+    },
+    {
+      "position": {
+        "anchor": "before_section:1",
+        "rationale": "论点转折点前插入对比图, 帮助读者切换心智模型"
+      },
+      "role": "inline",
+      "description": {
+        "en": "context switching cost comparison chart, thread pool vs subagent",
+        "zh": "上下文切换代价对比图, 线程池 vs subagent"
+      },
+      "style_hint": "chart",
+      "source_hint": "local_library",
+      "priority": "recommended"
+    },
+    {
+      "position": {
+        "anchor": "before_closing",
+        "rationale": "结尾前用一张行动清单式示意图收束"
+      },
+      "role": "inline",
+      "description": {
+        "en": "subagent boundary design checklist, sketch style",
+        "zh": "subagent 边界设计清单, 手绘风格"
+      },
+      "style_hint": "illustration",
+      "source_hint": "local_library",
+      "priority": "optional"
+    }
+  ]
+}

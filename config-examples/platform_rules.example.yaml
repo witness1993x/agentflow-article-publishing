@@ -1,0 +1,284 @@
+# Platform Rules Configuration
+# 定义 6 个平台的排版规则, Agent D3 按此规则适配内容
+#
+# 用户可以覆盖: 复制到 ~/.agentflow/platform_rules.yaml 并修改
+
+version: "1.0"
+last_updated: "2026-04-22"
+
+# ============================================================
+# Medium
+# ============================================================
+medium:
+  enabled: true
+  api_available: true
+
+  # 段落
+  paragraph_max_words: 60
+  paragraph_min_words: 15
+
+  # 标题
+  heading_style: "sentence_case"       # 首字母大写 vs Title Case
+  max_heading_levels: 3                # 只用 h1-h3
+
+  # 长度
+  length_preference: [1500, 3000]
+  length_hard_limit: null              # 无硬上限
+
+  # emoji
+  emoji_density: "low"                 # 几乎不用
+
+  # 引用
+  quote_style: "blockquote"            # > 标记
+
+  # 强调
+  emphasis_style: "bold"               # 用 **bold** 而非 *italic*
+
+  # 图片
+  image_placement: "between_sections"  # 小节之间插图
+  min_images: 1                        # 至少封面图
+
+  # 元数据
+  max_tags: 5
+  subtitle_supported: true
+  canonical_url_supported: true
+
+  # 平台习惯
+  notes: |
+    Medium 读者偏好深度长文, 但段落要短、视觉节奏快.
+    不要用太多 emoji, 看起来不专业.
+    Medium 对 SEO 重视, canonical_url 很重要.
+
+
+# ============================================================
+# Substack
+# ============================================================
+substack:
+  enabled: true
+  api_available: false                 # 无公开 API
+  publishing_method: "playwright"      # v0.5 实现
+
+  paragraph_max_words: 80
+  paragraph_min_words: 20
+
+  heading_style: "title_case"
+  max_heading_levels: 3
+
+  length_preference: [1500, 4000]
+  length_hard_limit: null
+
+  emoji_density: "medium"              # Newsletter 风格, 适度
+
+  quote_style: "italic_indent"
+
+  emphasis_style: "italic"
+
+  image_placement: "top_and_inline"
+  hero_image_required: true            # 首图必要 (邮件预览用)
+
+  max_tags: 3
+  subtitle_supported: true             # subtitle 对订阅邮件很重要
+  canonical_url_supported: true
+
+  # Substack 特有: 邮件预览文本
+  preview_text_max_chars: 150
+
+  notes: |
+    Substack 核心是邮件订阅, 前 2 段和 subtitle 对打开率极重要.
+    适度 emoji 让邮件更亲和.
+    长文读者接受度高, 但开头 hook 必须强.
+
+
+# ============================================================
+# LinkedIn Article
+# ============================================================
+linkedin_article:
+  enabled: true
+  api_available: true
+  publishing_method: "api"
+
+  paragraph_max_words: 40              # 极短
+  paragraph_min_words: 10
+
+  heading_style: "sentence_case"
+  max_heading_levels: 2                # LinkedIn 不支持 h3+
+
+  length_preference: [800, 1500]
+  length_hard_limit: 3000              # UGC Post 字符限制约 3000
+
+  emoji_density: "medium"              # LinkedIn 适度 emoji OK
+
+  quote_style: "bold_highlight"        # > 不好显示, 用 **bold** 替代
+
+  emphasis_style: "bold"
+
+  image_placement: "top_only"          # UGC Post 只支持 1 张图
+
+  max_tags: 5                          # hashtag 形式
+  subtitle_supported: false
+  canonical_url_supported: true        # 可以 share Article 并带 canonical
+
+  # LinkedIn 特有
+  ending_should_have_question: true    # 结尾问句驱动评论
+
+  notes: |
+    LinkedIn 读者习惯碎片阅读, 段落要极短, 最好每行都是一个完整观点.
+    结尾加问句显著提升评论率.
+    v0.1 用 UGC Post (字符限制 ~3000), v0.5 升级为 Article Asset API.
+
+
+# ============================================================
+# 微信公众号
+# ============================================================
+wechat_official:
+  enabled: true
+  api_available: true                  # 需要认证的服务号/订阅号
+  publishing_method: "api"
+
+  paragraph_max_words: 50              # 手机阅读友好
+  paragraph_min_words: 10
+
+  heading_style: "decorative"          # 用 "◆" "●" 等符号装饰
+  max_heading_levels: 2
+
+  length_preference: [2000, 4000]
+  length_hard_limit: null
+
+  emoji_density: "high"                # 中文公众号习惯 emoji 多
+
+  quote_style: "card"                  # HTML 卡片样式
+
+  emphasis_style: "bold_color"         # 加粗 + 强调色
+
+  image_placement: "inline_frequent"   # 每 2-3 段必配图
+  image_interval_paragraphs: 3
+
+  max_tags: 0                          # 公众号不支持 tags
+  subtitle_supported: true             # 摘要字段
+  canonical_url_supported: false       # 公众号不支持 canonical
+
+  # 公众号特有
+  summary_max_chars: 120
+  cover_image_required: true
+  add_cta_footer: true                 # 引导关注/转发
+
+  notes: |
+    公众号审核严格, 敏感词多. 发布前会自动扫描.
+    emoji 密度高是中文读者习惯, 不要照搬英文平台的克制风格.
+    图文比例是公众号的核心打开率指标.
+
+
+# ============================================================
+# X (Twitter) 长文
+# ============================================================
+x_longform:
+  enabled: true
+  api_available: true                  # 需付费档 API
+  publishing_method: "api"
+
+  paragraph_max_words: 30              # 极短段,视觉呼吸感
+  paragraph_min_words: 5
+
+  heading_style: "none"                # X 长文不突出 heading
+  max_heading_levels: 1                # 只用一级,且轻量
+
+  length_preference: [500, 1500]
+  length_hard_limit: 25000             # X 长文硬上限 (付费档)
+
+  emoji_density: "medium"              # 段首或关键词处
+
+  quote_style: "inline_italic"         # 斜体
+
+  emphasis_style: "bold"
+
+  image_placement: "hero_or_inline"
+
+  max_tags: 0                          # X 用 hashtag 在正文而非 tags 字段
+  inline_hashtags_recommended: [2, 4]  # 正文中放 2-4 个 hashtag
+
+  subtitle_supported: false
+  canonical_url_supported: false
+
+  # X 特有
+  thread_preview_tweet_required: true  # 主推要带预览 tweet
+  reduce_external_links: true          # X 不喜欢导流外链
+
+  notes: |
+    X 长文是新兴产品, 读者是 feed 里刷到停下来看的, 所以开头 3 行决定一切.
+    段落要极短, 给视觉呼吸感.
+    外链会被 X 算法降权, 能不放就不放.
+
+
+# ============================================================
+# Ghost / WordPress (个人博客)
+# ============================================================
+ghost_wordpress:
+  enabled: true
+  api_available: true
+  publishing_method: "api"
+
+  paragraph_max_words: 70
+  paragraph_min_words: 15
+
+  heading_style: "title_case"
+  max_heading_levels: 4                # 个人博客无限制
+
+  length_preference: [1000, 5000]
+  length_hard_limit: null
+
+  emoji_density: "low"                 # 个人博客偏克制
+
+  quote_style: "blockquote"
+
+  emphasis_style: "bold"
+
+  image_placement: "as_needed"
+  hero_image_required: true            # 文章列表展示用
+
+  max_tags: 10                         # Ghost 支持较多 tags
+  subtitle_supported: true
+  canonical_url_supported: true
+
+  # SEO 重要 (个人博客主要靠搜索引擎)
+  meta_description_max_chars: 160
+  generate_slug: true                  # URL slug 从标题生成
+
+  notes: |
+    Ghost / WordPress 是作者的"主场", 通常作为 canonical 平台.
+    SEO 元数据要完整 (meta_description, slug, tags).
+    改动应最少, 保留作者原始风格.
+
+
+# ============================================================
+# 全局规则
+# ============================================================
+global:
+  # Canonical URL 策略
+  canonical_strategy:
+    series_A:
+      primary: "wechat_official"       # 中文系列以公众号为主
+      delay_hours_before_others: 24
+    series_B:
+      primary: "substack"              # 英文系列以 Substack 为主 (SEO 强)
+      delay_hours_before_others: 24
+    series_C:
+      primary: "ghost_wordpress"       # 深度分析以自家博客为主 (可控)
+      delay_hours_before_others: 48    # 长文给搜索引擎更多索引时间
+
+  # 发布时间偏好 (本地时间)
+  publishing_time_preferences:
+    weekday_best: "09:00"              # 工作日上午
+    weekend_best: "10:00"
+    avoid_times: ["12:00-14:00", "22:00-06:00"]  # 避开午饭和深夜
+
+  # v0.1 实际支持的平台 (其他 enabled 但未实现的会跳过)
+  v01_supported_platforms:
+    - "medium"
+    - "linkedin_article"
+    - "ghost_wordpress"
+
+  # v0.5 补齐的平台
+  v05_supported_platforms:
+    - "substack"
+    - "wechat_official"
+    - "x_longform"

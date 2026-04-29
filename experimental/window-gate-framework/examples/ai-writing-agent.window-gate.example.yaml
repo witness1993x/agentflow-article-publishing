@@ -1,0 +1,169 @@
+meta:
+  opportunity_id: "OPP-001"
+  opportunity_name: "AI Writing Agent"
+  owner: "founder"
+  date: "2026-04-27"
+  mode: "express"
+  status: "probe"
+  review_cadence: "biweekly"
+
+decision_question:
+  original_question: "要不要做一个 AI 写作产品？"
+  reframed_question: "当前是否存在一个足够强的内容生产与多平台分发效率痛点，值得被做成一个可复利的代理工作流产品？"
+  why_now_hypothesis: "模型质量、长上下文、工具调用和多平台发布需求正在同时成熟。"
+  why_us_hypothesis: "如果团队对创作流程、分发环节和 workflow 设计有长期积累，可以更快做出闭环。"
+  falsified_if:
+    - "用户只把产品当作一次性玩具，而不会持续复用。"
+
+gate_0_reframe:
+  true_need: "不是单点写作，而是缩短从选题到分发的完整内容产出链路。"
+  alternatives:
+    - "继续使用通用模型 + 手工拼工作流"
+    - "做写作插件而不是完整 agent"
+  minimum_testable_unit: "验证用户是否愿意每周重复使用同一条写作到分发 workflow。"
+  assumptions:
+    - "用户愿意把多个内容生产步骤交给一个统一系统。"
+  unknowns:
+    - "是否能形成稳定留存，而不只是单次提效。"
+  verdict: "pass"
+
+gate_1_signal:
+  score: 4
+  dimensions:
+    observable_pain: 4
+    user_workarounds: 5
+    behavioral_evidence: 4
+    structural_shift: 3
+    evidence_quality: 3
+  weakest_link: "evidence_quality"
+  evidence:
+    - source: "用户访谈与创作者工作流观察"
+      type: "user_interview"
+      evidence_tier: "primary"
+      summary: "用户会同时用 ChatGPT、Notion、手工改写和平台后台完成整条链路。"
+      confidence: "high"
+    - source: "市场观察"
+      type: "field_observation"
+      evidence_tier: "secondary"
+      summary: "越来越多创作者在公开讨论如何把多个 AI 工具拼成内容生产工作流。"
+      confidence: "medium"
+  kill_signals:
+    - "用户并不觉得现有工作流低效，只是对新工具短期好奇。"
+  verdict: "pass"
+
+gate_2_demand_window:
+  score: 4
+  dimensions:
+    urgency: 4
+    frequency: 4
+    pain_intensity: 4
+    willingness_to_switch_or_pay: 3
+    external_tailwind: 4
+  weakest_link: "willingness_to_switch_or_pay"
+  evidence:
+    - source: "目标用户的持续创作需求"
+      type: "usage_data"
+      evidence_tier: "primary"
+      summary: "高频创作者每周都需要重复完成选题、写作、改写和分发动作。"
+      confidence: "medium"
+    - source: "内容平台与 AI 工具普及"
+      type: "market_data"
+      evidence_tier: "secondary"
+      summary: "AI 辅助创作正在成为默认工作方式，需求正在从尝鲜转向效率提升。"
+      confidence: "medium"
+  window_assessment:
+    stage: "open"
+    time_horizon: "6-18 个月内可能是较好窗口"
+    window_end_estimate: "若平台或基础模型深度内置同类能力，窗口会明显收窄"
+  kill_signals:
+    - "用户只愿意为单次生成买单，不愿意为整条工作流付费或迁移。"
+  verdict: "pass"
+
+gate_3_product_window:
+  score: 3
+  dimensions:
+    tech_readiness: 4
+    distribution_access: 2
+    user_readiness: 3
+    market_gap: 3
+    defensibility_potential: 3
+  weakest_link: "distribution_access"
+  evidence:
+    - source: "当前模型能力"
+      type: "market_data"
+      evidence_tier: "secondary"
+      summary: "现有模型已足够完成内容草拟、改写、结构化输出和多平台适配。"
+      confidence: "medium"
+    - source: "竞品观察"
+      type: "competitor_move"
+      evidence_tier: "secondary"
+      summary: "市场上有写作助手，但完整覆盖热点到发布闭环的产品仍不多。"
+      confidence: "medium"
+  window_assessment:
+    stage: "forming"
+    time_horizon: "适合先做 probe，不适合大投入 build"
+    window_end_estimate: "若大模型原生产品快速内置相同流程，差异化会减弱"
+  kill_signals:
+    - "产品无法形成高频复用，只能被当成单点写作工具。"
+  verdict: "hold"
+
+gate_4_action:
+  score: 4
+  dimensions:
+    founder_edge: 4
+    resource_fit: 4
+    opportunity_cost: 3
+    compounding_potential: 4
+    speed_to_probe: 5
+  weakest_link: "opportunity_cost"
+  evidence:
+    - source: "团队能力结构"
+      type: "field_observation"
+      evidence_tier: "primary"
+      summary: "小团队可以快速拼出 workflow，并直接接触早期用户验证。"
+      confidence: "high"
+  kill_signals:
+    - "当前团队没有稳定触达目标创作者的渠道。"
+  verdict: "pass"
+
+decision:
+  final_status: "probe"
+  summary: "需求和窗口基本成立，但产品壁垒与留存还未被验证，适合做低成本实验。"
+  core_bet: "用户会重复使用一条从写作到分发的代理工作流，而不只是偶尔调用写作能力。"
+  timing_verdict: "now"
+  primary_constraint: "supply_side"
+  why_now: "能力条件开始具备，适合抢先验证工作流价值。"
+  why_not_now: "分发、留存和壁垒还未被证明，不适合直接重投入。"
+  next_action: "做一个 14 天的 workflow 复用实验。"
+  next_review_date: "2026-05-11"
+  kill_triggers_resolved: "none"
+  veto_from_gate: "gate_3_product_window"
+  abandon_reason: ""
+
+probe_plan:
+  hypothesis: "至少 5 位目标用户会连续两周复用同一条内容生产 workflow。"
+  source_gate: "gate_3_product_window"
+  experiment_type: "prototype_probe"
+  cost: "低"
+  timebox: "14 days"
+  success_signal:
+    - "至少 5 位用户在两周内重复使用超过一次。"
+    - "用户愿意使用多步骤 workflow，而不只是单次润色。"
+  failure_signal:
+    - "用户只使用一次性写作功能，不使用完整流程。"
+    - "没有形成周度复用。"
+
+notes:
+  contrarian_views:
+    - "真正的瓶颈可能不是写作，而是分发和增长。"
+  adjacent_signals:
+    - "更多创作者开始把 AI 当作默认工作台，而不是单次问答工具。"
+  open_questions:
+    - "长期留存的核心驱动到底是 workflow 闭环，还是选题质量？"
+
+review_log:
+  - date: "2026-04-27"
+    previous_status: "watch"
+    new_status: "probe"
+    what_changed: "从机会观察升级为结构化验证，明确了最小实验目标。"
+    lessons: "需求信号不错，但 build 的前提证据还不够。"

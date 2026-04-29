@@ -1,0 +1,5 @@
+{
+  "section": "intro",
+  "updated_text": "Hi friends — quick one this week. I rewrote a chunk of agent glue and walked away with a new way to measure LLM work. Details below.",
+  "notes": "Tightened the intro by ~30% and added a warmer second-person hook per the edit command."
+}

@@ -1,0 +1,31 @@
+{
+  "language": "bilingual",
+  "zh_ratio": 0.78,
+  "avg_para_words": 55,
+  "max_para_words": 120,
+  "min_para_words": 20,
+  "avg_sentence_words": 14,
+  "voice_principles": [
+    {
+      "key": "direct_no_preamble",
+      "description": "开门见山不铺垫"
+    },
+    {
+      "key": "specific_over_abstract",
+      "description": "用具体例子代替抽象术语"
+    }
+  ],
+  "signature_phrases": [
+    "说白了",
+    "本质上",
+    "这里的陷阱是"
+  ],
+  "taboo_candidates": [
+    "赋能",
+    "闭环",
+    "抓手"
+  ],
+  "tone_intensity": "medium_sharp",
+  "structural_pattern": "hook_problem_analysis_conclusion",
+  "emoji_density": "low"
+}

@@ -1,0 +1,97 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-04-22",
+  "author_id": "mobius_y",
+  "identity": {
+    "name": "Author",
+    "handle": "@author",
+    "positioning": "Independent technical writer",
+    "persona": "实操派写作者。写作偏好: 实操胜过理论, 诚实失败胜过包装成功。"
+  },
+  "content_matrix": {
+    "series_A": {
+      "name": "Builder's Playbook",
+      "theme": "产品执行复盘",
+      "typical_length_words": [1500, 2500],
+      "primary_language": "zh",
+      "language_mix_ratio": 0.6,
+      "opening_style": "scenario_driven",
+      "closing_style": "action_reflection",
+      "typical_sections": ["背景场景", "决策过程", "执行细节", "复盘与教训"],
+      "target_platforms_primary": ["ghost_wordpress"],
+      "target_platforms_secondary": ["linkedin_article"],
+      "target_platforms_skip": ["medium"]
+    }
+  },
+  "voice_principles": [
+    {
+      "key": "direct_no_preamble",
+      "description": "开门见山不铺垫。不用'本文将讨论',直接陈述观点或场景。"
+    },
+    {
+      "key": "specific_over_abstract",
+      "description": "用具体例子代替抽象术语。讲'我 3 月花了 40 小时调这段代码',不讲'优化了工作流'。"
+    },
+    {
+      "key": "honest_failure",
+      "description": "坦诚失败过程胜过包装成功。写'我最初理解错了 X,后来才发现...'。"
+    }
+  ],
+  "taboos": {
+    "vocabulary": [
+      "赋能",
+      "闭环",
+      "抓手",
+      "赛道",
+      "颠覆",
+      "改变世界",
+      "终极",
+      "革命性",
+      "最佳实践"
+    ],
+    "sentence_patterns": [
+      "综上所述",
+      "总的来说",
+      "值得注意的是",
+      "首先...其次...最后"
+    ],
+    "contexts": [
+      "不用'我认为'开头",
+      "不给自己贴标签"
+    ]
+  },
+  "tone": {
+    "default_intensity": "medium_sharp",
+    "intensity_by_series": {
+      "series_A": "medium_sharp"
+    }
+  },
+  "paragraph_preferences": {
+    "average_length_words": 55,
+    "max_length_words": 120,
+    "min_length_words": 20,
+    "prefer_short_sentences": true,
+    "use_bullet_lists": "moderate",
+    "use_numbered_lists": "low"
+  },
+  "emoji_preferences": {
+    "default_density": "low",
+    "density_by_platform": {
+      "medium": "low",
+      "linkedin_article": "medium",
+      "ghost_wordpress": "low"
+    }
+  },
+  "citation_preferences": {
+    "external_sources_frequency": "medium",
+    "prefer_primary_sources": true,
+    "quote_style": "direct_quote_with_link"
+  },
+  "reference_samples": [],
+  "_meta": {
+    "version": "1.0",
+    "source_article_count": 3,
+    "source_article_hashes": ["abc123abc123", "def456def456", "789012789012"],
+    "generated_at": "2026-04-22T09:30:00+00:00"
+  }
+}

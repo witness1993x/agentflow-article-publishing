@@ -1,0 +1,196 @@
+meta:
+  hotspot_id: ""
+  hotspot_name: ""
+  owner: ""
+  date: ""
+  mode: "express" # gut_check | express | full
+  status: "draft" # draft | watch | probe | publish | drop
+  review_cadence: "weekly" # weekly | biweekly | monthly
+
+hotspot_question:
+  original_question: ""
+  reframed_question: ""
+  why_this_should_be_a_repo: ""
+  falsified_if:
+    - ""
+
+source_context:
+  hotspot_source: ""
+  topic_lineage:
+    - ""
+  related_links:
+    - ""
+
+repo_plan:
+  local_workspace: ""
+  repo_name: ""
+  github_owner: ""
+  visibility: "public" # public | private
+  default_branch: "main"
+
+gate_0_reframe:
+  true_problem: ""
+  alternatives:
+    - ""
+  minimum_repo_unit: ""
+  assumptions:
+    - ""
+  unknowns:
+    - ""
+  verdict: "pass" # pass | hold | fail
+
+gate_1_hotspot_signal:
+  score: 0
+  dimensions:
+    signal_strength: 0
+    behavior_evidence: 0
+    market_activity: 0
+    timing_window: 0
+    evidence_quality: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "market_data" # market_data | repo_activity | launch_signal | community_signal | field_observation | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_2_project_shape:
+  score: 0
+  project_shape: "undecided" # undecided | demo | starter | sdk | cli | agent_workflow | mcp_server
+  dimensions:
+    audience_clarity: 0
+    deliverable_clarity: 0
+    scope_control: 0
+    novelty_fit: 0
+    reuse_potential: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "field_observation" # market_data | repo_activity | launch_signal | community_signal | field_observation | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_3_repo_routing:
+  score: 0
+  repo_strategy: "undecided" # undecided | fork_existing | template_clone | new_repo
+  discovered_query: ""
+  recommended_strategy: "undecided" # undecided | fork_existing | template_clone | new_repo
+  recommended_reason: ""
+  candidate_repos:
+    - name: ""
+      url: ""
+      description: ""
+      stars: 0
+      updated_at: ""
+      score: 0
+      ranking_reason: ""
+      fit_reason: ""
+      license_note: ""
+  dimensions:
+    upstream_fit: 0
+    license_safety: 0
+    implementation_speed: 0
+    differentiation_room: 0
+    maintenance_cost: 0
+  weakest_link: ""
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_4_buildability:
+  score: 0
+  build_commands:
+    install: ""
+    build: ""
+    test: ""
+  dimensions:
+    dependency_clarity: 0
+    local_build_feasibility: 0
+    testability: 0
+    docs_reproducibility: 0
+    private_dependency_risk: 0
+  weakest_link: ""
+  probe_requirements:
+    - ""
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_5_publish_decision:
+  score: 0
+  dimensions:
+    public_value: 0
+    repo_readiness: 0
+    explainability: 0
+    maintenance_readiness: 0
+    distribution_value: 0
+  weakest_link: ""
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+decision:
+  final_status: "watch" # watch | probe | publish | drop
+  summary: ""
+  one_line_thesis: ""
+  primary_constraint: "" # hotspot_signal | project_shape | repo_routing | buildability | publish_readiness | unknown
+  why_now: ""
+  why_not_now: ""
+  next_action: ""
+  next_review_date: ""
+  kill_triggers_resolved: "none" # none | partial | all_clear
+  veto_from_gate: "" # gate_0_reframe | gate_1_hotspot_signal | gate_2_project_shape | gate_3_repo_routing | gate_4_buildability | gate_5_publish_decision
+  abandon_reason: ""
+
+build_probe:
+  hypothesis: ""
+  source_gate: "" # gate_3_repo_routing | gate_4_buildability | gate_5_publish_decision
+  experiment_type: "" # local_clone_probe | template_probe | build_probe | test_probe | packaging_probe
+  cost: ""
+  timebox: ""
+  success_signal:
+    - ""
+  failure_signal:
+    - ""
+
+notes:
+  contrarian_views:
+    - ""
+  open_questions:
+    - ""
+
+execution_state:
+  discovery:
+    last_run_at: ""
+    query: ""
+    discovered_count: 0
+    selected_candidate_name: ""
+    selected_candidate_url: ""
+    selected_candidate_index: -1
+  probe:
+    last_run_at: ""
+    workspace: ""
+    install_status: "not_run" # not_run | skipped | passed | failed
+    build_status: "not_run" # not_run | skipped | passed | failed
+    test_status: "not_run" # not_run | skipped | passed | failed
+    summary: ""
+  publish:
+    last_run_at: ""
+    repo_ref: ""
+    publish_status: "not_run" # not_run | skipped | passed | failed
+    summary: ""
+
+review_log:
+  - date: ""
+    previous_status: "watch" # watch | probe | publish | drop
+    new_status: "watch" # watch | probe | publish | drop
+    what_changed: ""
+    lessons: ""

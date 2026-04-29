@@ -1,0 +1,158 @@
+# Sources Configuration Example
+# 复制到 ~/.agentflow/sources.yaml 后按需调整
+
+version: "1.0"
+last_updated: "2026-04-22"
+
+# ============================================================
+# Twitter/X KOL
+# ============================================================
+twitter_kols:
+  # AI × Web3 核心关注
+  - handle: "@balajis"
+    weight: high
+    relevance_to_series: ["B", "C"]
+
+  - handle: "@VitalikButerin"
+    weight: high
+    relevance_to_series: ["C"]
+
+  - handle: "@dwr_nt"
+    weight: high
+    relevance_to_series: ["B", "C"]
+
+  # AI 领域
+  - handle: "@paulg"
+    weight: high
+    relevance_to_series: ["A", "B"]
+
+  - handle: "@sama"
+    weight: medium
+    relevance_to_series: ["B"]
+
+  - handle: "@karpathy"
+    weight: high
+    relevance_to_series: ["B"]
+
+  - handle: "@simonw"
+    weight: high
+    relevance_to_series: ["B"]
+
+  # 产品与工程
+  - handle: "@patrickc"
+    weight: medium
+    relevance_to_series: ["A", "B"]
+
+  - handle: "@dhh"
+    weight: medium
+    relevance_to_series: ["A", "B"]
+
+  # Web3 specific
+  - handle: "@rainandcoffee"
+    weight: medium
+    relevance_to_series: ["C"]
+
+  - handle: "@jon_charb"
+    weight: medium
+    relevance_to_series: ["C"]
+
+# ============================================================
+# RSS Feeds
+# ============================================================
+rss_feeds:
+  # 行业 Newsletter
+  - url: "https://stratechery.com/feed/"
+    name: "Stratechery"
+    relevance_to_series: ["C"]
+
+  - url: "https://www.notboring.co/feed"
+    name: "Not Boring"
+    relevance_to_series: ["B", "C"]
+
+  - url: "https://matt.blwt.io/feed/feed.rss"
+    name: "Matt Blewitt (Blockworks)"
+    relevance_to_series: ["C"]
+
+  # 技术博客
+  - url: "https://simonwillison.net/atom/everything/"
+    name: "Simon Willison"
+    relevance_to_series: ["B"]
+
+  - url: "https://www.anthropic.com/rss.xml"
+    name: "Anthropic Blog"
+    relevance_to_series: ["B"]
+
+  # Web3 研究
+  - url: "https://decentralisedco.com/feed"
+    name: "Decentralised.co"
+    relevance_to_series: ["C"]
+
+  - url: "https://messari.io/rss"
+    name: "Messari Research"
+    relevance_to_series: ["C"]
+
+# ============================================================
+# HackerNews
+# ============================================================
+hackernews:
+  enabled: true
+  filter_keywords:
+    - "AI"
+    - "Agent"
+    - "Claude"
+    - "LLM"
+    - "Web3"
+    - "Crypto"
+    - "Product Management"
+    - "Developer Tools"
+  relevance_to_series: ["B"]
+  min_score: 50
+
+# ============================================================
+# Substack 竞品 (同领域其他作者)
+# ============================================================
+substack_competitors:
+  - url: "https://decentralisedco.com/"
+    name: "Decentralised.co"
+    relevance_to_series: ["C"]
+
+  - url: "https://banklesshq.com/"
+    name: "Bankless"
+    relevance_to_series: ["C"]
+
+  - url: "https://oneusefulthing.org/"
+    name: "One Useful Thing (Ethan Mollick)"
+    relevance_to_series: ["B"]
+
+# ============================================================
+# Newsletter 邮件订阅 (通过 IMAP 读)
+# ============================================================
+newsletters:
+  # 暂时不启用 (需要配置 IMAP),v0.5 再说
+  enabled: false
+  imap_config:
+    host: "imap.gmail.com"
+    port: 993
+    email_env: "NEWSLETTER_EMAIL"
+    password_env: "NEWSLETTER_APP_PASSWORD"
+  sources:
+    - name: "The Rundown AI"
+      sender_pattern: "*rundown*"
+      relevance_to_series: ["B"]
+
+# ============================================================
+# 发现参数
+# ============================================================
+discovery_config:
+  scan_frequency_hours: 6            # 每 6 小时扫一次
+  daily_candidates_target: 18        # 目标每日推送 ~18 条
+  min_discussion_volume: 50          # Twitter 回复数门槛
+  min_hn_score: 50                   # HN 分数门槛
+  time_decay_hours: 48               # 超过 48h 的不推
+  cross_source_bonus: 0.3            # 跨源热点加分
+
+  # 系列权重分配 (影响推送比例)
+  series_weight:
+    series_A: 0.25
+    series_B: 0.45
+    series_C: 0.30

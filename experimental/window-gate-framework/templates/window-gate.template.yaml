@@ -1,0 +1,151 @@
+meta:
+  opportunity_id: ""
+  opportunity_name: ""
+  owner: ""
+  date: ""
+  mode: "express" # gut_check | express | full
+  status: "draft" # draft | watch | probe | build | drop
+  review_cadence: "monthly" # weekly | biweekly | monthly | quarterly
+
+decision_question:
+  original_question: ""
+  reframed_question: ""
+  why_now_hypothesis: ""
+  why_us_hypothesis: ""
+  falsified_if:
+    - ""
+
+gate_0_reframe:
+  true_need: ""
+  alternatives:
+    - ""
+  minimum_testable_unit: ""
+  assumptions:
+    - ""
+  unknowns:
+    - ""
+  verdict: "pass" # pass | hold | fail
+
+gate_1_signal:
+  score: 0
+  dimensions:
+    observable_pain: 0
+    user_workarounds: 0
+    behavioral_evidence: 0
+    structural_shift: 0
+    evidence_quality: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "user_interview" # user_interview | usage_data | search_trend | competitor_move | field_observation | market_data | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  kill_signals:
+    - ""
+  verdict: "hold" # pass | hold | fail
+
+gate_2_demand_window:
+  score: 0
+  dimensions:
+    urgency: 0
+    frequency: 0
+    pain_intensity: 0
+    willingness_to_switch_or_pay: 0
+    external_tailwind: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "market_data" # user_interview | usage_data | search_trend | competitor_move | field_observation | market_data | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  window_assessment:
+    stage: "forming" # closed | forming | open | crowded
+    time_horizon: ""
+    window_end_estimate: ""
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_3_product_window:
+  score: 0
+  dimensions:
+    tech_readiness: 0
+    distribution_access: 0
+    user_readiness: 0
+    market_gap: 0
+    defensibility_potential: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "competitor_move" # user_interview | usage_data | search_trend | competitor_move | field_observation | market_data | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  window_assessment:
+    stage: "forming" # too_early | forming | open | too_late
+    time_horizon: ""
+    window_end_estimate: ""
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+gate_4_action:
+  score: 0
+  dimensions:
+    founder_edge: 0
+    resource_fit: 0
+    opportunity_cost: 0
+    compounding_potential: 0
+    speed_to_probe: 0
+  weakest_link: ""
+  evidence:
+    - source: ""
+      type: "field_observation" # user_interview | usage_data | search_trend | competitor_move | field_observation | market_data | regulatory
+      evidence_tier: "secondary" # primary | secondary | anecdotal
+      summary: ""
+      confidence: "medium"
+  kill_signals:
+    - ""
+  verdict: "hold"
+
+decision:
+  final_status: "watch" # watch | probe | build | drop
+  summary: ""
+  core_bet: ""
+  timing_verdict: "unknown" # unknown | too_early | now | late
+  primary_constraint: "" # demand_side | supply_side | team_side | unknown
+  why_now: ""
+  why_not_now: ""
+  next_action: ""
+  next_review_date: ""
+  kill_triggers_resolved: "none" # none | partial | all_clear
+  veto_from_gate: "" # gate_0_reframe | gate_1_signal | gate_2_demand_window | gate_3_product_window | gate_4_action
+  abandon_reason: ""
+
+probe_plan:
+  hypothesis: ""
+  source_gate: "" # gate_1_signal | gate_2_demand_window | gate_3_product_window | gate_4_action
+  experiment_type: "" # narrative_probe | demand_probe | prototype_probe | channel_probe | pricing_probe
+  cost: ""
+  timebox: ""
+  success_signal:
+    - ""
+  failure_signal:
+    - ""
+
+notes:
+  contrarian_views:
+    - ""
+  adjacent_signals:
+    - ""
+  open_questions:
+    - ""
+
+review_log:
+  - date: ""
+    previous_status: "watch" # watch | probe | build | drop
+    new_status: "watch" # watch | probe | build | drop
+    what_changed: ""
+    lessons: ""

@@ -1,0 +1,26 @@
+[Unit]
+Description=AgentFlow Telegram Review Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentflow
+Group=agentflow
+# These paths are aligned with `deploy.sh` (which extracts the bundle to
+# /opt/agentflow). If you install elsewhere, edit BOTH WorkingDirectory and
+# ExecStart, or re-run `deploy.sh --prefix /custom/path`.
+WorkingDirectory=/opt/agentflow/backend
+EnvironmentFile=/opt/agentflow/backend/.env
+ExecStart=/opt/agentflow/backend/.venv/bin/af review-daemon
+Restart=on-failure
+RestartSec=10
+# Best-effort hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/agentflow/.agentflow /opt/agentflow/backend
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
