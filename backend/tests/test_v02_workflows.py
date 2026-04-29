@@ -2514,5 +2514,258 @@ class MediumWorkflowTests(AgentflowHomeTestCase):
         )
 
 
+class TgMenuV103Tests(AgentflowHomeTestCase):
+    """v1.0.3 Telegram menu enrichment — orphan callback wiring, unified
+    button labels, and the 8-command global slash menu."""
+
+    def test_action_req_has_no_orphan_callbacks(self) -> None:
+        """Every (gate, action) pair in ``_ACTION_REQ`` must be rendered as a
+        callback button somewhere — either by ``render.py`` (cards) or by an
+        inline keyboard inside ``daemon._route`` (follow-up notifications).
+
+        This is the v1.0.3 acceptance gate: no callback is registered without
+        a UI affordance to fire it."""
+        from agentflow.agent_review import render as _render
+        from pathlib import Path as _Path
+
+        render_text = _Path(_render.__file__).read_text(encoding="utf-8")
+        daemon_text = _Path(review_daemon.__file__).read_text(encoding="utf-8")
+        haystack = render_text + "\n" + daemon_text
+
+        orphans: list[str] = []
+        for (gate, action) in review_daemon._ACTION_REQ.keys():
+            needle = f"{gate}:{action}:"
+            if needle not in haystack:
+                orphans.append(needle)
+        self.assertEqual(
+            orphans,
+            [],
+            f"orphan callbacks found (registered in _ACTION_REQ but never "
+            f"rendered): {orphans}",
+        )
+
+    def test_gate_b_card_uses_unified_label_set(self) -> None:
+        text, kb, _sid = review_render.render_gate_b(
+            article_id="article_label_b",
+            title="Label test",
+            subtitle=None,
+            publisher_brand="brand",
+            voice="first_party_brand",
+            word_count=100,
+            section_count=2,
+            compliance_score=0.9,
+            tags=[],
+            self_check_lines=[],
+            opening_excerpt="hello",
+        )
+        labels = {
+            btn["text"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        }
+        callbacks = [
+            btn["callback_data"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        ]
+        self.assertIn("✅ 通过", labels)
+        self.assertIn("🚫 拒绝", labels)
+        # Gate B v1.0.3 requirements: diff + defer wired as buttons
+        self.assertTrue(any(cb.startswith("B:diff:") for cb in callbacks))
+        self.assertTrue(
+            any(cb.startswith("B:defer:") and "hours=2" in cb for cb in callbacks)
+        )
+
+    def test_gate_c_card_uses_unified_label_set_and_full_button(self) -> None:
+        text, kb, _sid = review_render.render_gate_c(
+            article_id="article_label_c",
+            title="Cover label",
+            image_mode="cover-only",
+            cover_style="cover",
+            cover_size="2048x1024",
+            self_check_lines=[],
+            brand_overlay_status="ON",
+            brand_overlay_anchor="bottom_left",
+            inline_body_count=0,
+        )
+        labels = {
+            btn["text"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        }
+        callbacks = [
+            btn["callback_data"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        ]
+        self.assertIn("✅ 通过", labels)
+        self.assertIn("🚫 拒绝", labels)
+        self.assertTrue(any(cb.startswith("C:full:") for cb in callbacks))
+        self.assertTrue(
+            any(cb.startswith("C:defer:") and "hours=2" in cb for cb in callbacks)
+        )
+
+    def test_gate_a_card_renders_expand_and_defer_buttons(self) -> None:
+        text, kb, _sid = review_render.render_gate_a(
+            publisher_brand="brand",
+            target_series="A",
+            candidates=[
+                {"title": "T1", "angle": "a", "score": "0.5", "age_h": "1.0", "source": "s"},
+            ],
+            batch_path=str(self.home / "batch.json"),
+        )
+        callbacks = [
+            btn["callback_data"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        ]
+        self.assertTrue(any(cb.startswith("A:expand:") for cb in callbacks))
+        self.assertTrue(
+            any(cb.startswith("A:defer:") and "hours=4" in cb for cb in callbacks)
+        )
+
+    def test_gate_d_confirm_uses_unified_pass_label(self) -> None:
+        sid = review_short_id.register(gate="D", article_id="art_d_label")
+        text, kb = review_render.render_gate_d(
+            article_id="art_d_label",
+            title="Channel select label",
+            available=["medium", "twitter"],
+            selected=set(),
+            short_id=sid,
+        )
+        labels = {
+            btn["text"]
+            for row in kb["inline_keyboard"]
+            for btn in row
+        }
+        self.assertIn("✅ 通过", labels)
+        self.assertIn("🚫 拒绝", labels)
+
+    def test_defer_callback_schedules_repost_via_store(self) -> None:
+        self.stack.enter_context(
+            patch.object(review_daemon, "_REVIEW_HOME", self.home / "review")
+        )
+        sid = review_short_id.register(gate="B", article_id="article_defer_b")
+        entry = review_short_id.resolve(sid) or {}
+        with (
+            patch("agentflow.agent_review.daemon.auth.is_authorized", return_value=True),
+            patch("agentflow.agent_review.daemon.tg_client.answer_callback_query") as ack_mock,
+            patch("agentflow.agent_review.daemon.tg_client.edit_message_reply_markup"),
+            patch("agentflow.agent_review.daemon.tg_client.send_message"),
+        ):
+            review_daemon._route(
+                "B",
+                "defer",
+                sid,
+                "hours=2",
+                entry,
+                "cb1",
+                456,
+                789,
+                123,
+            )
+        ack_mock.assert_called_once()
+        scheduled = json.loads(
+            (self.home / "review" / "deferred_reposts.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0]["gate"], "B")
+        self.assertEqual(scheduled[0]["article_id"], "article_defer_b")
+        self.assertAlmostEqual(scheduled[0]["hours"], 2.0)
+        self.assertIn("due_at", scheduled[0])
+
+    def test_eight_v103_slash_commands_have_handlers(self) -> None:
+        """Each of the v1.0.3 commands must be wired as an entry inside
+        ``_handle_message`` AND advertised in ``_BOT_COMMANDS``."""
+        import inspect as _inspect
+
+        source = _inspect.getsource(review_daemon._handle_message)
+        v103_cmds = [
+            "/status", "/queue", "/help", "/skip", "/defer",
+            "/publish-mark", "/audit", "/auth-debug",
+        ]
+        for cmd in v103_cmds:
+            self.assertIn(
+                cmd, source, f"slash command {cmd!r} missing from _handle_message",
+            )
+        # Help text must regenerate the role matrix from _ACTION_REQ.
+        help_text = review_daemon._build_help_text()
+        self.assertIn("Role Matrix", help_text)
+        for (gate, action) in review_daemon._ACTION_REQ.keys():
+            # MarkdownV2 escapes ``_`` so match the escaped form too.
+            needle = f"{gate}:{action.replace('_', chr(92) + '_')}"
+            self.assertIn(needle, help_text)
+        # Bot commands surface should also include the new menu entries.
+        cmd_names = {item["command"] for item in review_daemon._BOT_COMMANDS}
+        self.assertTrue(
+            {"status", "queue", "skip", "defer", "audit", "auth_debug"}
+            <= cmd_names
+        )
+
+    def test_auth_debug_returns_non_empty_role_matrix(self) -> None:
+        sent: list[tuple[Any, ...]] = []
+
+        def _capture(*args: Any, **kwargs: Any) -> None:
+            sent.append((args, kwargs))
+
+        with (
+            patch("agentflow.agent_review.daemon.auth.is_authorized", return_value=True),
+            patch(
+                "agentflow.agent_review.daemon.tg_client.send_message",
+                side_effect=_capture,
+            ),
+        ):
+            review_daemon._send_auth_debug(chat_id=456, uid=123)
+
+        self.assertEqual(len(sent), 1)
+        body = sent[0][0][1]
+        self.assertIn("Auth Debug", body)
+        # Role matrix line is rendered for every (gate, action) pair —
+        # MarkdownV2 escapes ``_`` so we check the escaped form.
+        for (gate, action) in review_daemon._ACTION_REQ.keys():
+            needle = f"{gate}:{action.replace('_', chr(92) + '_')}"
+            self.assertIn(needle, body)
+
+    def test_a_expand_callback_sends_expanded_batch(self) -> None:
+        batch_path = self.home / "hotspots_expand.json"
+        batch_path.write_text(
+            json.dumps({
+                "hotspots": [
+                    {
+                        "id": "hs_x1",
+                        "topic_one_liner": "Test topic A",
+                        "suggested_angles": [
+                            {"title": "Angle one", "angle": "a"},
+                        ],
+                        "source_references": [
+                            {"text_snippet": "Some signal text"},
+                        ],
+                        "freshness_score": 0.7,
+                        "depth_potential": "medium",
+                    }
+                ]
+            }),
+            encoding="utf-8",
+        )
+        sid = review_short_id.register(gate="A", batch_path=str(batch_path))
+        entry = review_short_id.resolve(sid) or {}
+
+        with (
+            patch("agentflow.agent_review.daemon.auth.is_authorized", return_value=True),
+            patch("agentflow.agent_review.daemon.tg_client.answer_callback_query") as ack_mock,
+            patch("agentflow.agent_review.daemon.tg_client.send_long_text") as send_mock,
+        ):
+            review_daemon._route(
+                "A", "expand", sid, "", entry, "cb1", 456, 789, 123,
+            )
+        ack_mock.assert_called_once()
+        send_mock.assert_called_once()
+        body = send_mock.call_args.args[1]
+        self.assertIn("Test topic A", body)
+        self.assertIn("Angle one", body)
+
+
 if __name__ == "__main__":
     unittest.main()

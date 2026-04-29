@@ -45,13 +45,20 @@ _REVIEW_HOME = agentflow_home() / "review"
 
 _BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "start", "description": "注册/检查 review chat"},
-    {"command": "help", "description": "查看基础操作说明"},
+    {"command": "help", "description": "查看 gate 定义 + 按钮图例 + 授权矩阵"},
+    {"command": "status", "description": "列出 *_pending_review 文章 + 等待时长"},
+    {"command": "queue", "description": "队列前 5 条最久未审"},
     {"command": "list", "description": "列出待处理 B/C/D/Ready 卡片"},
     {"command": "published", "description": "列最近 N 天发布的文章 (default 7d)"},
     {"command": "suggestions", "description": "查看待确认 profile 建议"},
-    {"command": "cancel", "description": "作废一个 pending short_id"},
     {"command": "scan", "description": "主动触发 hotspots 扫描 (top-k)"},
     {"command": "jobs", "description": "查看 cron 定时任务状态"},
+    {"command": "skip", "description": "跳过 image-gate, 直接 Gate D"},
+    {"command": "defer", "description": "推迟 Gate B/C/D N 小时"},
+    {"command": "publish_mark", "description": "标记 published (manual paste)"},
+    {"command": "audit", "description": "最近 20 条 callback/slash 决策"},
+    {"command": "auth_debug", "description": "查看 uid 在每个动作上的授权"},
+    {"command": "cancel", "description": "作废一个 pending short_id"},
 ]
 
 _PROFILE_SETUP_STEPS: list[dict[str, str]] = [
@@ -432,6 +439,562 @@ def configure_bot_menu(chat_id: int | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Deferred re-post store — backs *:defer callbacks. Sweeper drains entries
+# whose ``due_at`` has passed by reposting a fresh Gate card. Idempotent:
+# each entry is removed after being acted upon.
+# ---------------------------------------------------------------------------
+
+
+def _deferred_path() -> Path:
+    p = _REVIEW_HOME / "deferred_reposts.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _read_deferred() -> list[dict[str, Any]]:
+    raw = _read_json(_deferred_path(), [])
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _write_deferred(items: list[dict[str, Any]]) -> None:
+    _write_json(_deferred_path(), items)
+
+
+def _parse_defer_hours(extra: str) -> float | None:
+    """Pull ``hours=N`` from a ``defer`` callback's ``extra`` field. Returns
+    None if missing/malformed."""
+    if not extra:
+        return None
+    for token in extra.split(":"):
+        token = token.strip()
+        if token.startswith("hours="):
+            try:
+                return float(token.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _schedule_deferred_repost(
+    *,
+    gate: str,
+    article_id: str | None,
+    batch_path: str | None,
+    hours: float,
+    source_sid: str,
+) -> None:
+    """Append a deferred-repost entry. The sweeper picks it up after ``hours``
+    elapse. Idempotent at the (gate, target) tuple — a second defer for the
+    same article extends the timer rather than queuing a duplicate."""
+    if hours <= 0:
+        raise ValueError(f"defer hours must be positive, got {hours!r}")
+    due = datetime.now(timezone.utc) + timedelta(hours=hours)
+    items = _read_deferred()
+    target = article_id or batch_path or ""
+    new_items: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("gate") == gate and (
+            item.get("article_id") == article_id
+            and item.get("batch_path") == batch_path
+        ):
+            continue
+        new_items.append(item)
+    new_items.append({
+        "gate": gate,
+        "article_id": article_id,
+        "batch_path": batch_path,
+        "due_at": due.isoformat(),
+        "hours": float(hours),
+        "source_short_id": source_sid,
+        "scheduled_at": datetime.now(timezone.utc).isoformat(),
+        "target": target,
+    })
+    _write_deferred(new_items)
+
+
+def _drain_deferred_reposts() -> int:
+    """Drain due entries from the deferred-repost store. Returns the number
+    of entries acted upon. Each acted-upon entry is removed regardless of
+    repost success — failures land in the audit log so the operator can
+    re-trigger manually."""
+    items = _read_deferred()
+    if not items:
+        return 0
+    now = datetime.now(timezone.utc)
+    kept: list[dict[str, Any]] = []
+    fired = 0
+    for item in items:
+        due_iso = item.get("due_at")
+        try:
+            due = datetime.fromisoformat(str(due_iso)) if due_iso else None
+        except ValueError:
+            due = None
+        if due is None or due > now:
+            kept.append(item)
+            continue
+        fired += 1
+        gate = str(item.get("gate") or "")
+        article_id = item.get("article_id")
+        batch_path = item.get("batch_path")
+        try:
+            from agentflow.agent_review import triggers as _triggers
+            if gate == "B" and article_id:
+                _triggers.post_gate_b(article_id, force=True)
+            elif gate == "C" and article_id:
+                _triggers.post_gate_c(article_id)
+            elif gate == "A" and batch_path:
+                # Re-render Gate A by re-running hotspots on the saved batch
+                # (the batch JSON survives) — for safety we just notify the
+                # operator instead of re-running the full pipeline. Gate A
+                # batches contain raw hotspots that still resolve via the sid
+                # index until they expire.
+                chat_id = get_review_chat_id()
+                if chat_id is not None:
+                    tg_client.send_message(
+                        chat_id,
+                        f"⏰ Gate A defer 到期: 重新审阅 batch {batch_path}",
+                        parse_mode=None,
+                    )
+            _audit({
+                "kind": "deferred_repost_fired",
+                "gate": gate,
+                "article_id": article_id,
+                "batch_path": batch_path,
+            })
+        except Exception as err:  # pragma: no cover
+            _log.warning("deferred repost failed (gate=%s aid=%s): %s",
+                         gate, article_id, err)
+            _audit({
+                "kind": "deferred_repost_failed",
+                "gate": gate,
+                "article_id": article_id,
+                "batch_path": batch_path,
+                "error": str(err)[:300],
+            })
+    if fired:
+        _write_deferred(kept)
+    return fired
+
+
+# ---------------------------------------------------------------------------
+# Slash command helpers (v1.0.3 menu set: status / queue / help / skip /
+# defer / publish-mark / audit / auth-debug). Each returns None on success
+# and an error label on failure (for audit-event annotation).
+# ---------------------------------------------------------------------------
+
+
+def _gate_label_for_state(cur: str | None) -> str:
+    return {
+        state.STATE_DRAFT_PENDING_REVIEW: "B",
+        state.STATE_IMAGE_PENDING_REVIEW: "C",
+        state.STATE_CHANNEL_PENDING_REVIEW: "D",
+        state.STATE_READY_TO_PUBLISH: "Ready",
+    }.get(str(cur or ""), "?")
+
+
+def _article_title(article_id: str) -> str:
+    try:
+        data = json.loads(
+            (agentflow_home() / "drafts" / article_id / "metadata.json")
+            .read_text(encoding="utf-8")
+        ) or {}
+        return str(data.get("title") or "(no title)")
+    except Exception:
+        return "(no title)"
+
+
+def _article_age_hours(article_id: str) -> float | None:
+    try:
+        history = state.gate_history(article_id)
+        if not history:
+            return None
+        ts = datetime.fromisoformat(
+            str(history[-1].get("timestamp") or "").replace("Z", "+00:00")
+        )
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+    except Exception:
+        return None
+
+
+def _pending_articles_with_age() -> list[tuple[str, str, str, float]]:
+    """Return (article_id, gate_label, title, age_hours) tuples for every
+    article in any *_pending_review state. Stable-sorted oldest-first."""
+    pending_states = [
+        state.STATE_DRAFT_PENDING_REVIEW,
+        state.STATE_IMAGE_PENDING_REVIEW,
+        state.STATE_CHANNEL_PENDING_REVIEW,
+    ]
+    rows: list[tuple[str, str, str, float]] = []
+    for aid in state.articles_in_state(pending_states) or []:
+        try:
+            cur = state.current_state(aid)
+        except Exception:
+            cur = None
+        gate_label = _gate_label_for_state(cur)
+        age = _article_age_hours(aid) or 0.0
+        rows.append((aid, gate_label, _article_title(aid), age))
+    rows.sort(key=lambda row: -row[3])  # oldest first
+    return rows
+
+
+def _format_age(age_hours: float) -> str:
+    if age_hours >= 24:
+        return f"{int(age_hours / 24)}d+"
+    if age_hours >= 1:
+        return f"{int(age_hours)}h+"
+    return f"{int(age_hours * 60)}m+"
+
+
+def _send_status_summary(chat_id: int | None) -> None:
+    if chat_id is None:
+        return
+    rows = _pending_articles_with_age()
+    if not rows:
+        tg_client.send_message(chat_id, "✨ 无 pending 卡片", parse_mode=None)
+        return
+    lines: list[str] = [f"📊 *Pending* ({_render.escape_md2(len(rows))})", ""]
+    for aid, gate_label, title, age in rows[:30]:
+        aid_short = aid[:8] if len(aid) > 8 else aid
+        lines.append(
+            f"• {_render.escape_md2(gate_label)}: "
+            f"`{_render.escape_md2(aid_short)}` — "
+            f"{_render.escape_md2(title)} "
+            f"\\({_render.escape_md2(_format_age(age))}\\)"
+        )
+    if len(rows) > 30:
+        lines.append("")
+        lines.append(_render.escape_md2(f"… 还有 {len(rows) - 30} 条"))
+    tg_client.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+
+
+def _send_queue_summary(chat_id: int | None, *, limit: int = 5) -> None:
+    if chat_id is None:
+        return
+    rows = _pending_articles_with_age()
+    if not rows:
+        tg_client.send_message(chat_id, "✨ 队列空", parse_mode=None)
+        return
+    lines: list[str] = [
+        f"📋 *Queue* (top {_render.escape_md2(min(limit, len(rows)))} oldest)",
+        "",
+    ]
+    for aid, gate_label, title, age in rows[:limit]:
+        aid_short = aid[:8] if len(aid) > 8 else aid
+        lines.append(
+            f"• {_render.escape_md2(gate_label)}: "
+            f"`{_render.escape_md2(aid_short)}` — "
+            f"{_render.escape_md2(title)} "
+            f"\\({_render.escape_md2(_format_age(age))}\\)"
+        )
+    tg_client.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+
+
+def _slash_skip(
+    chat_id: int | None, uid: int | None, target_id: str
+) -> str | None:
+    if not target_id:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, "用法: /skip <article_id>", parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "missing_id"
+    try:
+        cur = state.current_state(target_id)
+    except Exception as err:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, f"❌ 未知 article_id: {err}"[:300],
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "no_article"
+    if cur != state.STATE_IMAGE_PENDING_REVIEW:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ /skip 仅对 image_pending_review 生效, 当前 state={cur}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "wrong_state"
+    try:
+        state.transition(
+            target_id, gate="C",
+            to_state=state.STATE_IMAGE_SKIPPED,
+            actor="human", decision="slash_skip",
+            notes=f"uid={uid}", force=True,
+        )
+    except state.StateError as err:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, f"❌ skip 失败: {err}"[:300], parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "transition_failed"
+    timeout_state.clear(target_id)
+    try:
+        _spawn_gate_d(target_id)
+    except Exception as err:
+        _log.warning("/skip _spawn_gate_d failed: %s", err)
+    if chat_id is not None:
+        try:
+            tg_client.send_message(
+                chat_id,
+                f"🚫 已 skip image-gate, 推 Gate D: {target_id}",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
+    return None
+
+
+def _slash_defer(
+    chat_id: int | None, uid: int | None, target_id: str, hours: float,
+) -> str | None:
+    try:
+        cur = state.current_state(target_id)
+    except Exception:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, f"❌ 未知 article_id: {target_id}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "no_article"
+    gate_for_state = {
+        state.STATE_DRAFT_PENDING_REVIEW: "B",
+        state.STATE_IMAGE_PENDING_REVIEW: "C",
+        state.STATE_CHANNEL_PENDING_REVIEW: "D",
+    }
+    gate = gate_for_state.get(str(cur or ""))
+    if gate is None:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ /defer 仅对 *_pending_review 生效, 当前 state={cur}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "wrong_state"
+    try:
+        _schedule_deferred_repost(
+            gate=gate,
+            article_id=target_id,
+            batch_path=None,
+            hours=float(hours),
+            source_sid=f"slash:{uid or '?'}",
+        )
+    except Exception as err:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, f"❌ defer 调度失败: {err}"[:300],
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "schedule_failed"
+    if chat_id is not None:
+        try:
+            tg_client.send_message(
+                chat_id,
+                f"⏰ Gate {gate} 已 defer {hours}h: {target_id}",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
+    return None
+
+
+def _slash_publish_mark(
+    chat_id: int | None,
+    uid: int | None,
+    target_id: str,
+    url: str,
+    platform: str,
+) -> str | None:
+    if not url.startswith(("http://", "https://")):
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, "❌ URL 必须以 http(s):// 开头",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "bad_url"
+    from agentflow.agent_review import triggers as _triggers
+    try:
+        result = _triggers.mark_published(
+            target_id, published_url=url, platform=platform,
+            notes=f"slash_uid={uid}",
+        )
+    except (ValueError, FileNotFoundError) as err:
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id, f"❌ publish-mark 失败: {err}"[:500],
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        return "mark_failed"
+    if chat_id is not None:
+        try:
+            tg_client.send_message(
+                chat_id,
+                f"📌 已标记 published: {result.get('article_id')} → "
+                f"{result.get('published_url')} ({result.get('platform')})",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
+    return None
+
+
+def _send_audit_tail(chat_id: int | None, *, limit: int = 20) -> None:
+    if chat_id is None:
+        return
+    ap = _audit_path()
+    if not ap.exists():
+        tg_client.send_message(chat_id, "📋 audit 空", parse_mode=None)
+        return
+    try:
+        raw_lines = ap.read_text(encoding="utf-8").splitlines()
+    except Exception as err:
+        tg_client.send_message(chat_id, f"❌ audit 读失败: {err}"[:300], parse_mode=None)
+        return
+    decisions: list[dict[str, Any]] = []
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = obj.get("kind") or ""
+        if kind in {
+            "callback", "callback_action_done", "callback_action_denied",
+            "callback_unauthorized", "slash_command",
+        }:
+            decisions.append(obj)
+    decisions = decisions[-limit:]
+    if not decisions:
+        tg_client.send_message(chat_id, "📋 audit 暂无 callback/slash 记录", parse_mode=None)
+        return
+    lines: list[str] = [f"📋 *Audit* (last {_render.escape_md2(len(decisions))})", ""]
+    for ev in decisions:
+        ts = str(ev.get("audit_ts") or "")[11:19]  # HH:MM:SS
+        kind = str(ev.get("kind") or "?")
+        if kind == "slash_command":
+            label = f"{ev.get('cmd') or '?'}"
+        else:
+            label = f"{ev.get('gate') or '?'}:{ev.get('action') or '?'}"
+        uid_repr = ev.get("uid") or "?"
+        target = ev.get("article_id") or ev.get("short_id") or ""
+        lines.append(
+            f"• `{_render.escape_md2(ts)}` "
+            f"{_render.escape_md2(kind)} "
+            f"{_render.escape_md2(label)} "
+            f"uid\\={_render.escape_md2(uid_repr)} "
+            f"{_render.escape_md2(str(target)[:24])}"
+        )
+    tg_client.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+
+
+def _send_auth_debug(chat_id: int | None, uid: int | None) -> None:
+    if chat_id is None:
+        return
+    rows = sorted(_ACTION_REQ.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    lines: list[str] = [
+        f"🔐 *Auth Debug* (uid `{_render.escape_md2(uid)}`)",
+        "",
+    ]
+    for (gate, action), required in rows:
+        ok = auth.is_authorized(uid, action=required)
+        marker = "✅" if ok else "🚫"
+        lines.append(
+            f"{marker} {_render.escape_md2(gate)}:"
+            f"{_render.escape_md2(action)} "
+            f"\\(needs `{_render.escape_md2(required)}`\\)"
+        )
+    tg_client.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+
+
+def _build_help_text() -> str:
+    """Render the operator help card. Role matrix is generated at runtime
+    from ``_ACTION_REQ`` so it stays in sync."""
+    base_cmds: list[tuple[str, str]] = [
+        ("/start", "注册当前会话为 review chat"),
+        ("/status", "列出 *_pending_review 文章 + 等待时长"),
+        ("/queue", "队列前 5 条最久未审"),
+        ("/list [all|B|C|D|ready|publish]", "列出当前 pending 卡片"),
+        ("/published [days]", "最近 N 天 published 文章"),
+        ("/scan [top-k]", "主动触发 hotspots 扫描"),
+        ("/jobs", "cron 定时任务状态"),
+        ("/suggestions [profile]", "待确认 profile 建议"),
+        ("/skip <article_id>", "跳过 image-gate, 直接 Gate D"),
+        ("/defer <article_id> <hours>", "推迟 Gate B/C/D N 小时"),
+        ("/publish-mark <article_id> <url> [platform]", "标记 published (manual paste)"),
+        ("/audit", "最近 20 条 callback/slash 记录"),
+        ("/auth-debug", "你的 uid 在每个动作上的授权情况"),
+        ("/cancel <short_id>", "作废一个 pending callback short_id"),
+        ("/help", "这条帮助"),
+    ]
+    cmd_lines = [
+        f"• `{_render.escape_md2(name)}` — {_render.escape_md2(desc)}"
+        for name, desc in base_cmds
+    ]
+
+    gate_legend = [
+        ("Gate A", "选题 (write/expand/defer/reject_all)"),
+        ("Gate B", "草稿 (approve/edit/rewrite/diff/reject/defer)"),
+        ("Gate C", "封面 (approve/regen/relogo/full/skip/defer)"),
+        ("Gate D", "渠道 (toggle/select_all/clear_all/save_default/confirm/cancel/extend/resume)"),
+    ]
+    gate_lines = [
+        f"• *{_render.escape_md2(g)}* — {_render.escape_md2(d)}"
+        for g, d in gate_legend
+    ]
+
+    role_rows = sorted(_ACTION_REQ.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    role_lines = [
+        f"• `{_render.escape_md2(g)}:{_render.escape_md2(a)}` → "
+        f"`{_render.escape_md2(req)}`"
+        for (g, a), req in role_rows
+    ]
+
+    return "\n".join([
+        "*Commands*",
+        *cmd_lines,
+        "",
+        "*Gate Legend*",
+        *gate_lines,
+        "",
+        "*Role Matrix* \\(action → required grant\\)",
+        *role_lines,
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Update routing
 # ---------------------------------------------------------------------------
 
@@ -482,17 +1045,7 @@ def _handle_message(update: dict[str, Any]) -> None:
     # who fires `/list` while an edit-reply is queued doesn't have it eaten.
     if text.startswith("/help"):
         try:
-            help_text = (
-                "*Commands*\n"
-                "• `/start` — 注册当前会话为 review chat\n"
-                "• `/list [all|B|C|D|ready|publish]` — 列出当前 pending 卡片 \\(B/C/D/Ready\\)\n"
-                "• `/published [days]` — 列最近 N 天发布的文章 \\(default 7d, max 90d\\)\n"
-                "• `/scan [top-k]` — 主动触发 hotspots 扫描 \\(default top\\-3, max 10\\)\n"
-                "• `/jobs` — 查看 cron 定时任务状态\n"
-                "• `/suggestions [profile]` — 列出待确认 profile 更新建议\n"
-                "• `/help` — 这条帮助\n"
-                "• `/cancel <short_id>` — 作废一个 pending callback short\\_id"
-            )
+            help_text = _build_help_text()
             tg_client.send_message(chat_id, help_text, parse_mode="MarkdownV2")
         except Exception:
             pass
@@ -881,6 +1434,152 @@ def _handle_message(update: dict[str, Any]) -> None:
             except Exception:
                 pass
         _audit({"kind": "slash_command", "cmd": "/suggestions", "uid": uid})
+        return
+
+    if text.startswith("/status"):
+        try:
+            _send_status_summary(chat_id)
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /status 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        _audit({"kind": "slash_command", "cmd": "/status", "uid": uid})
+        return
+
+    if text.startswith("/queue"):
+        try:
+            _send_queue_summary(chat_id, limit=5)
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /queue 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        _audit({"kind": "slash_command", "cmd": "/queue", "uid": uid})
+        return
+
+    if text.startswith("/skip "):
+        target_id = text[len("/skip "):].strip().split()[0] if len(text) > 6 else ""
+        result = _slash_skip(chat_id, uid, target_id)
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/skip",
+            "uid": uid,
+            "article_id": target_id,
+            **({"error": result} if result else {}),
+        })
+        return
+
+    if text.startswith("/defer "):
+        parts = text.split()
+        if len(parts) < 3:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    "用法: /defer <article_id> <hours>",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+            _audit({"kind": "slash_command", "cmd": "/defer", "uid": uid, "error": "bad_args"})
+            return
+        target_id = parts[1]
+        try:
+            hours = float(parts[2])
+            if hours <= 0:
+                raise ValueError("hours must be positive")
+        except ValueError as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ hours 参数错: {err}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+            _audit({
+                "kind": "slash_command", "cmd": "/defer", "uid": uid,
+                "article_id": target_id, "error": "bad_hours",
+            })
+            return
+        result = _slash_defer(chat_id, uid, target_id, hours)
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/defer",
+            "uid": uid,
+            "article_id": target_id,
+            "hours": hours,
+            **({"error": result} if result else {}),
+        })
+        return
+
+    if text.startswith("/publish-mark"):
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    "用法: /publish-mark <article_id> <url> [platform]",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+            _audit({
+                "kind": "slash_command", "cmd": "/publish-mark", "uid": uid,
+                "error": "bad_args",
+            })
+            return
+        target_id = parts[1]
+        rest = parts[2].split()
+        url = rest[0] if rest else ""
+        platform = rest[1] if len(rest) > 1 else "medium"
+        result = _slash_publish_mark(chat_id, uid, target_id, url, platform)
+        _audit({
+            "kind": "slash_command",
+            "cmd": "/publish-mark",
+            "uid": uid,
+            "article_id": target_id,
+            "platform": platform,
+            **({"error": result} if result else {}),
+        })
+        return
+
+    if text.startswith("/audit"):
+        try:
+            _send_audit_tail(chat_id, limit=20)
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /audit 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        _audit({"kind": "slash_command", "cmd": "/audit", "uid": uid})
+        return
+
+    if text.startswith("/auth-debug"):
+        try:
+            _send_auth_debug(chat_id, uid)
+        except Exception as err:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    _render.escape_md2(f"❌ /auth-debug 失败: {err}"[:500]),
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+        _audit({"kind": "slash_command", "cmd": "/auth-debug", "uid": uid})
         return
 
     if text.startswith("/cancel "):
@@ -2065,6 +2764,263 @@ def _route(
             pass
         return
 
+    # ── A:expand — render full hotspot batch as a follow-up message ──────
+    if gate == "A" and action == "expand":
+        batch_path = entry.get("batch_path")
+        try:
+            with open(batch_path, "r", encoding="utf-8") as fh:
+                batch_data = json.load(fh) or {}
+        except Exception as err:
+            tg_client.answer_callback_query(
+                cb_id, text=f"批次读取失败: {err}"[:180], show_alert=True
+            )
+            return
+        hotspots = batch_data.get("hotspots") or []
+        lines: list[str] = [f"📋 *Batch* `{_render.escape_md2(batch_path)}`", ""]
+        for idx, hs in enumerate(hotspots, start=1):
+            if not isinstance(hs, dict):
+                continue
+            title = str(hs.get("topic_one_liner") or hs.get("title") or "(no title)")
+            angles = hs.get("suggested_angles") or []
+            angle_titles = [
+                str(a.get("title") or a.get("angle") or "")
+                for a in angles if isinstance(a, dict)
+            ]
+            refs = hs.get("source_references") or []
+            ref_count = len(refs) if isinstance(refs, list) else 0
+            lines.append(f"*{idx}\\. {_render.escape_md2(title)}*")
+            if angle_titles:
+                lines.append(
+                    "   angles: "
+                    + _render.escape_md2(", ".join(angle_titles[:5]))
+                )
+            lines.append(
+                _render.escape_md2(
+                    f"   id={hs.get('id') or '?'} | refs={ref_count} | "
+                    f"freshness={hs.get('freshness_score') or '?'} | "
+                    f"depth={hs.get('depth_potential') or '?'}"
+                )
+            )
+            if isinstance(refs, list) and refs:
+                first_ref = refs[0] or {}
+                snippet = str(first_ref.get("text_snippet") or "")[:200]
+                if snippet:
+                    lines.append("   " + _render.escape_md2(snippet))
+            lines.append("")
+        body = "\n".join(lines).rstrip()
+        tg_client.answer_callback_query(cb_id, text="📋 已展开")
+        if chat_id is not None:
+            try:
+                tg_client.send_long_text(chat_id, body, parse_mode="MarkdownV2")
+            except Exception as err:
+                _log.warning("A:expand send failed: %s", err)
+        _audit({
+            "kind": "callback_action_done",
+            "gate": "A",
+            "action": "expand",
+            "short_id": sid,
+            "uid": uid,
+            "batch_path": batch_path,
+            "hotspot_count": len(hotspots),
+        })
+        return
+
+    # ── B:diff — render diff between current draft.md and medium_preview.md ──
+    if gate == "B" and action == "diff" and article_id:
+        from difflib import unified_diff
+
+        draft_path = agentflow_home() / "drafts" / article_id / "draft.md"
+        preview_path = (
+            agentflow_home() / "medium" / article_id / "medium_preview.md"
+        )
+        if not draft_path.exists():
+            tg_client.answer_callback_query(
+                cb_id, text="无 draft.md 可对比", show_alert=True,
+            )
+            return
+        if not preview_path.exists():
+            tg_client.answer_callback_query(
+                cb_id, text="无前次审阅版 (medium_preview.md 缺失)",
+                show_alert=True,
+            )
+            _audit({
+                "kind": "callback_action_done",
+                "gate": "B",
+                "action": "diff",
+                "short_id": sid,
+                "uid": uid,
+                "article_id": article_id,
+                "result": "no_prior_version",
+            })
+            return
+        try:
+            current = draft_path.read_text(encoding="utf-8").splitlines()
+            previous = preview_path.read_text(encoding="utf-8").splitlines()
+        except Exception as err:
+            tg_client.answer_callback_query(
+                cb_id, text=f"读文件失败: {err}"[:180], show_alert=True,
+            )
+            return
+        diff_lines = list(
+            unified_diff(
+                previous,
+                current,
+                fromfile="medium_preview.md",
+                tofile="draft.md",
+                lineterm="",
+                n=3,
+            )
+        )
+        tg_client.answer_callback_query(cb_id, text="📋 diff 已生成")
+        if chat_id is not None:
+            if not diff_lines:
+                try:
+                    tg_client.send_message(
+                        chat_id,
+                        "📋 无差异 \\(draft 与上一审阅版一致\\)",
+                        parse_mode="MarkdownV2",
+                    )
+                except Exception:
+                    pass
+            else:
+                body = "```diff\n" + "\n".join(diff_lines)[:3500] + "\n```"
+                try:
+                    tg_client.send_message(
+                        chat_id, body, parse_mode="MarkdownV2",
+                    )
+                except Exception:
+                    try:
+                        tg_client.send_message(
+                            chat_id,
+                            "\n".join(diff_lines)[:3500],
+                            parse_mode=None,
+                        )
+                    except Exception:
+                        pass
+        _audit({
+            "kind": "callback_action_done",
+            "gate": "B",
+            "action": "diff",
+            "short_id": sid,
+            "uid": uid,
+            "article_id": article_id,
+            "diff_line_count": len(diff_lines),
+        })
+        return
+
+    # ── C:full — send the original 2k cover.png as a Telegram document ────
+    if gate == "C" and action == "full" and article_id:
+        cover_path: Path | None = None
+        for candidate in (
+            agentflow_home() / "drafts" / article_id / "cover.png",
+            agentflow_home() / "drafts" / article_id / "cover_2k.png",
+            agentflow_home() / "images" / article_id / "cover.png",
+        ):
+            if candidate.exists():
+                cover_path = candidate
+                break
+        if cover_path is None:
+            try:
+                meta = json.loads(
+                    (agentflow_home() / "drafts" / article_id / "metadata.json")
+                    .read_text(encoding="utf-8")
+                )
+                for ph in meta.get("image_placeholders") or []:
+                    rp = ph.get("resolved_path")
+                    if rp and Path(rp).exists():
+                        cover_path = Path(rp)
+                        break
+            except Exception:
+                pass
+        if cover_path is None or not cover_path.exists():
+            tg_client.answer_callback_query(
+                cb_id, text="未找到 cover 文件", show_alert=True,
+            )
+            return
+        tg_client.answer_callback_query(cb_id, text="🖼 全分辨率发送中…")
+        if chat_id is not None:
+            try:
+                tg_client.send_document(
+                    chat_id, cover_path,
+                    caption=f"🖼 cover (full): {cover_path.name}",
+                    parse_mode=None,
+                )
+            except Exception as err:
+                _log.warning("C:full send_document failed: %s", err)
+        _audit({
+            "kind": "callback_action_done",
+            "gate": "C",
+            "action": "full",
+            "short_id": sid,
+            "uid": uid,
+            "article_id": article_id,
+            "cover_path": str(cover_path),
+        })
+        return
+
+    # ── *:defer — schedule a re-post N hours later via the deferred-repost
+    # store. Sweeper picks it up in _scan_timeouts.
+    if action == "defer" and gate in {"A", "B", "C"}:
+        hours = _parse_defer_hours(extra)
+        if hours is None or hours <= 0:
+            tg_client.answer_callback_query(
+                cb_id, text="defer 参数缺失", show_alert=True,
+            )
+            return
+        target = article_id or entry.get("batch_path")
+        if not target:
+            tg_client.answer_callback_query(
+                cb_id, text="无 defer 目标 (article_id/batch_path 缺失)",
+                show_alert=True,
+            )
+            return
+        try:
+            _schedule_deferred_repost(
+                gate=gate,
+                article_id=article_id,
+                batch_path=entry.get("batch_path"),
+                hours=float(hours),
+                source_sid=sid,
+            )
+        except Exception as err:
+            _log.warning("defer schedule failed: %s", err)
+            tg_client.answer_callback_query(
+                cb_id, text=f"defer 调度失败: {err}"[:180], show_alert=True,
+            )
+            return
+        tg_client.answer_callback_query(
+            cb_id, text=f"⏰ 已 defer {hours}h, 到期会重发卡片",
+        )
+        if chat_id is not None and message_id is not None:
+            try:
+                tg_client.edit_message_reply_markup(
+                    chat_id, message_id, reply_markup={},
+                )
+            except Exception:
+                pass
+        if chat_id is not None:
+            label = article_id or entry.get("batch_path") or "?"
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"⏰ Gate {gate} 已 defer {hours}h\n"
+                    f"target: {label}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
+        _audit({
+            "kind": "callback_action_done",
+            "gate": gate,
+            "action": "defer",
+            "short_id": sid,
+            "uid": uid,
+            "article_id": article_id,
+            "batch_path": entry.get("batch_path"),
+            "hours": hours,
+        })
+        return
+
     # Defer / expand / diff / full / regen / relogo are still stubs — these
     # are usability sugar, not blocking the core publish loop.
     tg_client.answer_callback_query(
@@ -2815,6 +3771,12 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
             last_gc = now
         if now - last_timeout_scan > 60:
             _scan_timeouts()
+            try:
+                fired = _drain_deferred_reposts()
+                if fired:
+                    _log.info("drained %d deferred reposts", fired)
+            except Exception as err:  # pragma: no cover
+                _log.warning("deferred repost drain failed: %s", err)
             last_timeout_scan = now
 
         if not updates:

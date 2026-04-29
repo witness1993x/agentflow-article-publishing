@@ -16,6 +16,67 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.3] — 2026-04-29
+
+Telegram bot menu enrichment. The 4 review gates (A topic / B draft /
+C image / D channel-select) now expose every action defined in the
+auth table, share a unified label vocabulary, and a global `/`-command
+menu lets the operator drive the bot without remembering article ids.
+
+### Added
+
+- **6 wired callbacks** previously defined in `_ACTION_REQ` but never
+  rendered as buttons:
+  - `A:expand` — render the full hotspot record (suggested_angles, raw
+    signals, refs) as a reply.
+  - `A:defer:hours=4` / `B:defer:hours=2` / `C:defer:hours=2` — re-post
+    the gate card after the configured delay; backed by a new
+    deferred-repost store + drainer in `daemon.py`.
+  - `B:diff` — unified diff between current draft and last reviewed
+    snapshot (falls back to a friendly "no prior version" message when
+    no snapshot exists; a real versioned-draft store is queued for
+    v1.0.4).
+  - `C:full` — reply with the original 2k cover PNG as a Telegram
+    document so the operator gets the unsampled image.
+- **8 global slash commands** registered via `setMyCommands` on daemon
+  startup (failure to register is logged but does not crash):
+  - `/status` — articles in any `*_pending_review` state + age.
+  - `/queue` — next 5 articles waiting for action, sorted by age.
+  - `/help` — gate definitions + button legend + role matrix
+    (regenerated at runtime from `_ACTION_REQ` so it stays in sync).
+  - `/skip <id>` — skip image-gate for an article.
+  - `/defer <id> <hours>` — defer an article's current gate card.
+  - `/publish-mark <id> <url>` — record a manual Medium paste.
+  - `/audit` — last 20 callback decisions.
+  - `/auth-debug` — show the calling user's roles + per-action grants.
+  - Telegram rejects hyphens in `setMyCommands` names, so the registered
+    commands use underscores (`publish_mark`, `auth_debug`); the text
+    dispatcher accepts both forms for back-compat in operator muscle
+    memory.
+- **9 new tests** (`TgMenuV103Tests` in `tests/test_v02_workflows.py`)
+  covering: zero-orphans static check on `_ACTION_REQ`, unified-label
+  assertions per gate, defer scheduling, all 8 slash-command handlers
+  registered, role matrix non-empty, `A:expand` end-to-end render. Full
+  suite: 53 passed.
+
+### Changed
+
+- **Unified approve/reject vocabulary across all gates.** Approve is
+  `✅ 通过` (Gates B/C/D — Gate A keeps slot-pick semantics with
+  `✅ 选中 #N`). Reject is `🚫 拒绝` / gate-appropriate (`🚫 全拒绝`,
+  `🚫 跳过`, `🚫 取消`). Retry is `🔁`, edit is `✏️`, defer is `⏰`,
+  view-actions are `📋 / 📊 / 🖼`. Operators now build muscle memory
+  faster across gates.
+- **Predictable button row order** for Gates A/B/C: Row 1 primary
+  forward, Row 2 edit/regenerate, Row 3 reject/skip/defer. Gate D
+  retains its multi-select layout (semantically different).
+
+### Known follow-up (v1.0.4 candidate)
+
+- A proper versioned-draft snapshot store (`drafts/<aid>/.history/`)
+  so `B:diff` can compare against the actual last reviewed version
+  rather than a best-effort fallback.
+
 ## [1.0.2] — 2026-04-29
 
 Bug-fix release driven by real-Telegram-bot operator feedback on v1.0.1.

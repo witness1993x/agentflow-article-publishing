@@ -174,9 +174,14 @@ def render_gate_a(
         (f"✅ 起稿 #{i + 1}", f"A:write:{sid}:slot={i}")
         for i in range(len(candidates))
     ]
-    rows = [write_row, [
-        ("🚫 全拒绝", f"A:reject_all:{sid}"),
-    ]]
+    rows = [
+        write_row,
+        [
+            ("📋 全文", f"A:expand:{sid}"),
+            ("⏰ 4h 后", f"A:defer:{sid}:hours=4"),
+        ],
+        [("🚫 全拒绝", f"A:reject_all:{sid}")],
+    ]
     return text, _kb(rows), sid
 
 
@@ -370,7 +375,8 @@ def render_gate_b(
 
     rows = [
         [("✅ 通过", f"B:approve:{sid}"), ("✏️ 编辑", f"B:edit:{sid}")],
-        [("🔁 重写", f"B:rewrite:{sid}"), ("🚫 拒绝", f"B:reject:{sid}")],
+        [("🔁 重写", f"B:rewrite:{sid}"), ("📋 diff", f"B:diff:{sid}")],
+        [("🚫 拒绝", f"B:reject:{sid}"), ("⏰ 2h 后", f"B:defer:{sid}:hours=2")],
     ]
     return text, _kb(rows), sid
 
@@ -415,8 +421,9 @@ def render_gate_c(
     )
 
     rows = [
-        [("✅ 用这张", f"C:approve:{sid}"), ("🔁 再生成", f"C:regen:{sid}")],
-        [("🎨 换 logo 位置", f"C:relogo:{sid}"), ("🚫 不用图", f"C:skip:{sid}")],
+        [("✅ 通过", f"C:approve:{sid}"), ("🚫 拒绝", f"C:skip:{sid}")],
+        [("🔁 再生成", f"C:regen:{sid}"), ("🎨 换 logo 位置", f"C:relogo:{sid}")],
+        [("🖼 全分辨率", f"C:full:{sid}"), ("⏰ 2h 后", f"C:defer:{sid}:hours=2")],
     ]
     return text, _kb(rows), sid
 
@@ -515,9 +522,9 @@ def render_gate_d(
     # cards for this article preselect the same set.
     rows.append([
         ("💾 保存默认", f"D:save_default:{short_id}"),
-        ("✅ Confirm", f"D:confirm:{short_id}"),
+        ("✅ 通过", f"D:confirm:{short_id}"),
     ])
-    rows.append([("🚫 Cancel", f"D:cancel:{short_id}")])
+    rows.append([("🚫 拒绝", f"D:cancel:{short_id}")])
     return text, _kb(rows)
 
 
