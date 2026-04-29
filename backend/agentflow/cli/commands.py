@@ -2809,17 +2809,17 @@ def intent_set(
 @cli.command("intent-show", help="Show the current TopicIntent (if any).")
 @click.option("--json", "as_json", is_flag=True, default=False)
 def intent_show(as_json: bool) -> None:
-    import yaml
+    from agentflow.shared.memory import load_current_intent
 
     path = _intents_path()
-    if not path.exists():
+    data = load_current_intent()
+    if not data:
         if as_json:
             _emit_json({"intent": None})
             return
         click.echo("no intent set (use `af intent-set <query>`).")
         return
 
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if as_json:
         _emit_json({"intent": data, "path": str(path)})
         return

@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -206,6 +206,28 @@ class LearningReviewTests(AgentflowHomeTestCase):
 
 
 class TopicProfileIntentTests(AgentflowHomeTestCase):
+    def test_stale_session_intent_expires_before_shadowing_default_profile(self) -> None:
+        stale_intent = {
+            "schema_version": 1,
+            "created_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+            "source": "cli_flag",
+            "query": {"text": "old chainstream query", "mode": "keyword"},
+            "metadata": {"ttl": "session"},
+            "profile": {"id": "chainstream", "label": "ChainStream"},
+        }
+        intent_path = self.home / "intents" / "current.yaml"
+        intent_path.parent.mkdir(parents=True, exist_ok=True)
+        intent_path.write_text(json.dumps(stale_intent), encoding="utf-8")
+
+        with patch.dict(
+            os.environ,
+            {"AGENTFLOW_SESSION_INTENT_MAX_HOURS": "12"},
+            clear=False,
+        ):
+            self.assertIsNone(memory.load_current_intent())
+
+        self.assertFalse(intent_path.exists())
+
     def test_intent_set_from_profile_persists_expanded_keywords(self) -> None:
         runner = CliRunner()
         result = runner.invoke(
@@ -337,6 +359,45 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
         self.assertEqual(payload["filter"]["total"], payload["recall"]["merged_count"])
         self.assertEqual(payload["filter"]["mode"], "soft_rerank")
         self.assertTrue(payload["filter"]["filtered_out_preview"])
+
+    def test_gate_a_post_is_idempotent_for_active_batch_card(self) -> None:
+        from agentflow.agent_review import triggers
+
+        batch_path = str(self.home / "hotspots" / "2026-04-29.json")
+        hotspot = {
+            "id": "hs_uniswap_001",
+            "topic_one_liner": "Uniswap routing policy update",
+            "freshness_score": 0.9,
+            "suggested_angles": [{"title": "What changed for LPs"}],
+            "source_references": [{"source": "hn"}],
+        }
+
+        with (
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=False),
+            patch("agentflow.agent_review.daemon.get_review_chat_id", return_value=123),
+            patch(
+                "agentflow.agent_review.tg_client.send_message",
+                return_value={"message_id": 456},
+            ) as send_mock,
+        ):
+            first = triggers.post_gate_a(
+                hotspots=[hotspot],
+                batch_path=batch_path,
+                publisher_brand="Uniswap",
+            )
+            second = triggers.post_gate_a(
+                hotspots=[hotspot],
+                batch_path=batch_path,
+                publisher_brand="Uniswap",
+            )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertFalse(first.get("duplicate", False))
+        self.assertTrue(second.get("duplicate"))
+        self.assertEqual(second["short_id"], first["short_id"])
+        send_mock.assert_called_once()
 
     def test_search_profile_runs_all_configured_queries(self) -> None:
         runner = CliRunner()

@@ -1,0 +1,23 @@
+publisher_account:
+  output_language: en
+  perspectives:
+    - Replace with a signature article angle.
+    - Replace with another recurring framing pattern.
+  do:
+    - Keep the opening concrete and tied to a recent operator pain.
+    - Include tradeoffs and failure modes before recommendations.
+  dont:
+    - Avoid generic AI productivity claims.
+    - Avoid unsupported metrics or timeline claims.
+  image_prompt_hints:
+    - clean editorial illustration
+    - realistic product workflow context
+  brand_overlay:
+    enabled: false
+    logo_path: ""
+    anchor: bottom-right
+    width_ratio: 0.12
+    padding_ratio_x: 0.04
+    padding_ratio_y: 0.04
+    recolor_dark_to_light: false
+    dark_threshold: 90

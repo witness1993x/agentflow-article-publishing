@@ -60,7 +60,7 @@ _PROFILE_SETUP_STEPS: list[dict[str, str]] = [
         "label": "Brand",
         "prompt": (
             "请输入品牌/账号显示名。后续问题会优先显示这个名称。\n"
-            "示例：Uniswap、ChainStream、你的个人专栏名。"
+            "示例：你的产品名、公司名或个人专栏名。"
         ),
     },
     {
@@ -77,7 +77,7 @@ _PROFILE_SETUP_STEPS: list[dict[str, str]] = [
         "prompt": (
             "粘贴可学习语料/账号说明/产品事实/关键词，每行一条即可。\n"
             "系统会自动拆成 product facts、core terms 和 search queries。\n"
-            "规则：写事实和名词，不写空泛口号。示例：AMM 协议；DEX liquidity；Uniswap v4 hooks。"
+            "规则：写事实和名词，不写空泛口号。示例：核心机制名；产品功能术语；竞品/赛道关键词。"
         ),
     },
     {
@@ -1466,6 +1466,15 @@ def _route(
     # finishes, so a fresh Gate C card lands automatically.
     if gate == "C" and action == "regen" and article_id:
         tg_client.answer_callback_query(cb_id, text="🔁 重跑 Atlas (cover-only)…")
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"🔁 已开始重新生成封面：{article_id}\n"
+                    "完成后会自动推送新的 Gate C；超时或失败会发错误通知。",
+                )
+            except Exception:
+                pass
         if chat_id is not None and message_id is not None:
             try:
                 tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
@@ -1826,6 +1835,15 @@ def _route(
         }
         mode = mode_map[action]
         tg_client.answer_callback_query(cb_id, text=f"📸 image-gate mode={mode}…")
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"📸 已开始 image-gate：{article_id} / mode={mode}\n"
+                    "完成后会自动推送下一张 Gate 卡；超时或失败会发错误通知。",
+                )
+            except Exception:
+                pass
         if chat_id is not None and message_id is not None:
             try:
                 tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup={})
@@ -2381,6 +2399,13 @@ def _spawn_image_gate(article_id: str, mode: str) -> None:
     surfaces failures."""
     import subprocess
 
+    try:
+        timeout_seconds = float(
+            os.environ.get("AGENTFLOW_IMAGE_GATE_SUBPROCESS_TIMEOUT_SECONDS", "240")
+        )
+    except (TypeError, ValueError):
+        timeout_seconds = 240.0
+
     def _run() -> None:
         try:
             from agentflow.agent_review.triggers import _af_argv
@@ -2391,10 +2416,15 @@ def _spawn_image_gate(article_id: str, mode: str) -> None:
                     check=False,
                     capture_output=True,
                     text=True,
-                    timeout=600,
+                    timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
-                _notify_spawn_failure("image-gate", article_id, None, "timeout")
+                _notify_spawn_failure(
+                    "image-gate",
+                    article_id,
+                    None,
+                    f"timeout after {timeout_seconds:.0f}s",
+                )
                 return
             if result.returncode != 0:
                 _notify_spawn_failure(

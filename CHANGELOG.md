@@ -16,6 +16,64 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.2] — 2026-04-29
+
+Bug-fix release driven by real-Telegram-bot operator feedback on v1.0.1.
+Three operator-visible bugs closed.
+
+### Fixed
+
+- **Gate A card pushed repeatedly to TG.** `triggers.post_gate_a()` had no
+  idempotency check; running `af hotspots` twice in the same review window
+  produced multiple identical cards. Fixed by checking
+  `short_id.find_active(gate="A", batch_path=...)` before rendering and
+  returning `{"duplicate": True}` if an active card exists for the same batch.
+- **"ChainStream" / "Uniswap" brand names leaked into framework prompts.**
+  `agent_review/daemon.py` `_PROFILE_SETUP_STEPS` used real brand names
+  (`Uniswap`, `ChainStream`, `AMM`, `DEX liquidity`, `Uniswap v4 hooks`) as
+  example values in the brand and source-materials onboarding prompts.
+  Replaced with brand-neutral placeholders so the framework never names a
+  user's brand for them. Reaffirms the project's brand-neutrality contract:
+  user brand data lives in `~/.agentflow/topic_profiles.yaml`, never in
+  framework code.
+- **"Regenerate image" button appeared to hang.** `_spawn_image_gate()`
+  shelled out to `af image-gate` with a hardcoded 600s timeout and no
+  in-flight progress message; the operator saw an instant ack toast then
+  silence for minutes. Now sends an interim "🔁 已开始重新生成封面…
+  完成后会自动推送新的 Gate C；超时或失败会发错误通知" message before
+  spawning, and the subprocess timeout is configurable via
+  `AGENTFLOW_IMAGE_GATE_SUBPROCESS_TIMEOUT_SECONDS` (default 240s).
+- **Stale session-intent shadowing new profile selection.** Switching topic
+  profiles didn't clear the previous session intent, so old defaults could
+  bleed into the new flow. `memory.load_current_intent()` now checks
+  `AGENTFLOW_SESSION_INTENT_MAX_HOURS` (default 12h) and deletes intents
+  older than the threshold.
+
+### Added
+
+- `short_id.find_active(gate, article_id, batch_path)` — public helper
+  returning the newest non-expired, non-revoked short_id matching a gate +
+  optional selector. Foundation for idempotency checks across all gates.
+- `.cursor/skills/agentflow-open-claw-v2/` — restructured to standard
+  skill layout: `SKILL.md` (entry) + `references/` (deep-read, optional)
+  + `assets/` (YAML templates consumed as CLI args, e.g.
+  `topic_profile.yaml`, `style_tuning.yaml`). No source code in the skill;
+  CLI is the only execution surface.
+- New env knobs in `backend/.env.template`:
+  - `AGENTFLOW_IMAGE_GATE_SUBPROCESS_TIMEOUT_SECONDS=240`
+  - `AGENTFLOW_SESSION_INTENT_MAX_HOURS=12`
+- New tests in `tests/test_v02_workflows.py`:
+  `test_stale_session_intent_expires_before_shadowing_default_profile`,
+  `test_gate_a_post_is_idempotent_for_active_batch_card`.
+
+### Changed
+
+- `cli/commands.py`: `intent_show` now reads via
+  `memory.load_current_intent()` (decouples CLI from yaml internals).
+- `docs/flows/USER_SCENARIOS.md`: S0.1 sequence diagram rewritten to
+  emphasize "skill harness loads SKILL.md, then agent invokes `af`" —
+  no source code in the skill repo.
+
 ## [1.0.1] — 2026-04-29
 
 ### Fixed

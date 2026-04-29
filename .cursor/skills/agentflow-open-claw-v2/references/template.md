@@ -11,7 +11,7 @@
 - **session intent**: 当前要解决的最小问题（一句话）
 - **constraint**: 不能动什么 / 必须保留什么 / time-box
 
-> 上述字段缺失时按"框架开发者 + 单点修复"默认。
+> 上述字段缺失时按"首次部署 / 初始化续跑"默认；只有 user 明确要求代码修改、review 或具体 Gate 排障时，才切到框架开发者视角。
 
 ## Open Claw Working Template（5 段；复杂任务可选 / 简单任务跳过）
 

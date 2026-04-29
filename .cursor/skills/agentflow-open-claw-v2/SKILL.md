@@ -1,23 +1,32 @@
 ---
 name: agentflow-open-claw-v2
-description: |
-  AgentFlow 发布框架 (agentflow-article-publishing) 专用 skill。仅在触及框架代码/状态机/TG bot/af CLI 时触发。
-
-  TRIGGER: "open claw", "agentflow", "Gate A/B/C/D", "review-daemon", "_handle_callback", "post_gate_*", "topic_profiles.yaml schema", "/list", "publish-mark", "PR:mark", "L:critique", "PD:dispatch", "I:cover_only", "STATE_DRAFT_PENDING_REVIEW", "STATE_CHANNEL_PENDING_REVIEW".
-
-  SKIP: 通用 Python/Click/FastAPI/pytest；改 ~/.agentflow/topic_profiles.yaml 用户数据；一次性 bash/grep/ls；user 说"忽略 skill"或"without baseline"；改 backend/.env 凭据 (onboard 域)；requesting "run agentflow" / "start daemon" / "execute af doctor" without a repo present (skill 是上下文, 不是 runtime; 先确保 backend/ + .venv + .env 在场)。
-
-  REQUIRED INIT FLOWS (MUST follow framework commands):
-  - 凭据 / .env 初始化 → af bootstrap / af onboard / af onboard --section <id>; NEVER 直接 sed/echo .env
-  - profile 初始化 / 改动 → af topic-profile {init -i, update, suggest}; NEVER 手编 ~/.agentflow/topic_profiles.yaml
-  - skill 安装 → af skill-install (--cursor / --copy / --force); NEVER ln -s 手装
-  - cron 配置 → af review-cron-install / -uninstall; NEVER 手写 launchd plist / systemd timer
-  - daemon 启动 → af review-daemon; NEVER python -m agentflow.cli.commands (double-import bug)
-
-  See "Required Init Flows" + "Anti-patterns" sections in body for full rules.
+description: AgentFlow article-publishing OpenClaw skill. Default entry is first deployment/onboarding: verify runtime repo, venv, .env, ~/.agentflow, then guide through af bootstrap/onboard/topic-profile/doctor. Use also for Gate A/B/C/D, review-daemon, af CLI, image-gate, publish-mark, PR:mark, PD:dispatch, or state-transition work. No runtime source is included.
 ---
 
-# AgentFlow Open Claw v2
+# AgentFlow Open Claw v2.7
+
+## Package Contract
+
+本目录就是可交付给 OpenClaw 的 skill 包：
+
+- `SKILL.md`：触发条件、硬规则、CLI-first 工作流。
+- `references/`：长文档、模板、示例，按需读取。
+- `assets/`：可作为 `af topic-profile ... --from-file` 参数传入的 YAML 模板。
+
+包内不放 `backend/agentflow/` 源码。OpenClaw/Cursor/Claude Code 只是 skill harness；它们加载本 skill 后通过 `af` CLI 操作 runtime。不要为了 skill 额外启动守护进程；`af review-daemon` 只属于 Telegram review 业务运行面。
+
+## Default Entry: First Deployment
+
+默认把新会话当作**首次部署 / 初始化续跑**处理，除非 user 明确要求代码修改、review、具体 Gate 排障或已声明 runtime ready。
+
+进来先确认 4 件事：
+
+1. runtime repo 是否存在：`backend/agentflow/`
+2. CLI 是否存在：`backend/.venv/bin/af`
+3. 凭据文件是否存在：`backend/.env`
+4. 用户数据是否存在：`~/.agentflow/`
+
+任一缺失时，不要直接进入 Gate A/B/C/D 或改源码；先引导 `af bootstrap` / `af onboard` / `af topic-profile` / `af doctor`。凭据必须让 user 在终端输入，agent 不接收 key、不手写 `.env`。
 
 ## Repo facts
 
@@ -39,6 +48,7 @@ description: |
 - state 图 → `backend/agentflow/agent_review/templates/state_machine.md`
 - TG flow → `docs/flows/TG_BOT_FLOWS.md`
 - 场景 → `docs/flows/USER_SCENARIOS.md`
+- 长参考 → `references/reference.md`
 
 按需读，不要一次全读。
 
@@ -49,7 +59,7 @@ description: |
 
 ## 可选深读
 
-- `template.md` 5-段仪式（复杂任务）/ `reference.md` 14 STATE 详表 / `examples.md` 真实场景
+- `references/template.md` 5-段仪式（复杂任务）/ `references/reference.md` 14 STATE 详表 / `references/examples.md` 真实场景
 
 ## What this skill is NOT
 
@@ -81,7 +91,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / af command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v2.4 与 `agentflow-framework-20260428-slim` 及更新版本配合。
+兼容版本：本 skill v2.7 与 `agentflow-framework-20260428-slim` 及更新版本配合。
 
 ## Required Init Flows (MUST follow)
 
@@ -135,7 +145,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 ## Init Wizard Mode (AI orchestration, 不接收 key)
 
-当 user 提"init" / "setup" / "首次" / "怎么开始" / "where do I start" 时，AI 应：
+默认先按首次部署处理；当 user 提"init" / "setup" / "首次" / "怎么开始" / "where do I start"，或未明确说明 runtime 已 ready 时，AI 应：
 
 ### 路径 1：Mock 模式（推荐新手 / 演示）
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -161,8 +162,34 @@ def load_current_intent() -> dict[str, Any] | None:
         except OSError:
             _log.warning("failed to delete single_use intent file at %s", path)
         _SINGLE_USE_CACHE = data
+    elif ttl == "session" and _session_intent_expired(data):
+        try:
+            path.unlink()
+        except OSError:
+            _log.warning("failed to delete expired session intent file at %s", path)
+        return _SINGLE_USE_CACHE
 
     return data
+
+
+def _session_intent_expired(intent: dict[str, Any]) -> bool:
+    """Expire stale session intents so old bot defaults do not shadow new ones."""
+    try:
+        max_hours = float(os.environ.get("AGENTFLOW_SESSION_INTENT_MAX_HOURS", "12"))
+    except (TypeError, ValueError):
+        max_hours = 12.0
+    if max_hours <= 0:
+        return False
+    created_at = str(intent.get("created_at") or "").strip()
+    if not created_at:
+        return False
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds() > max_hours * 3600
 
 
 def _reset_intent_cache() -> None:

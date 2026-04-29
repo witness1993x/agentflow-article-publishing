@@ -1,0 +1,35 @@
+label: Example Publisher
+summary: Replace this with a one-line profile summary.
+intent: Replace this with the topic surface this profile should cover.
+publisher_account:
+  brand: Example Publisher
+  voice: first_party_brand
+  pronoun: we
+  output_language: en
+  default_description: >
+    Replace this paragraph with the publisher's audience, domain, point of view,
+    recurring topics, and products or services the writing may safely reference.
+  do:
+    - Ground claims in product_facts or cited sources.
+    - Prefer specific operational detail over generic thought leadership.
+  dont:
+    - Do not invent customer numbers, dates, launches, or benchmarks.
+    - Do not turn the article into a sales pitch.
+  product_facts:
+    - Replace with a factual statement the model may cite.
+    - Replace with another factual statement the model may cite.
+    - Replace with a third factual statement the model may cite.
+  default_tags:
+    - agentflow
+keyword_groups:
+  core:
+    - replace-with-core-topic
+  transport: []
+  products: []
+  adjacent: []
+hotspot_terms:
+  - replace-with-core-topic
+search_queries:
+  - replace-with-core-topic
+default_search_query: replace-with-core-topic
+avoid_terms: []

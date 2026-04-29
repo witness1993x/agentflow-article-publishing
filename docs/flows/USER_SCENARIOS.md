@@ -20,30 +20,26 @@ sequenceDiagram
     participant User
     participant SH as SkillHarness(CC|Cursor)
     participant CLI as af-CLI
-    participant FS as FS(skill dir)
-    alt Claude Code path (7 skills)
-        User->>FS: ln -s repo/.claude/skills/<name> ~/.claude/skills/<name> ×7
-        Note over User,FS: or `af skill-install` 一把梭
-        FS-->>SH: 7× SKILL.md frontmatter
-        SH->>SH: register /agentflow{,-style,-hotspots,-write,-publish,-tweet,-newsletter}
-    else Cursor path (1 mega-skill)
-        User->>FS: install agentflow-open-claw → ~/.cursor/skills/agentflow-open-claw/
-        FS-->>SH: SKILL.md + triggers (open claw / planning / implementation / review / handoff)
-    end
-    User->>SH: /agentflow (CC) | "open claw" (Cursor)
-    SH->>SH: load SKILL.md → Step 0: First run
+    participant FS as FS(skill dir + ~/.agentflow)
+    User->>FS: install standard skill package → agentflow-open-claw-v2 (v2.7)
+    Note over FS: SKILL.md<br/>references/ (optional)<br/>assets/*.yaml
+    FS-->>SH: SKILL.md frontmatter + instructions
+    SH->>SH: register agentflow triggers
+    User->>SH: invoke agentflow skill
+    SH->>SH: load SKILL.md → follow CLI-only workflow
     SH->>CLI: af doctor
     CLI-->>SH: .env + last_heartbeat.json + 12+ probes
     SH->>CLI: af topic-profile show --profile <id>
     alt missing fields
-        SH->>CLI: af topic-profile init -i  (F2 wizard)
-        SH->>CLI: af topic-profile derive --profile <id>  (F3 from default_description)
+        SH->>CLI: af topic-profile init --profile <id> --from-file assets/topic_profile.yaml
+        SH->>CLI: af topic-profile update --profile <id> --from-file assets/style_tuning.yaml
         CLI->>FS: write ~/.agentflow/topic_profiles.yaml
     end
-    Note over SH,FS: 装 skill 不改 backend / 不写 ~/.agentflow/；只有 init/derive 才落盘
+    Note over SH,CLI: skill 不包含源码、不 patch backend；harness 负责执行步骤，业务动作全部走 af CLI
+    Note over CLI,FS: 只有 CLI init/update 才写 ~/.agentflow/
 ```
 
-简短注解（≤80 字）：S0.1 不进 article state machine（pre-CLI），但决定后续 /agentflow 触发链能否 invoke；与 S0.3 (af onboard) / S0.4 (learn-from-handle) 串成完整 init 链。
+最新可交付包：`.cursor/skills/agentflow-open-claw-v2/`（v2.7），可分发 zip 为 `dist/agentflow-open-claw-v2.7.zip`。Skill 包采用标准结构：`SKILL.md` 放触发条件、工作流和 CLI 调用顺序；`references/` 可放长文档；`assets/` 放 YAML 模板/风格调节参数。默认入口按首次部署 / 初始化续跑处理，先检查 runtime repo、venv、`.env`、`~/.agentflow/`，再进入 `af bootstrap` / `af onboard` / `af doctor`。包内不放项目源码，避免 harness 执行偏离预期时改到实现代码，也降低安装体积。OpenClaw/Cursor/Claude Code 只作为 skill harness 负责加载与执行指令，不需要再为 skill 单独启动守护进程；Telegram review daemon 属于后续业务运行面，不是 S0.1 的安装依赖。
 
 ---
 

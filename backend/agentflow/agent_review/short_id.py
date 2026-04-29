@@ -138,6 +138,31 @@ def set_extra(short_id: str, key: str, value: Any) -> bool:
         return True
 
 
+def find_active(
+    *,
+    gate: str,
+    article_id: str | None = None,
+    batch_path: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the newest active short_id matching a gate target, if any."""
+    with _LOCK:
+        matches: list[tuple[str, dict[str, Any]]] = []
+        for sid, entry in _read().items():
+            if entry.get("gate") != gate:
+                continue
+            if article_id is not None and entry.get("article_id") != article_id:
+                continue
+            if batch_path is not None and entry.get("batch_path") != batch_path:
+                continue
+            if _is_expired(entry) or entry.get("revoked_at"):
+                continue
+            matches.append((sid, entry))
+        if not matches:
+            return None
+        matches.sort(key=lambda item: str(item[1].get("created_at") or ""), reverse=True)
+        return matches[0]
+
+
 def revoke(short_id: str) -> None:
     """Soft-revoke a short_id: keep entry in index but stamp ``revoked_at``.
 

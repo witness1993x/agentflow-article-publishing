@@ -121,6 +121,22 @@ def post_gate_a(
         _log.info("no hotspots — skipping Gate A post")
         return None
 
+    existing = _sid.find_active(gate="A", batch_path=str(batch_path))
+    if existing:
+        sid, entry = existing
+        _log.info(
+            "active Gate A card already exists for %s (short_id=%s); skipping duplicate",
+            batch_path,
+            sid,
+        )
+        return {
+            "gate": "A",
+            "short_id": sid,
+            "tg_message_id": entry.get("tg_message_id"),
+            "candidate_count": 0,
+            "duplicate": True,
+        }
+
     pub = publisher_account or {}
     fit_by_id: dict[int, float] = {}
     if pub:
