@@ -18,11 +18,19 @@ import asyncio
 import json as _json
 import os
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import click
+
+
+def _af_version() -> str:
+    try:
+        return _pkg_version("agentflow")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _load_dotenv_once() -> None:
@@ -558,7 +566,7 @@ def _merge_profile_search_outputs(
 
 
 @click.group(help="AgentFlow Article Publishing CLI")
-@click.version_option("0.1.0", prog_name="af")
+@click.version_option(_af_version(), prog_name="af")
 def cli() -> None:
     pass
 

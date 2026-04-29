@@ -16,6 +16,16 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.1] — 2026-04-29
+
+### Fixed
+
+- `af --version` was hardcoded to `"0.1.0"` in `agentflow/cli/commands.py`
+  via `@click.version_option`, so it kept reporting `0.1.0` even after the
+  package version bumped to `1.0.0`. Now reads from `importlib.metadata`,
+  so the CLI version tracks `pyproject.toml::project.version` automatically.
+  Discovered when smoking the v1.0.0 deploy bundle in a fresh venv.
+
 ## [1.0.0] — 2026-04-29
 
 First tagged release. The codebase had been carrying `pyproject.toml`
