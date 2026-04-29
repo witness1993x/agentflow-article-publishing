@@ -91,7 +91,7 @@ CLI 启动时自动查找 `backend/.env` 并加载（`_load_dotenv_once()`，不
 ```mermaid
 flowchart LR
   subgraph "Operators"
-    OP[TG operator<br/>uid 5306710394]
+    OP[TG operator<br/>uid <operator-uid>]
     CRON[cron<br/>launchd / systemd timer]
   end
 
