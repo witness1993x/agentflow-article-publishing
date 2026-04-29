@@ -833,7 +833,15 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
         command_names = {
             item["command"] for item in commands_mock.call_args.args[0]
         }
-        self.assertTrue({"start", "help", "list", "suggestions", "cancel"} <= command_names)
+        # v1.0.4 curated set (hyphens become underscores per Telegram's rule):
+        # help / status / queue / skip / defer / scan / profile / profiles /
+        # profile_switch / style / doctor / audit. Some review-ops basics
+        # (status, help, queue) are mandatory; we assert a load-bearing subset
+        # rather than the full 12 so the test isn't fragile to ordering.
+        self.assertTrue(
+            {"help", "status", "queue", "scan", "profile", "doctor"} <= command_names,
+            f"missing core v1.0.4 commands; got: {sorted(command_names)}",
+        )
         menu_mock.assert_called_once_with(
             chat_id=456,
             menu_button={"type": "commands"},

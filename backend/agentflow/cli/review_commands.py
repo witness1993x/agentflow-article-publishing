@@ -7,6 +7,7 @@ import time.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import click
@@ -225,13 +226,28 @@ def doctor_cmd(strict: bool, fresh: bool, as_json: bool) -> None:
     from agentflow.agent_review import preflight as _pf
 
     checks = _pf.all_checks(fresh=fresh)
+    # v1.0.4: report which file each env var resolved from (if available).
+    from agentflow.cli.commands import _resolved_sources as _src_map
     if as_json:
-        _emit_json([c.to_dict() for c in checks])
+        rows = []
+        for c in checks:
+            d = c.to_dict()
+            if c.env_var:
+                d["source"] = _src_map.get(c.env_var) or "(not loaded — process env)"
+            rows.append(d)
+        _emit_json(rows)
     else:
         click.echo("Credential health\n" + "-" * 50)
         for cr in checks:
+            src = ""
+            if cr.env_var:
+                resolved = _src_map.get(cr.env_var)
+                if resolved:
+                    # Show just the parent dir + filename to keep the line short
+                    p = Path(resolved)
+                    src = f"  [src: {p.parent.name}/{p.name}]"
             click.echo(
-                f"  {_icon(cr)} {cr.name:<22} {cr.message[:80]}"
+                f"  {_icon(cr)} {cr.name:<22} {cr.message[:60]}{src}"
             )
         click.echo()
         click.echo("Readiness gates")

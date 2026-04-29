@@ -17,7 +17,7 @@ from typing import Any
 
 import click
 
-from agentflow.cli.commands import cli
+from agentflow.cli.commands import cli, _load_yaml_overrides
 
 
 def _stderr(msg: str) -> None:
@@ -50,13 +50,32 @@ def _now_iso() -> str:
     help="Draft a newsletter without an existing article; pass a working title.",
 )
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (sections.yaml schema) — surfaces subject_template / "
+    "intro / body_sections / closing / cta to the email drafter via env.",
+)
 def newsletter_draft(
     article_id: str | None,
     from_scratch_title: str | None,
     as_json: bool,
+    from_file: str | None,
 ) -> None:
     from agentflow.agent_email.drafter import draft_newsletter
     from agentflow.shared.memory import append_memory_event
+
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        if from_scratch_title is None and overrides.get("from_scratch_title"):
+            from_scratch_title = str(overrides["from_scratch_title"])
+        for k in ("subject_template", "intro", "body_sections", "closing", "cta"):
+            if k in overrides and overrides[k] is not None:
+                os.environ[f"AGENTFLOW_NEWSLETTER_{k.upper()}"] = (
+                    _json.dumps(overrides[k]) if not isinstance(overrides[k], str) else overrides[k]
+                )
 
     if not article_id and not from_scratch_title:
         raise click.UsageError(

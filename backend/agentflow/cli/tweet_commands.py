@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, timezone
 
 import click
 
-from agentflow.cli.commands import cli, _emit_json
+import os
+
+from agentflow.cli.commands import cli, _emit_json, _load_yaml_overrides
 
 
 @cli.command(
@@ -31,15 +33,34 @@ from agentflow.cli.commands import cli, _emit_json
 )
 @click.option("--angle", "angle_index", type=int, default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (thread_template.yaml schema) — surfaces tone / "
+    "max_tweets / pin_first_tweet to the tweet drafter via env.",
+)
 def tweet_draft(
     source_id: str,
     form: str,
     from_article: bool,
     angle_index: int | None,
     as_json: bool,
+    from_file: str | None,
 ) -> None:
     from agentflow.agent_tw.drafter import draft_tweet
     from agentflow.shared.memory import append_memory_event
+
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        if form == "single" and overrides.get("thread_form"):
+            form = str(overrides["thread_form"])
+        for k in ("max_tweets", "tone", "pin_first_tweet"):
+            if k in overrides and overrides[k] is not None:
+                os.environ[f"AGENTFLOW_TWEET_{k.upper()}"] = (
+                    _json.dumps(overrides[k]) if not isinstance(overrides[k], str) else overrides[k]
+                )
 
     kwargs: dict = {"form": form, "angle_index": angle_index}
     if from_article:

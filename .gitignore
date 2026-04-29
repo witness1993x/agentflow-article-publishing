@@ -23,10 +23,22 @@ dist/
 build/
 *.tsbuildinfo
 
-# Environment
+# Environment / secrets — never commit, never bundle.
 .env
 .env.local
 .env.*.local
+# Operator-side key-dump variants (Cursor/Finder commonly create these):
+.env_config
+.env_config*
+env_config
+env_config*
+*env_config copy*
+# Generic secret-folder + key-file patterns:
+secrets/
+*.key
+*.pem
+id_rsa
+id_rsa.pub
 
 # Logs
 *.log
@@ -51,6 +63,7 @@ backend/.env_copy
 
 # Build artifacts of scripts/build_deploy_bundle.sh — produce locally, don't commit
 agentflow-deploy-*.tar.gz
+agentflow-deploy-*.zip
 
 # learn-style corpus (never commit user articles)
 samples/*

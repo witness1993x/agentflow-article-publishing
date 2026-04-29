@@ -112,12 +112,36 @@ _SECTIONS: list[dict[str, Any]] = [
 
 
 def _env_path() -> Path:
-    """Locate ``backend/.env`` relative to this file."""
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if parent.name == "backend":
-            return parent / ".env"
-    return Path.cwd() / ".env"
+    """Return the canonical secret-file path the wizard should write to.
+
+    v1.0.4 moved keys out of the runtime repo and into ``~/.agentflow/secrets/.env``
+    (the user's "key folder"). Onboard creates the dir at mode 0700 and the file
+    at mode 0600 on first write so subsequent reads are still operator-private.
+
+    The legacy ``backend/.env`` location is still RESOLVED at load time
+    (see ``commands._candidate_secret_files``) for back-compat with installs
+    predating v1.0.4 — but ``af onboard`` no longer writes there. Operators on
+    older installs who run ``af onboard`` will have their keys quietly migrated
+    to the new location; the legacy file becomes a stale fallback.
+    """
+    secrets_dir = Path.home() / ".agentflow" / "secrets"
+    if not secrets_dir.exists():
+        secrets_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            secrets_dir.chmod(0o700)
+        except OSError:
+            pass
+    target = secrets_dir / ".env"
+    return target
+
+
+def _ensure_file_perms(path: Path) -> None:
+    """chmod 0600 on first creation so a multi-user host can't snoop secrets."""
+    if path.exists():
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -135,7 +159,9 @@ def _set_env_value(path: Path, key: str, value: str) -> None:
 
     if not path.exists():
         path.touch()
+        _ensure_file_perms(path)
     set_key(str(path), key, value, quote_mode="never")
+    _ensure_file_perms(path)
     os.environ[key] = value
 
 

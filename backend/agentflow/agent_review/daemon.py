@@ -429,9 +429,15 @@ def set_review_chat_id(chat_id: int) -> None:
 
 
 def configure_bot_menu(chat_id: int | None = None) -> None:
-    """Best-effort Telegram command menu setup for the operator bot."""
+    """Best-effort Telegram command menu setup for the operator bot.
+
+    v1.0.4 — set the curated 12-command subset built from
+    ``_COMMAND_REGISTRY`` rather than the legacy 15-entry ``_BOT_COMMANDS``
+    list. Long-tail commands stay accessible via the text dispatcher.
+    """
     try:
-        tg_client.set_my_commands(_BOT_COMMANDS)
+        commands = _build_set_my_commands_payload() if _COMMAND_REGISTRY else _BOT_COMMANDS
+        tg_client.set_my_commands(commands)
         tg_client.set_chat_menu_button(chat_id=chat_id, menu_button={"type": "commands"})
         _log.info("configured Telegram bot command menu")
     except Exception as err:  # pragma: no cover - menu setup must never block daemon
@@ -936,33 +942,50 @@ def _send_auth_debug(chat_id: int | None, uid: int | None) -> None:
             f"{_render.escape_md2(action)} "
             f"\\(needs `{_render.escape_md2(required)}`\\)"
         )
+
+    # v1.0.4 — also list slash-command auth resolved per-bucket from the
+    # registry so the operator can see at a glance which /commands they can
+    # fire.
+    lines.append("")
+    lines.append("*Slash commands by required grant*")
+    by_bucket: dict[str, list[str]] = {}
+    for canonical, meta in sorted(_COMMAND_REGISTRY.items()):
+        bucket = str(meta.get("auth") or "review")
+        by_bucket.setdefault(bucket, []).append(f"/{canonical}")
+    for bucket in sorted(by_bucket):
+        ok = auth.is_authorized(uid, action=bucket)
+        marker = "✅" if ok else "🚫"
+        names = " ".join(by_bucket[bucket])
+        lines.append(
+            f"{marker} `{_render.escape_md2(bucket)}`: "
+            f"{_render.escape_md2(names)}"
+        )
+
     tg_client.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
 
 
 def _build_help_text() -> str:
-    """Render the operator help card. Role matrix is generated at runtime
-    from ``_ACTION_REQ`` so it stays in sync."""
-    base_cmds: list[tuple[str, str]] = [
-        ("/start", "注册当前会话为 review chat"),
-        ("/status", "列出 *_pending_review 文章 + 等待时长"),
-        ("/queue", "队列前 5 条最久未审"),
-        ("/list [all|B|C|D|ready|publish]", "列出当前 pending 卡片"),
-        ("/published [days]", "最近 N 天 published 文章"),
-        ("/scan [top-k]", "主动触发 hotspots 扫描"),
-        ("/jobs", "cron 定时任务状态"),
-        ("/suggestions [profile]", "待确认 profile 建议"),
-        ("/skip <article_id>", "跳过 image-gate, 直接 Gate D"),
-        ("/defer <article_id> <hours>", "推迟 Gate B/C/D N 小时"),
-        ("/publish-mark <article_id> <url> [platform]", "标记 published (manual paste)"),
-        ("/audit", "最近 20 条 callback/slash 记录"),
-        ("/auth-debug", "你的 uid 在每个动作上的授权情况"),
-        ("/cancel <short_id>", "作废一个 pending callback short_id"),
-        ("/help", "这条帮助"),
-    ]
-    cmd_lines = [
-        f"• `{_render.escape_md2(name)}` — {_render.escape_md2(desc)}"
-        for name, desc in base_cmds
-    ]
+    """Render the operator help card. Commands grouped by ``group``, role
+    matrix lines below, both regenerated from ``_COMMAND_REGISTRY`` and
+    ``_ACTION_REQ`` so they cannot drift."""
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    group_order: list[str] = []
+    for canonical, meta in _COMMAND_REGISTRY.items():
+        group = str(meta.get("group") or "Misc")
+        if group not in grouped:
+            grouped[group] = []
+            group_order.append(group)
+        grouped[group].append((canonical, str(meta.get("summary") or "")))
+
+    lines: list[str] = []
+    for group in group_order:
+        lines.append(f"*{_render.escape_md2(group)}*")
+        for name, summary in sorted(grouped[group]):
+            lines.append(
+                f"• `{_render.escape_md2('/' + name)}` — "
+                f"{_render.escape_md2(summary)}"
+            )
+        lines.append("")
 
     gate_legend = [
         ("Gate A", "选题 (write/expand/defer/reject_all)"),
@@ -970,28 +993,1151 @@ def _build_help_text() -> str:
         ("Gate C", "封面 (approve/regen/relogo/full/skip/defer)"),
         ("Gate D", "渠道 (toggle/select_all/clear_all/save_default/confirm/cancel/extend/resume)"),
     ]
-    gate_lines = [
-        f"• *{_render.escape_md2(g)}* — {_render.escape_md2(d)}"
-        for g, d in gate_legend
-    ]
+    lines.append("*Gate Legend*")
+    for g, d in gate_legend:
+        lines.append(
+            f"• *{_render.escape_md2(g)}* — {_render.escape_md2(d)}"
+        )
+    lines.append("")
 
     role_rows = sorted(_ACTION_REQ.items(), key=lambda kv: (kv[0][0], kv[0][1]))
-    role_lines = [
-        f"• `{_render.escape_md2(g)}:{_render.escape_md2(a)}` → "
-        f"`{_render.escape_md2(req)}`"
-        for (g, a), req in role_rows
-    ]
+    lines.append("*Role Matrix* \\(action → required grant\\)")
+    for (g, a), req in role_rows:
+        lines.append(
+            f"• `{_render.escape_md2(g)}:{_render.escape_md2(a)}` → "
+            f"`{_render.escape_md2(req)}`"
+        )
 
-    return "\n".join([
-        "*Commands*",
-        *cmd_lines,
-        "",
-        "*Gate Legend*",
-        *gate_lines,
-        "",
-        "*Role Matrix* \\(action → required grant\\)",
-        *role_lines,
-    ])
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# v1.0.4 — Operator-completeness command registry.
+#
+# Canonical name (no leading slash, hyphens preserved) → metadata dict.
+# Each entry carries:
+#   aliases    : list[str] — alternate forms (typically the underscored
+#                variant, since Telegram setMyCommands rejects hyphens).
+#   group      : str        — heading used by /help (Bootstrap, Profile, …).
+#   auth       : str        — required action grant for ``auth.is_authorized``.
+#                The ``system`` bucket is new in v1.0.4.
+#   summary    : str        — one-line description rendered by /help.
+#   handler    : Callable   — concrete implementation. Signature:
+#                ``handler(chat_id, uid, args, raw_text) -> None``.
+#   multi_turn : bool       — True if the handler queues a follow-up reply via
+#                ``pending_edits.register``.
+#
+# The text dispatcher (``_dispatch_v104_command``) accepts both ``/foo-bar``
+# and ``/foo_bar`` and routes them to the same handler. Existing v1.0.3
+# inline handlers in ``_handle_message`` continue to handle their canonical
+# slash strings (``/status``, ``/queue``, …) — registry entries describe
+# them so help/auth-debug stay in sync.
+# ---------------------------------------------------------------------------
+
+
+# Canonical setMyCommands subset surfaced in the global Telegram menu.
+# Long-tail commands are still accepted by the text dispatcher.
+_V104_MENU_NAMES: tuple[str, ...] = (
+    "help", "status", "queue", "skip", "defer", "scan",
+    "profile", "profiles", "profile_switch", "style",
+    "doctor", "audit",
+)
+
+
+_COMMAND_REGISTRY: dict[str, dict[str, Any]] = {}
+
+
+def _register_command(
+    canonical: str,
+    *,
+    aliases: list[str] | None = None,
+    group: str,
+    auth_bucket: str,
+    summary: str,
+    handler: Any,
+    multi_turn: bool = False,
+) -> None:
+    _COMMAND_REGISTRY[canonical] = {
+        "aliases": list(aliases or []),
+        "group": group,
+        "auth": auth_bucket,
+        "summary": summary,
+        "handler": handler,
+        "multi_turn": multi_turn,
+    }
+
+
+def _safe_send(chat_id: int | None, text: str, *, parse_mode: str | None = None) -> None:
+    if chat_id is None:
+        return
+    try:
+        tg_client.send_message(chat_id, text, parse_mode=parse_mode)
+    except Exception:
+        pass
+
+
+def _audit_slash(cmd: str, uid: int | None, **extra: Any) -> None:
+    payload = {"kind": "slash_command", "cmd": cmd, "uid": uid, **extra}
+    _audit(payload)
+
+
+def _norm_command_name(name: str) -> str:
+    """Normalize ``/foo-bar`` and ``/foo_bar`` to canonical hyphen form for
+    registry lookup. Also handles bare ``foo_bar``."""
+    raw = name.strip()
+    if raw.startswith("/"):
+        raw = raw[1:]
+    raw = raw.split("@", 1)[0]  # /foo@BotName -> foo
+    return raw.replace("_", "-").lower()
+
+
+def _resolve_command(text: str) -> tuple[str, list[str]] | None:
+    """Look up the registry entry for an inbound message.
+
+    Returns ``(canonical, args)`` or ``None`` if the leading token isn't a
+    known v1.0.4 command. Argument parsing is whitespace-split — handlers
+    that need richer parsing should re-tokenize ``raw_text`` themselves.
+    """
+    if not text or not text.startswith("/"):
+        return None
+    parts = text.split(maxsplit=1)
+    head = parts[0]
+    norm = _norm_command_name(head)
+    canonical: str | None = None
+    if norm in _COMMAND_REGISTRY:
+        canonical = norm
+    else:
+        for name, meta in _COMMAND_REGISTRY.items():
+            for alias in meta.get("aliases") or []:
+                if _norm_command_name(alias) == norm:
+                    canonical = name
+                    break
+            if canonical is not None:
+                break
+    if canonical is None:
+        return None
+    args = parts[1].split() if len(parts) > 1 else []
+    return canonical, args
+
+
+# ---------------------------------------------------------------------------
+# v1.0.4 handlers — most wrap an existing CLI Click callback so we never
+# shell out to ``af``. Pattern: import the Click command, call its
+# ``.callback(...)`` directly inside a CliRunner-style guarded block, capture
+# stdout via redirect_stdout for the TG reply.
+# ---------------------------------------------------------------------------
+
+
+def _capture_callback(callback: Any, *args: Any, **kwargs: Any) -> tuple[str, str | None]:
+    """Run a Click ``.callback(...)`` capturing stdout. Returns
+    ``(stdout, error_message)``. ``error_message`` is None on success."""
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    err_msg: str | None = None
+    try:
+        with redirect_stdout(buf):
+            callback(*args, **kwargs)
+    except click.ClickException as exc:
+        err_msg = exc.format_message()
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            err_msg = f"command exited with code {exc.code}"
+    except Exception as exc:  # pragma: no cover — defensive
+        err_msg = f"{type(exc).__name__}: {exc}"
+    return buf.getvalue(), err_msg
+
+
+def _trim_for_tg(text: str, *, limit: int = 3500) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+# ---- Bootstrap ------------------------------------------------------------
+
+
+def _profile_session_active(uid: int | None) -> bool:
+    """Whether ``uid`` already has an in-progress profile session."""
+    if uid is None:
+        return False
+    try:
+        session = find_active_session_for_uid(int(uid))
+    except Exception:
+        return False
+    return session is not None
+
+
+def _start_profile_setup_session(
+    chat_id: int | None,
+    uid: int | None,
+    *,
+    profile_id: str | None = None,
+) -> None:
+    """Create a new bootstrap session and ask Step 1.
+
+    Reuses the existing ``_PROFILE_SETUP_STEPS`` walker so behaviour matches
+    auto-init. ``profile_id`` may be ``None`` for /onboard (default profile)
+    or a concrete id for /profile-init.
+    """
+    if chat_id is None or uid is None:
+        return
+    target_pid = (profile_id or "").strip()
+    if not target_pid:
+        try:
+            from agentflow.cli.commands import _default_topic_profile_id
+            target_pid = _default_topic_profile_id() or "default"
+        except Exception:
+            target_pid = "default"
+
+    try:
+        bootstrap_state = user_profile_bootstrap_state(target_pid)
+    except Exception:
+        bootstrap_state = {}
+
+    session = {
+        "uid": int(uid),
+        "chat_id": int(chat_id),
+        "profile_id": target_pid,
+        "step_index": 0,
+        "answers": {},
+        "bootstrap_state": bootstrap_state,
+        "steps": list(_PROFILE_SETUP_STEPS),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "source": "v104_slash",
+    }
+    try:
+        save_session(session)
+    except Exception as err:
+        _safe_send(
+            chat_id,
+            f"❌ profile session 创建失败: {err}"[:400],
+        )
+        return
+    _send_profile_setup_question(session)
+
+
+def _handle_onboard(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if _profile_session_active(uid):
+        _safe_send(chat_id, "⚙️ 已有进行中的 onboard 会话；继续按提示回复即可。")
+        _audit_slash("/onboard", uid, status="already_active")
+        return
+    _safe_send(
+        chat_id, "⚙️ 开始引导式 onboard：将依次询问 brand / voice / sources / rules。"
+    )
+    _start_profile_setup_session(chat_id, uid)
+    _audit_slash("/onboard", uid, status="started")
+
+
+def _handle_doctor(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.review_commands import doctor_cmd  # type: ignore
+    except Exception as err:
+        _safe_send(chat_id, f"❌ doctor 不可用: {err}"[:400])
+        _audit_slash("/doctor", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        doctor_cmd.callback, strict=False, fresh=False, as_json=False,
+    )
+    body = out.strip() or "(no output)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🏥 doctor:\n{body}"))
+    _audit_slash("/doctor", uid)
+
+
+def _handle_scan(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    top_k = 3
+    if args:
+        try:
+            top_k = max(1, min(10, int(args[0])))
+        except ValueError:
+            _safe_send(chat_id, "❌ /scan 参数应是整数 1-10")
+            _audit_slash("/scan", uid, error="bad_arg")
+            return
+    _safe_send(chat_id, f"🔎 已开始扫描热点… top-{top_k}")
+    try:
+        _spawn_hotspots(top_k=top_k)
+    except Exception as err:  # pragma: no cover — defensive
+        _log.warning("/scan _spawn_hotspots failed: %s", err)
+        _safe_send(chat_id, f"❌ scan 启动失败: {err}"[:400])
+    _audit_slash("/scan", uid, top_k=top_k)
+
+
+# ---- Profile --------------------------------------------------------------
+
+
+def _active_profile_id() -> str | None:
+    """Resolve currently active profile id (for /profile)."""
+    try:
+        from agentflow.cli.topic_profile_commands import _read_active_profile_id
+        return _read_active_profile_id()
+    except Exception:
+        return None
+
+
+def _handle_profile(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    pid = (args[0] if args else None) or _active_profile_id()
+    if not pid:
+        _safe_send(
+            chat_id, "👤 当前没有活跃 profile。用 /profile-switch <id> 切换。",
+        )
+        _audit_slash("/profile", uid, status="no_active")
+        return
+    try:
+        from agentflow.cli.topic_profile_commands import topic_profile_show
+    except Exception as err:
+        _safe_send(chat_id, f"❌ profile 命令不可用: {err}"[:400])
+        _audit_slash("/profile", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        topic_profile_show.callback, profile_id=pid, as_json=False,
+    )
+    body = out.strip() or "(empty)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"👤 profile {pid}:\n{body}"))
+    _audit_slash("/profile", uid, profile_id=pid)
+
+
+def _handle_profiles(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.topic_profile_commands import topic_profile_list
+    except Exception as err:
+        _safe_send(chat_id, f"❌ profiles 命令不可用: {err}"[:400])
+        _audit_slash("/profiles", uid, error="import_failed")
+        return
+    out, err = _capture_callback(topic_profile_list.callback, as_json=False)
+    body = out.strip() or "(no profiles)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"👤 *profiles*\n{body}"))
+    _audit_slash("/profiles", uid)
+
+
+def _handle_profile_init(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /profile-init <id>")
+        _audit_slash("/profile-init", uid, error="missing_id")
+        return
+    pid = args[0].strip()
+    if _profile_session_active(uid):
+        _safe_send(chat_id, "⚙️ 已有进行中的 profile 会话；继续按提示回复即可。")
+        _audit_slash("/profile-init", uid, status="already_active")
+        return
+    _safe_send(chat_id, f"👤 创建 profile {pid}：将依次问 brand / voice / sources / rules。")
+    _start_profile_setup_session(chat_id, uid, profile_id=pid)
+    _audit_slash("/profile-init", uid, profile_id=pid)
+
+
+def _handle_profile_update(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if len(args) < 2:
+        _safe_send(
+            chat_id,
+            "用法: /profile-update <field> <value>\n"
+            "对多行字段（如 rules），用 /profile-init 重新走 wizard。",
+        )
+        _audit_slash("/profile-update", uid, error="missing_args")
+        return
+    field = args[0].strip()
+    value = " ".join(args[1:]).strip()
+    pid = _active_profile_id()
+    if not pid:
+        _safe_send(chat_id, "❌ 当前没有活跃 profile，先 /profile-switch <id>。")
+        _audit_slash("/profile-update", uid, error="no_active")
+        return
+    if field.lower() == "rules":
+        # Multi-line rules — ask the user to reply with the full block.
+        try:
+            pending_edits.register(
+                uid=int(uid),
+                article_id=f"profile_update::{pid}::rules",
+                gate="PU",
+                short_id=f"slash:{uid}",
+                ttl_minutes=15,
+            )
+        except Exception:
+            pass
+        _safe_send(
+            chat_id,
+            "✏️ 请用一条消息回复完整的 rules（多行）。15 分钟内有效。",
+        )
+        _audit_slash("/profile-update", uid, profile_id=pid, mode="multi_turn_rules")
+        return
+    # Single-shot field update via upsert_profile.
+    try:
+        from agentflow.shared.topic_profile_lifecycle import upsert_profile
+        patch: dict[str, Any] = {field: value}
+        if field in {"brand", "voice", "pronoun", "output_language"}:
+            patch = {"publisher_account": {field: value}}
+        elif field in {"do", "dont", "product_facts", "perspectives"}:
+            patch = {"publisher_account": {field: [v for v in value.split(",") if v]}}
+        upsert_profile(
+            pid, patch, replace_lists=False,
+            source="tg_slash_profile_update",
+        )
+    except Exception as err:
+        _safe_send(chat_id, f"❌ update 失败: {err}"[:400])
+        _audit_slash("/profile-update", uid, profile_id=pid, error=str(err)[:120])
+        return
+    append_memory_event(
+        "topic_profile_updated",
+        payload={"profile_id": pid, "mode": "tg_slash", "field": field},
+    )
+    _safe_send(chat_id, f"✅ profile {pid} 字段 {field} 已更新")
+    _audit_slash("/profile-update", uid, profile_id=pid, field=field)
+
+
+def _handle_profile_switch(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /profile-switch <id>")
+        _audit_slash("/profile-switch", uid, error="missing_id")
+        return
+    pid = args[0].strip()
+    try:
+        from agentflow.cli.topic_profile_commands import topic_profile_set_active
+    except Exception as err:
+        _safe_send(chat_id, f"❌ set-active 不可用: {err}"[:400])
+        _audit_slash("/profile-switch", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        topic_profile_set_active.callback, profile_id=pid, as_json=False,
+    )
+    if err:
+        _safe_send(chat_id, f"❌ {err}"[:400])
+        _audit_slash("/profile-switch", uid, profile_id=pid, error=err[:120])
+        return
+    _safe_send(chat_id, _trim_for_tg(f"👤 {out.strip()}"))
+    _audit_slash("/profile-switch", uid, profile_id=pid)
+
+
+# ---- Sources --------------------------------------------------------------
+
+
+def _mutate_keyword_terms(pid: str, keyword: str, *, add: bool) -> tuple[bool, str]:
+    """Append/remove ``keyword`` from the active profile's
+    ``keyword_groups.core`` list. Returns ``(changed, message)``."""
+    from agentflow.shared.topic_profile_lifecycle import (
+        load_user_topic_profiles,
+        upsert_profile,
+    )
+
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return False, "missing keyword"
+    data = load_user_topic_profiles() or {}
+    profiles = data.get("profiles") if isinstance(data, dict) else {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+    profile = profiles.get(pid) or {}
+    groups = profile.get("keyword_groups") or {}
+    core_terms = list(groups.get("core") or []) if isinstance(groups, dict) else []
+    if add:
+        if keyword in core_terms:
+            return False, f"keyword '{keyword}' already present"
+        core_terms.append(keyword)
+    else:
+        if keyword not in core_terms:
+            return False, f"keyword '{keyword}' not present"
+        core_terms = [t for t in core_terms if t != keyword]
+    upsert_profile(
+        pid,
+        {"keyword_groups": {"core": core_terms}},
+        replace_lists=True,
+        source=f"tg_slash_keyword_{'add' if add else 'rm'}",
+    )
+    return True, "ok"
+
+
+def _handle_keyword_add(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /keyword-add <keyword>")
+        _audit_slash("/keyword-add", uid, error="missing_arg")
+        return
+    pid = _active_profile_id()
+    if not pid:
+        _safe_send(chat_id, "❌ 当前没有活跃 profile，先 /profile-switch <id>。")
+        _audit_slash("/keyword-add", uid, error="no_active")
+        return
+    keyword = " ".join(args).strip()
+    changed, msg = _mutate_keyword_terms(pid, keyword, add=True)
+    if not changed:
+        _safe_send(chat_id, f"ℹ️ {msg}")
+        _audit_slash("/keyword-add", uid, profile_id=pid, status=msg)
+        return
+    append_memory_event(
+        "topic_profile_updated",
+        payload={"profile_id": pid, "mode": "keyword_add", "keyword": keyword},
+    )
+    _safe_send(chat_id, f"🌐 已加入 keyword_groups.core: {keyword}")
+    _audit_slash("/keyword-add", uid, profile_id=pid, keyword=keyword)
+
+
+def _handle_keyword_rm(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /keyword-rm <keyword>")
+        _audit_slash("/keyword-rm", uid, error="missing_arg")
+        return
+    pid = _active_profile_id()
+    if not pid:
+        _safe_send(chat_id, "❌ 当前没有活跃 profile，先 /profile-switch <id>。")
+        _audit_slash("/keyword-rm", uid, error="no_active")
+        return
+    keyword = " ".join(args).strip()
+    changed, msg = _mutate_keyword_terms(pid, keyword, add=False)
+    if not changed:
+        _safe_send(chat_id, f"ℹ️ {msg}")
+        _audit_slash("/keyword-rm", uid, profile_id=pid, status=msg)
+        return
+    append_memory_event(
+        "topic_profile_updated",
+        payload={"profile_id": pid, "mode": "keyword_rm", "keyword": keyword},
+    )
+    _safe_send(chat_id, f"🌐 已移除 keyword_groups.core: {keyword}")
+    _audit_slash("/keyword-rm", uid, profile_id=pid, keyword=keyword)
+
+
+# ---- Style ----------------------------------------------------------------
+
+
+def _handle_style(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.commands import learn_style
+    except Exception as err:
+        _safe_send(chat_id, f"❌ learn-style 不可用: {err}"[:400])
+        _audit_slash("/style", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        learn_style.callback,
+        dir_=None, file_=tuple(), url=tuple(),
+        from_published=False, show=True, recompute=False,
+    )
+    body = out.strip() or "(no style profile yet — run /style-learn)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🗣️ style:\n{body}"))
+    _audit_slash("/style", uid)
+
+
+def _handle_style_learn(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        # Multi-turn — ask for handle/dir.
+        try:
+            pending_edits.register(
+                uid=int(uid),
+                article_id="style_learn::pending",
+                gate="SL",
+                short_id=f"slash:{uid}",
+                ttl_minutes=15,
+            )
+        except Exception:
+            pass
+        _safe_send(
+            chat_id,
+            "🗣️ 回复 handle (例 @medium_author) 或样本目录绝对路径。15min 内有效。",
+        )
+        _audit_slash("/style-learn", uid, mode="multi_turn")
+        return
+    arg = args[0].strip()
+    if arg.startswith("@") or arg.startswith("http://") or arg.startswith("https://"):
+        try:
+            from agentflow.cli.commands import learn_from_handle
+        except Exception as err:
+            _safe_send(chat_id, f"❌ learn-from-handle 不可用: {err}"[:400])
+            _audit_slash("/style-learn", uid, error="import_failed")
+            return
+        out, err = _capture_callback(
+            learn_from_handle.callback,
+            handle_or_url=arg, max_samples=5, ask_extras=False,
+            profile_id=None, dry_run=False, refresh=False, as_json=False,
+        )
+        body = out.strip() or "(no output)"
+        if err:
+            body = body + f"\n\n[err] {err}"
+        _safe_send(chat_id, _trim_for_tg(f"🗣️ learn-from-handle:\n{body}"))
+        _audit_slash("/style-learn", uid, source="handle", arg=arg)
+        return
+    # Treat as directory path.
+    try:
+        from agentflow.cli.commands import learn_style
+    except Exception as err:
+        _safe_send(chat_id, f"❌ learn-style 不可用: {err}"[:400])
+        _audit_slash("/style-learn", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        learn_style.callback,
+        dir_=arg, file_=tuple(), url=tuple(),
+        from_published=False, show=False, recompute=False,
+    )
+    body = out.strip() or "(done)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🗣️ learn-style --dir {arg}:\n{body}"))
+    _audit_slash("/style-learn", uid, source="dir", arg=arg)
+
+
+# ---- Intent ---------------------------------------------------------------
+
+
+def _handle_intent(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.commands import intent_show
+    except Exception as err:
+        _safe_send(chat_id, f"❌ intent 命令不可用: {err}"[:400])
+        _audit_slash("/intent", uid, error="import_failed")
+        return
+    out, err = _capture_callback(intent_show.callback, as_json=False)
+    body = out.strip() or "(no intent set)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🎯 intent:\n{body}"))
+    _audit_slash("/intent", uid)
+
+
+def _handle_intent_set(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /intent-set <topic>")
+        _audit_slash("/intent-set", uid, error="missing_arg")
+        return
+    topic = " ".join(args).strip()
+    try:
+        from agentflow.cli.commands import intent_set
+    except Exception as err:
+        _safe_send(chat_id, f"❌ intent-set 不可用: {err}"[:400])
+        _audit_slash("/intent-set", uid, error="import_failed")
+        return
+    out, err = _capture_callback(
+        intent_set.callback,
+        query=topic, topic_profile_id=None,
+        ttl="session", mode="keyword", as_json=False,
+    )
+    if err:
+        _safe_send(chat_id, f"❌ {err}"[:400])
+        _audit_slash("/intent-set", uid, error=err[:120])
+        return
+    _safe_send(chat_id, _trim_for_tg(f"🎯 {out.strip() or 'intent set'}"))
+    _audit_slash("/intent-set", uid, topic=topic)
+
+
+def _handle_intent_clear(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.commands import intent_clear
+    except Exception as err:
+        _safe_send(chat_id, f"❌ intent-clear 不可用: {err}"[:400])
+        _audit_slash("/intent-clear", uid, error="import_failed")
+        return
+    out, err = _capture_callback(intent_clear.callback, as_json=False)
+    body = out.strip() or "(cleared)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🎯 {body}"))
+    _audit_slash("/intent-clear", uid)
+
+
+# ---- Prefs ----------------------------------------------------------------
+
+
+def _handle_prefs(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.shared import preferences as _prefs
+    except Exception as err:
+        _safe_send(chat_id, f"❌ prefs 不可用: {err}"[:400])
+        _audit_slash("/prefs", uid, error="import_failed")
+        return
+    prefs = _prefs.load() or {}
+    summary = _prefs.summarize(prefs) if prefs else {}
+    sections = summary.get("sections") or {}
+    flat: list[tuple[str, Any, int]] = []
+    for section, body in sections.items():
+        if not isinstance(body, dict):
+            continue
+        for k, v in body.items():
+            evidence = prefs.get(section, {}).get(f"_evidence_{k}") if isinstance(prefs.get(section), dict) else None
+            ev_count = len(evidence) if isinstance(evidence, list) else 0
+            flat.append((f"{section}.{k}", v, ev_count))
+    flat.sort(key=lambda r: -r[2])
+    if not flat:
+        _safe_send(
+            chat_id,
+            "🧠 prefs 暂无聚合数据 (run /prefs-rebuild)",
+        )
+        _audit_slash("/prefs", uid, status="empty")
+        return
+    lines = ["🧠 *Top 5 prefs*"]
+    for key, value, ev in flat[:5]:
+        lines.append(f"• {key}: {value!r} (evidence={ev})")
+    _safe_send(chat_id, _trim_for_tg("\n".join(lines)))
+    _audit_slash("/prefs", uid)
+
+
+def _handle_prefs_rebuild(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.prefs_commands import prefs_rebuild
+    except Exception as err:
+        _safe_send(chat_id, f"❌ prefs-rebuild 不可用: {err}"[:400])
+        _audit_slash("/prefs-rebuild", uid, error="import_failed")
+        return
+    out, err = _capture_callback(prefs_rebuild.callback, dry_run=False, as_json=False)
+    body = out.strip() or "(done)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🧠 prefs-rebuild:\n{body}"))
+    _audit_slash("/prefs-rebuild", uid)
+
+
+def _handle_prefs_explain(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if not args:
+        _safe_send(chat_id, "用法: /prefs-explain <key>")
+        _audit_slash("/prefs-explain", uid, error="missing_arg")
+        return
+    key = args[0].strip()
+    try:
+        from agentflow.cli.prefs_commands import prefs_explain
+    except Exception as err:
+        _safe_send(chat_id, f"❌ prefs-explain 不可用: {err}"[:400])
+        _audit_slash("/prefs-explain", uid, error="import_failed")
+        return
+    out, err = _capture_callback(prefs_explain.callback, key=key, as_json=False)
+    body = out.strip() or "(no evidence)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"🧠 prefs-explain {key}:\n{body}"))
+    _audit_slash("/prefs-explain", uid, key=key)
+
+
+# 2-step confirm store for /prefs-reset and /restart-daemon. Lives in
+# pending_edits with a synthetic gate so the existing reply intercept catches
+# the "yes/no" follow-up.
+def _await_confirm(uid: int | None, *, gate: str, target: str) -> None:
+    if uid is None:
+        return
+    try:
+        pending_edits.register(
+            uid=int(uid),
+            article_id=target,
+            gate=gate,
+            short_id=f"confirm:{uid}",
+            ttl_minutes=2,
+        )
+    except Exception:
+        pass
+
+
+def _handle_prefs_reset(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    if args:
+        # Single-key reset: no confirm needed.
+        key = args[0].strip()
+        try:
+            from agentflow.cli.prefs_commands import prefs_reset
+        except Exception as err:
+            _safe_send(chat_id, f"❌ prefs-reset 不可用: {err}"[:400])
+            _audit_slash("/prefs-reset", uid, error="import_failed")
+            return
+        out, err = _capture_callback(prefs_reset.callback, key=key, as_json=False)
+        body = out.strip() or "(done)"
+        if err:
+            body = body + f"\n\n[err] {err}"
+        _safe_send(chat_id, _trim_for_tg(f"🧠 prefs-reset {key}:\n{body}"))
+        _audit_slash("/prefs-reset", uid, key=key)
+        return
+    # Whole-file reset — 2-step confirm.
+    _await_confirm(uid, gate="PREFS_RESET", target="prefs::all")
+    _safe_send(chat_id, "⚠️ 确认重置全部 prefs？回 yes/no（2min 有效）")
+    _audit_slash("/prefs-reset", uid, status="awaiting_confirm")
+
+
+# ---- Review-ops -----------------------------------------------------------
+
+
+def _handle_report(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    try:
+        from agentflow.cli.report_commands import report
+    except Exception as err:
+        _safe_send(chat_id, f"❌ report 不可用: {err}"[:400])
+        _audit_slash("/report", uid, error="import_failed")
+        return
+    out, err = _capture_callback(report.callback, window="7d", as_json=False)
+    body = out.strip() or "(empty report)"
+    if err:
+        body = body + f"\n\n[err] {err}"
+    _safe_send(chat_id, _trim_for_tg(f"📊 report (7d):\n{body}"))
+    _audit_slash("/report", uid)
+
+
+# ---- System ---------------------------------------------------------------
+
+
+def _handle_restart_daemon(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    _await_confirm(uid, gate="RESTART", target="daemon::restart")
+    _safe_send(chat_id, "⚙️ 确认重启 review-daemon？回 yes/no（2min 有效）")
+    _audit_slash("/restart-daemon", uid, status="awaiting_confirm")
+
+
+def _trigger_daemon_restart() -> None:
+    """Send SIGTERM to ourselves; systemd's Restart=on-failure brings us back."""
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _handle_pending_confirm_reply(
+    *, chat_id: int | None, uid: int | None, pending: dict[str, Any], text: str,
+) -> bool:
+    """Handle replies to 2-step confirm prompts. Returns True if consumed."""
+    gate = str(pending.get("gate") or "")
+    if gate not in {"PREFS_RESET", "RESTART"}:
+        return False
+    answer = (text or "").strip().lower()
+    if answer not in {"yes", "y", "no", "n"}:
+        _safe_send(chat_id, "回 yes 或 no（2min 内有效）")
+        return True
+    if answer in {"no", "n"}:
+        _safe_send(chat_id, "已取消。")
+        _audit_slash(f"/{gate.lower()}_confirm", uid, decision="no")
+        return True
+    if gate == "PREFS_RESET":
+        try:
+            from agentflow.cli.prefs_commands import prefs_reset
+            out, err = _capture_callback(prefs_reset.callback, key=None, as_json=False)
+            body = out.strip() or "(done)"
+            if err:
+                body = body + f"\n\n[err] {err}"
+            _safe_send(chat_id, _trim_for_tg(f"🧠 prefs-reset all:\n{body}"))
+        except Exception as exc:
+            _safe_send(chat_id, f"❌ prefs-reset 失败: {exc}"[:400])
+        _audit_slash("/prefs-reset_confirm", uid, decision="yes")
+        return True
+    if gate == "RESTART":
+        _safe_send(chat_id, "⚙️ 正在重启 (SIGTERM)…")
+        _audit_slash("/restart-daemon_confirm", uid, decision="yes")
+        try:
+            _trigger_daemon_restart()
+        except Exception as exc:  # pragma: no cover — defensive
+            _safe_send(chat_id, f"❌ restart 失败: {exc}"[:400])
+        return True
+    return False
+
+
+# ---- Wrappers around v1.0.3 inline handlers (used purely for registry
+# completeness so /help and /auth-debug list them too). The actual dispatch
+# of these commands stays in ``_handle_message`` for backward compatibility.
+
+
+def _handle_v103_passthrough(
+    chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
+) -> None:
+    """No-op shim. The v1.0.3 inline branch in ``_handle_message`` runs first
+    for canonical hyphen forms and registry forms; this passthrough only fires
+    when the user uses an alias the inline branch doesn't recognize, in which
+    case we re-emit the canonical form and re-enter the dispatcher."""
+    canonical = raw_text.lstrip("/").split(maxsplit=1)[0]
+    canonical_norm = _norm_command_name(canonical)
+    rebuilt = "/" + canonical_norm
+    if args:
+        rebuilt += " " + " ".join(args)
+    _handle_message_v103_inline(chat_id, uid, rebuilt)
+
+
+def _handle_message_v103_inline(
+    chat_id: int | None, uid: int | None, text: str,
+) -> None:
+    """Re-enter ``_handle_message`` with a synthetic update so the v1.0.3
+    inline branches handle the canonical form. Used by alias passthrough."""
+    if chat_id is None or uid is None:
+        return
+    update = {
+        "message": {
+            "text": text,
+            "chat": {"id": int(chat_id)},
+            "from": {"id": int(uid)},
+        }
+    }
+    try:
+        _handle_message(update)
+    except Exception as err:  # pragma: no cover — defensive
+        _log.warning("v103 alias re-entry failed: %s", err)
+
+
+# ---------------------------------------------------------------------------
+# Registry population
+# ---------------------------------------------------------------------------
+
+
+def _populate_command_registry() -> None:
+    if _COMMAND_REGISTRY:
+        return
+
+    # Bootstrap.
+    _register_command(
+        "onboard", group="Bootstrap", auth_bucket="system",
+        summary="Start guided setup",
+        handler=_handle_onboard, multi_turn=True,
+    )
+    _register_command(
+        "doctor", aliases=["preflight"], group="Bootstrap", auth_bucket="review",
+        summary="Show readiness matrix",
+        handler=_handle_doctor,
+    )
+    _register_command(
+        "scan", group="Bootstrap", auth_bucket="system",
+        summary="Trigger hotspots scan",
+        handler=_handle_scan,
+    )
+
+    # Profile.
+    _register_command(
+        "profile", group="Profile", auth_bucket="review",
+        summary="Show active profile",
+        handler=_handle_profile,
+    )
+    _register_command(
+        "profiles", group="Profile", auth_bucket="review",
+        summary="List all profiles",
+        handler=_handle_profiles,
+    )
+    _register_command(
+        "profile-init", aliases=["profile_init"], group="Profile",
+        auth_bucket="system",
+        summary="Multi-turn new profile creation",
+        handler=_handle_profile_init, multi_turn=True,
+    )
+    _register_command(
+        "profile-update", aliases=["profile_update"], group="Profile",
+        auth_bucket="system",
+        summary="One-shot field update",
+        handler=_handle_profile_update,
+    )
+    _register_command(
+        "profile-switch", aliases=["profile_switch"], group="Profile",
+        auth_bucket="system",
+        summary="Switch active profile",
+        handler=_handle_profile_switch,
+    )
+
+    # Sources.
+    _register_command(
+        "keyword-add", aliases=["keyword_add"], group="Sources",
+        auth_bucket="system",
+        summary="Append term to keyword_groups.core",
+        handler=_handle_keyword_add,
+    )
+    _register_command(
+        "keyword-rm", aliases=["keyword_rm"], group="Sources",
+        auth_bucket="system",
+        summary="Remove term from keyword_groups.core",
+        handler=_handle_keyword_rm,
+    )
+
+    # Style.
+    _register_command(
+        "style", group="Style", auth_bucket="review",
+        summary="Show style profile",
+        handler=_handle_style,
+    )
+    _register_command(
+        "style-learn", aliases=["style_learn"], group="Style",
+        auth_bucket="system",
+        summary="Learn style from handle / dir",
+        handler=_handle_style_learn, multi_turn=True,
+    )
+
+    # Intent.
+    _register_command(
+        "intent", group="Intent", auth_bucket="review",
+        summary="Show current intent",
+        handler=_handle_intent,
+    )
+    _register_command(
+        "intent-set", aliases=["intent_set"], group="Intent",
+        auth_bucket="system",
+        summary="Set current intent",
+        handler=_handle_intent_set,
+    )
+    _register_command(
+        "intent-clear", aliases=["intent_clear"], group="Intent",
+        auth_bucket="system",
+        summary="Clear current intent",
+        handler=_handle_intent_clear,
+    )
+
+    # Prefs.
+    _register_command(
+        "prefs", group="Prefs", auth_bucket="review",
+        summary="Top-5 prefs + evidence count",
+        handler=_handle_prefs,
+    )
+    _register_command(
+        "prefs-rebuild", aliases=["prefs_rebuild"], group="Prefs",
+        auth_bucket="system",
+        summary="Rebuild prefs from events",
+        handler=_handle_prefs_rebuild,
+    )
+    _register_command(
+        "prefs-explain", aliases=["prefs_explain"], group="Prefs",
+        auth_bucket="review",
+        summary="Show evidence for a prefs key",
+        handler=_handle_prefs_explain,
+    )
+    _register_command(
+        "prefs-reset", aliases=["prefs_reset"], group="Prefs",
+        auth_bucket="system",
+        summary="Reset prefs (key / all w/ confirm)",
+        handler=_handle_prefs_reset,
+    )
+
+    # Review-ops (v1.0.3 + report).
+    _register_command(
+        "report", group="Review-ops", auth_bucket="review",
+        summary="Daily/weekly report (window=7d)",
+        handler=_handle_report,
+    )
+    _register_command(
+        "status", group="Review-ops", auth_bucket="review",
+        summary="List *_pending_review articles",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "queue", group="Review-ops", auth_bucket="review",
+        summary="Top-5 oldest pending",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "help", group="Review-ops", auth_bucket="review",
+        summary="This help card",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "skip", group="Review-ops", auth_bucket="review",
+        summary="Skip image-gate",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "defer", group="Review-ops", auth_bucket="review",
+        summary="Defer Gate B/C/D",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "publish-mark", aliases=["publish_mark"], group="Review-ops",
+        auth_bucket="publish",
+        summary="Mark article as published",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "audit", group="Review-ops", auth_bucket="review",
+        summary="Last 20 callback/slash events",
+        handler=_handle_v103_passthrough,
+    )
+    _register_command(
+        "auth-debug", aliases=["auth_debug"], group="Review-ops",
+        auth_bucket="review",
+        summary="Per-action authorization debug",
+        handler=_handle_v103_passthrough,
+    )
+
+    # System.
+    _register_command(
+        "restart-daemon", aliases=["restart_daemon"], group="System",
+        auth_bucket="system",
+        summary="Restart daemon (SIGTERM, systemd revives)",
+        handler=_handle_restart_daemon,
+    )
+
+
+_populate_command_registry()
+
+
+def _build_set_my_commands_payload() -> list[dict[str, str]]:
+    """Curated subset shown in Telegram's global / menu. Hyphens are
+    rejected by setMyCommands so we use the underscored aliases when needed.
+    """
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for name in _V104_MENU_NAMES:
+        meta = _COMMAND_REGISTRY.get(name) or _COMMAND_REGISTRY.get(
+            name.replace("_", "-")
+        )
+        if meta is None:
+            continue
+        cmd_name = name if "-" not in name else name.replace("-", "_")
+        if cmd_name in seen:
+            continue
+        seen.add(cmd_name)
+        out.append({"command": cmd_name, "description": meta["summary"][:100]})
+    return out
+
+
+def _dispatch_v104_command(
+    chat_id: int | None, uid: int | None, text: str,
+) -> bool:
+    """Resolve and dispatch a registry command. Returns True if consumed.
+
+    Auth-gate via the registry's ``auth`` bucket. Calls the handler with
+    ``(chat_id, uid, args, raw_text)``.
+    """
+    resolved = _resolve_command(text)
+    if resolved is None:
+        return False
+    canonical, args = resolved
+    meta = _COMMAND_REGISTRY[canonical]
+    bucket = str(meta.get("auth") or "review")
+    if not auth.is_authorized(uid, action=bucket):
+        _safe_send(
+            chat_id,
+            f"❌ /{canonical} 需要 `{bucket}` 授权 (uid={uid})",
+        )
+        _audit_slash(
+            f"/{canonical}", uid,
+            error="not_authorized", bucket=bucket,
+        )
+        return True
+    handler = meta["handler"]
+    try:
+        handler(chat_id, uid, args, text)
+    except Exception as err:  # pragma: no cover — defensive
+        _log.warning("v104 handler %s crashed: %s", canonical, err)
+        _safe_send(chat_id, f"❌ /{canonical} 失败: {err}"[:400])
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1604,6 +2750,15 @@ def _handle_message(update: dict[str, Any]) -> None:
         _audit({"kind": "slash_command", "cmd": "/cancel", "uid": uid})
         return
 
+    # v1.0.4 — registry-driven slash dispatcher catches the long tail of
+    # operator-completeness commands (/onboard /doctor /profile* /style*
+    # /intent* /prefs* /report /restart-daemon …). v1.0.3 inline branches
+    # above own /status /queue /help /list /published /scan /jobs /skip
+    # /defer /publish-mark /audit /auth-debug /cancel /suggestions /start.
+    if text.startswith("/"):
+        if _dispatch_v104_command(chat_id, uid, text):
+            return
+
     if _maybe_handle_profile_session_reply(
         chat_id=chat_id,
         uid=uid,
@@ -1613,6 +2768,74 @@ def _handle_message(update: dict[str, Any]) -> None:
         return
 
     pending = pending_edits.take(int(uid)) if uid is not None else None
+    # v1.0.4 — multi-turn replies for confirm prompts (PREFS_RESET / RESTART)
+    # and field-update gates (PU / SL) bypass the legacy ``edit``-grant check
+    # because they don't fan out to ``_spawn_edit``.
+    if pending and text:
+        v104_gate = str(pending.get("gate") or "")
+        if v104_gate in {"PREFS_RESET", "RESTART"}:
+            if _handle_pending_confirm_reply(
+                chat_id=chat_id, uid=uid, pending=pending, text=text,
+            ):
+                return
+        if v104_gate == "PU":
+            target = str(pending.get("article_id") or "")
+            try:
+                _, pid, field = target.split("::", 2)
+            except ValueError:
+                pid, field = "", ""
+            if pid and field:
+                try:
+                    from agentflow.shared.topic_profile_lifecycle import upsert_profile
+                    upsert_profile(
+                        pid,
+                        {"publisher_account": {field: [
+                            line.strip() for line in text.splitlines() if line.strip()
+                        ]}},
+                        replace_lists=True,
+                        source="tg_slash_profile_update_multi",
+                    )
+                    append_memory_event(
+                        "topic_profile_updated",
+                        payload={
+                            "profile_id": pid, "mode": "tg_slash_multi",
+                            "field": field,
+                        },
+                    )
+                    _safe_send(chat_id, f"✅ profile {pid} 字段 {field} 已更新（多行）")
+                except Exception as err:
+                    _safe_send(chat_id, f"❌ update 失败: {err}"[:400])
+            else:
+                _safe_send(chat_id, "❌ pending profile-update 上下文丢失")
+            return
+        if v104_gate == "SL":
+            arg = (text or "").strip()
+            if not arg:
+                _safe_send(chat_id, "❌ 输入为空")
+                return
+            try:
+                if arg.startswith("@") or arg.startswith("http"):
+                    from agentflow.cli.commands import learn_from_handle
+                    out, err = _capture_callback(
+                        learn_from_handle.callback,
+                        handle_or_url=arg, max_samples=5, ask_extras=False,
+                        profile_id=None, dry_run=False, refresh=False, as_json=False,
+                    )
+                else:
+                    from agentflow.cli.commands import learn_style
+                    out, err = _capture_callback(
+                        learn_style.callback,
+                        dir_=arg, file_=tuple(), url=tuple(),
+                        from_published=False, show=False, recompute=False,
+                    )
+                body = out.strip() or "(done)"
+                if err:
+                    body += f"\n\n[err] {err}"
+                _safe_send(chat_id, _trim_for_tg(f"🗣️ style-learn:\n{body}"))
+            except Exception as err:
+                _safe_send(chat_id, f"❌ style-learn 失败: {err}"[:400])
+            return
+
     if pending and text and not auth.is_authorized(uid, action="edit"):
         # The uid was *cleared* of the pending edit by .take(); re-register
         # so a teammate with the right grant can still pick it up if the

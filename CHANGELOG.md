@@ -16,6 +16,127 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.4] — 2026-04-29
+
+A four-front release closing a security leak, relocating secrets to the
+operator's key folder, completing the YAML-as-CLI-args affordance across
+the writer pipeline, and finishing the Telegram operator-completeness work
+started in v1.0.3 (8 review-ops commands → 21 ops/bootstrap/profile/
+intent/prefs/system commands).
+
+### Security
+
+- **Plugged a deploy-bundle secret leak.** `scripts/build_deploy_bundle.sh`
+  excluded `.env` (exact match) but NOT `env_config*` / `.env_config*` /
+  `*.key` / `*.pem` / `id_rsa`. Confirmed: `agentflow-deploy-v1.0.2.zip`
+  and `agentflow-deploy-v1.0.3.zip` (and matching `.tar.gz`) on the local
+  build host carried operator API keys (TELEGRAM_BOT_TOKEN, GHOST_ADMIN_API_KEY,
+  ATLASCLOUD_API_KEY, AGENTFLOW_AGENT_BRIDGE_TOKEN). Bundles never reached
+  GitHub Releases or third parties (no rotation needed). The contaminated
+  bundles were deleted; rsync exclude set extended; new post-build sanity
+  guard rejects any bundle containing `env_config*`, `.env_config*`,
+  `*.key`, `*.pem`, `id_rsa`, or any non-`.template` `.env`-shaped file.
+- **`.gitignore` extended** with `env_config*`, `.env_config*`,
+  `*env_config copy*`, `secrets/`, `*.key`, `*.pem`, `id_rsa`,
+  `id_rsa.pub`, plus `agentflow-deploy-*.zip`. The dotted-name pattern
+  catches macOS-rename variants the operator used to bypass `.env*` hits.
+
+### Migration — secrets relocate to `~/.agentflow/secrets/`
+
+- **CLI loader rewritten** (`backend/agentflow/cli/commands.py`). New
+  precedence: `~/.agentflow/secrets/.env` (catch-all primary) →
+  `~/.agentflow/secrets/<service>.env` (per-service: `telegram.env`,
+  `atlascloud.env`, `ghost.env`, `moonshot.env`, `anthropic.env`,
+  `jina.env`, `openai.env`, `twitter.env`, `linkedin.env`,
+  `agent_bridge.env`, `review_dashboard.env`) → `backend/.env` (back-compat
+  fallback for installs predating v1.0.4). All loads use `override=False`
+  so a value set by an earlier source (process env or higher-precedence
+  file) wins.
+- **`af onboard` writes to `~/.agentflow/secrets/.env`** by default; dir
+  is created at mode 0700, files at mode 0600.
+- **`af bootstrap` env-seed step** migrates an existing `backend/.env` to
+  the new location on first run after upgrade (preserving operator-set
+  values), or seeds from `backend/.env.template` if no legacy file exists.
+- **`af doctor` shows the source file** for each credential check, so an
+  operator can see at a glance whether keys came from the secrets folder
+  or the legacy fallback.
+- **3 new CLI subcommands** in `agentflow/cli/keys_commands.py`:
+  - `af keys-where` — prints precedence list + per-var resolution map.
+  - `af keys-show [--service NAME]` — masked values + source paths.
+  - `af keys-edit [SERVICE]` — opens `$EDITOR` on per-service file
+    (creates 0600 if missing).
+- **`backend/.env.template` header rewritten** to clarify it is the
+  upstream schema doc, not the operator's destination.
+
+### Added — YAML-as-CLI-args (`--from-file`)
+
+`af learn-style`, `af hotspots`, `af edit`, `af preview`, `af tweet-draft`,
+and `af newsletter-draft` now accept `--from-file <yaml>`. Each command
+maps known YAML keys to its click options (CLI-explicit values override
+YAML); unrecognized keys are surfaced via env to the agent's downstream
+config so adapters / drafters / scoring can opt in to the same tunings.
+The matching template YAMLs ship in the sibling skill repo
+(`agentflow-skills v1.0.2`) under each skill's `assets/`.
+
+### Added — Telegram operator-completeness (21 commands)
+
+Built on the v1.0.3 `_COMMAND_REGISTRY` foundation. Curated subset of 12
+appears in Telegram's global `/` menu via `setMyCommands`; remaining 9 are
+accepted by the text dispatcher (and listed in `/help`). All commands
+backed by direct Python imports of the matching CLI subcommand — no
+subprocess shells.
+
+| Group | Commands |
+|---|---|
+| Bootstrap | `/onboard`, `/doctor`, `/scan` |
+| Profile | `/profile`, `/profiles`, `/profile-init`, `/profile-update`, `/profile-switch` |
+| Sources | `/keyword-add`, `/keyword-rm` |
+| Style | `/style`, `/style-learn` |
+| Intent | `/intent`, `/intent-set`, `/intent-clear` |
+| Prefs | `/prefs`, `/prefs-rebuild`, `/prefs-explain`, `/prefs-reset` |
+| Review-ops | (existing v1.0.3) `/status`, `/queue`, `/help`, `/skip`, `/defer`, `/publish-mark`, `/audit`, `/auth-debug` |
+| System | `/report`, `/restart-daemon` |
+
+Each has both hyphen and underscore aliases (Telegram's `setMyCommands`
+rejects hyphens; the text dispatcher accepts both for muscle-memory
+continuity with the CLI).
+
+### Added — `system` auth bucket
+
+New `_ACTION_REQ` value covering high-impact ops (onboard, profile init/
+update/switch, intent set/clear, scan trigger, prefs rebuild/reset,
+restart-daemon). Default-grant only to the implicit operator UID;
+explicit `af review-auth-set-actions` to extend. (`agent_review/auth.py`)
+
+### Added — 2 new `topic-profile` subcommands
+
+- `af topic-profile list [--json]` — markdown table or JSON of all
+  profiles in `~/.agentflow/profiles/<id>.yaml`, with active marker
+  resolved from `~/.agentflow/intents/current.yaml`.
+- `af topic-profile set-active <id>` — switches the active profile,
+  validates the file exists, appends a `profile_switched` memory event.
+
+### Changed
+
+- `backend/agentflow/agent_review/daemon.py` grew ~1300 lines for the
+  v1.0.4 command registry, dispatcher, and 21 command handlers. Helper
+  functions `_handle_profile_init / _handle_profile_update /
+  _handle_profile_switch / _handle_keyword_add / _handle_keyword_rm /
+  _handle_style / _handle_style_learn / _handle_intent_* / _handle_prefs_* /
+  _handle_report / _handle_restart_daemon` follow the v1.0.3 pattern of
+  acking the callback, doing work, sending a follow-up, and appending an
+  audit-visible memory event.
+- `tests/test_v02_workflows.py::TopicProfileIntentTests::test_configure_bot_menu_registers_basic_commands`
+  updated to assert the v1.0.4 curated set (the prior version asserted
+  `start/help/list/suggestions/cancel`, which were removed in v1.0.3).
+
+### Pairs with sibling repo
+
+- `witness1993x/agentflow-skills v1.0.2` — public skill distribution
+  restructured to standard layout (`SKILL.md` + `references/` + `assets/`)
+  across all 7 skills; daemon explicitly marked TG-only opt-in;
+  `assets/<topic>.yaml` templates consumed by the new `--from-file` flags.
+
 ## [1.0.3] — 2026-04-29
 
 Telegram bot menu enrichment. The 4 review gates (A topic / B draft /

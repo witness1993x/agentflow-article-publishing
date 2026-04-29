@@ -25,12 +25,17 @@ from agentflow.shared.bootstrap import agentflow_home
 _FILENAME = "auth.json"
 
 # Closed action vocabulary. Keep in sync with agentflow-deploy/SECURITY.md.
+#
+# v1.0.4 added ``system`` for operator-completeness slash commands that
+# mutate user-data layer config (profile init/switch, hotspot scan trigger,
+# daemon restart). Default-grant only to the implicit operator uid.
 ACTION_VOCABULARY: tuple[str, ...] = (
     "review",
     "write",
     "edit",
     "image",
     "publish",
+    "system",
     "*",
 )
 

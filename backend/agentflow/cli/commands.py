@@ -33,28 +33,91 @@ def _af_version() -> str:
         return "unknown"
 
 
-def _load_dotenv_once() -> None:
-    """Load ``backend/.env`` into ``os.environ`` without overriding existing vars.
+# Per-service secret files we'll auto-load from ``~/.agentflow/secrets/`` in
+# addition to the catch-all ``~/.agentflow/secrets/.env``. Order doesn't matter
+# (all use override=False so first-write-wins) but listing them makes the
+# precedence explicit and lets ``af keys-where`` enumerate the search space.
+_SECRET_SERVICES: tuple[str, ...] = (
+    "telegram",
+    "atlascloud",
+    "ghost",
+    "moonshot",
+    "anthropic",
+    "jina",
+    "openai",
+    "twitter",
+    "linkedin",
+    "agent_bridge",
+    "review_dashboard",
+)
 
-    Walks up from this file to find ``backend/.env`` so the CLI works regardless
-    of cwd. Silent if ``python-dotenv`` isn't installed or no ``.env`` exists.
+
+# Populated by ``_load_dotenv_once`` so ``af doctor`` / ``af keys-where`` can
+# tell the operator which file each env var was resolved from. Maps env-var
+# name -> absolute path of the file that first defined it.
+_resolved_sources: dict[str, str] = {}
+
+
+def _secrets_dir() -> Path:
+    """Return ``~/.agentflow/secrets/`` (does not create)."""
+    return Path.home() / ".agentflow" / "secrets"
+
+
+def _candidate_secret_files() -> list[Path]:
+    """Ordered candidate list, highest precedence first.
+
+    Precedence:
+      1. ``~/.agentflow/secrets/.env`` (operator's primary key file)
+      2. ``~/.agentflow/secrets/<service>.env`` for known services (alpha order)
+      3. ``backend/.env`` (back-compat fallback for installs predating v1.0.4)
+    """
+    candidates: list[Path] = []
+    secrets_dir = _secrets_dir()
+    primary = secrets_dir / ".env"
+    if primary.is_file():
+        candidates.append(primary)
+    for service in _SECRET_SERVICES:
+        per_service = secrets_dir / f"{service}.env"
+        if per_service.is_file():
+            candidates.append(per_service)
+    # Back-compat: walk up from this file to find ``backend/.env``.
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        legacy = parent / ".env"
+        if legacy.is_file() and parent.name == "backend":
+            candidates.append(legacy)
+            break
+        if (parent / "pyproject.toml").is_file():
+            if legacy.is_file():
+                candidates.append(legacy)
+            break
+    return candidates
+
+
+def _load_dotenv_once() -> None:
+    """Load secrets into ``os.environ`` with multi-file precedence.
+
+    Reads (without overriding existing env vars) from, in order:
+    ``~/.agentflow/secrets/.env`` → ``~/.agentflow/secrets/<service>.env`` →
+    ``backend/.env`` (back-compat). Per-var source paths are recorded in
+    :data:`_resolved_sources` so ``af doctor`` / ``af keys-where`` can show
+    where each value came from. Silent if ``python-dotenv`` isn't installed or
+    no candidate file exists.
     """
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
     except ImportError:
         return
 
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / ".env"
-        if candidate.is_file() and parent.name == "backend":
-            load_dotenv(candidate, override=False)
-            return
-        if (parent / "pyproject.toml").is_file():
-            candidate = parent / ".env"
-            if candidate.is_file():
-                load_dotenv(candidate, override=False)
-            return
+    for path in _candidate_secret_files():
+        try:
+            parsed = dotenv_values(path)
+        except OSError:
+            continue
+        for key, _value in parsed.items():
+            if key and key not in _resolved_sources:
+                _resolved_sources[key] = str(path)
+        load_dotenv(path, override=False)
 
 
 _load_dotenv_once()
@@ -87,6 +150,38 @@ def _search_results_dir() -> Path:
     from agentflow.shared.hotspot_store import search_results_dir
 
     return search_results_dir()
+
+
+def _load_yaml_overrides(path: str | None) -> dict[str, Any]:
+    """Load a ``--from-file`` YAML into a dict for CLI-arg defaulting.
+
+    Each command that takes ``--from-file`` calls this helper, then merges the
+    returned dict with click args (CLI-explicit values win; YAML fills the
+    rest). YAML keys may use either ``kebab-case`` or ``snake_case``; both
+    forms are normalized to ``snake_case`` so they match click param names.
+
+    Returns ``{}`` if ``path`` is ``None`` (the common no-flag case) so callers
+    don't need a None check.
+
+    Raises :class:`click.ClickException` on parse errors.
+    """
+    if not path:
+        return {}
+    import yaml as _yaml
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as err:
+        raise click.ClickException(f"--from-file: cannot read {path}: {err}") from err
+    try:
+        payload = _yaml.safe_load(text) or {}
+    except Exception as err:  # yaml.YAMLError, but be liberal
+        raise click.ClickException(f"--from-file: yaml parse error in {path}: {err}") from err
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"--from-file: {path} must contain a top-level mapping (got {type(payload).__name__})"
+        )
+    return {k.replace("-", "_"): v for k, v in payload.items()}
 
 
 def _drafts_dir() -> Path:
@@ -617,6 +712,14 @@ def cli() -> None:
     default=False,
     help="Re-aggregate the style profile from the full corpus.",
 )
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (style_tuning.yaml schema) merged as defaults; "
+    "explicit CLI flags override.",
+)
 def learn_style(
     dir_: str | None,
     file_: tuple[str, ...],
@@ -624,12 +727,26 @@ def learn_style(
     from_published: bool,
     show: bool,
     recompute: bool,
+    from_file: str | None,
 ) -> None:
     """Dispatch to Agent D0."""
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        # YAML may carry style-tuning hints (tone_targets, banned_phrases, ...)
+        # that D0 reads via env. Surface a small subset; agent picks them up.
+        for k in ("tone_targets", "paragraph_length_target", "persona", "banned_phrases", "must_phrases"):
+            if k in overrides and overrides[k] is not None:
+                os.environ.setdefault(f"AGENTFLOW_STYLE_{k.upper()}", _json.dumps(overrides[k]) if not isinstance(overrides[k], str) else overrides[k])
+        if dir_ is None and overrides.get("samples_dir"):
+            dir_ = str(overrides["samples_dir"])
+        if not file_ and overrides.get("samples_files"):
+            file_ = tuple(overrides["samples_files"])
+        if not url and overrides.get("samples_urls"):
+            url = tuple(overrides["samples_urls"])
     has_sources = bool(dir_ or file_ or url)
     if not (has_sources or show or recompute or from_published):
         raise click.UsageError(
-            "Provide at least one of --dir / --file / --url, or use "
+            "Provide at least one of --dir / --file / --url / --from-file, or use "
             "--show / --recompute / --from-published."
         )
 
@@ -1043,6 +1160,14 @@ def _derive_style_signature(
     default=False,
     help="Emit the full D1Output dict as JSON on stdout.",
 )
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (sources.yaml schema) merged as defaults; explicit CLI "
+    "flags override.",
+)
 def hotspots(
     scan_window_hours: int,
     target_candidates: int,
@@ -1050,6 +1175,7 @@ def hotspots(
     topic_profile_id: str | None,
     gate_a_top_k: int,
     as_json: bool,
+    from_file: str | None,
 ) -> None:
     """Run D1 synchronously. With ``--json``, print the full D1Output dict.
 
@@ -1059,6 +1185,25 @@ def hotspots(
     from agentflow.agent_d1.main import run_d1_scan
     from agentflow.shared.memory import append_memory_event
     from agentflow.shared.topic_profile_learning import suggest_from_hotspots
+
+    # v1.0.4: --from-file merges preset values as defaults; explicit flags win.
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        if scan_window_hours == 24 and overrides.get("scan_window_hours") is not None:
+            scan_window_hours = int(overrides["scan_window_hours"])
+        if target_candidates == 20 and overrides.get("target_candidates") is not None:
+            target_candidates = int(overrides["target_candidates"])
+        if filter_pattern is None and overrides.get("filter_pattern"):
+            filter_pattern = str(overrides["filter_pattern"])
+        if topic_profile_id is None and overrides.get("topic_profile_id"):
+            topic_profile_id = str(overrides["topic_profile_id"])
+        if gate_a_top_k == 3 and overrides.get("gate_a_top_k") is not None:
+            gate_a_top_k = int(overrides["gate_a_top_k"])
+        # Sources YAML may carry twitter_handles / rss_feeds / hn_topic_filters —
+        # surface them via env so D1 collectors can pick them up at scan time.
+        for k in ("twitter_handles", "rss_feeds", "hn_topic_filters"):
+            if k in overrides and overrides[k]:
+                os.environ[f"AGENTFLOW_HOTSPOTS_{k.upper()}"] = _json.dumps(overrides[k])
 
     # Preflight: refuse to spend D1 budget if no LLM/embedding provider works.
     if (os.environ.get("MOCK_LLM") or "").lower() != "true":
@@ -1986,16 +2131,45 @@ def fill(
 )
 @click.option("--section", "section_index", type=int, default=None)
 @click.option("--paragraph", "paragraph_index", type=int, default=None)
-@click.option("--command", "edit_command", type=str, required=True)
+@click.option("--command", "edit_command", type=str, required=False, default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (edit_commands.yaml schema) — if it lists a "
+    "named-command preset matching --command, expand to its instruction.",
+)
 def edit(
     article_id: str,
     target: str,
     section_index: int | None,
     paragraph_index: int | None,
-    edit_command: str,
+    edit_command: str | None,
     as_json: bool,
+    from_file: str | None,
 ) -> None:
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        # Schema: {edit_commands: [{command: "改短", instruction: "..."}, ...]}
+        # If user passes --command "改短" matching a preset, expand instruction.
+        presets = overrides.get("edit_commands") or []
+        if isinstance(presets, list) and edit_command:
+            for p in presets:
+                if isinstance(p, dict) and p.get("command") == edit_command:
+                    expanded = p.get("instruction")
+                    if expanded:
+                        edit_command = str(expanded)
+                        break
+        if section_index is None and overrides.get("section_index") is not None:
+            section_index = int(overrides["section_index"])
+        if paragraph_index is None and overrides.get("paragraph_index") is not None:
+            paragraph_index = int(overrides["paragraph_index"])
+        if target == "section" and overrides.get("target"):
+            target = str(overrides["target"])
+    if not edit_command:
+        raise click.UsageError("--command is required (or pass --from-file with a preset).")
     from agentflow.agent_d2.main import apply_user_edit
     from agentflow.shared.memory import append_memory_event
 
@@ -2153,6 +2327,14 @@ def edit(
     "from metadata, not body markdown.",
 )
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--from-file",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="YAML preset (platform_overrides.yaml schema) — per-platform paragraph "
+    "/ emoji / heading tuning surfaced via env to D3 adapters.",
+)
 def preview(
     article_id: str,
     platforms: str | None,
@@ -2160,11 +2342,22 @@ def preview(
     force_strip_images: bool,
     skip_images: bool,
     as_json: bool,
+    from_file: str | None,
 ) -> None:
     from agentflow.agent_d2.main import load_draft
     from agentflow.agent_d3.main import adapt_all
     from agentflow.shared import preferences as _prefs_mod
     from agentflow.shared.memory import append_memory_event
+
+    overrides = _load_yaml_overrides(from_file)
+    if overrides:
+        if platforms is None and overrides.get("platforms"):
+            platforms = ",".join(overrides["platforms"]) if isinstance(overrides["platforms"], list) else str(overrides["platforms"])
+        # Per-platform overrides surfaced as env so D3 adapters can read them.
+        for platform in ("medium", "ghost_wordpress", "linkedin_article", "wordpress"):
+            section = overrides.get(platform)
+            if isinstance(section, dict) and section:
+                os.environ[f"AGENTFLOW_D3_{platform.upper()}_OVERRIDES"] = _json.dumps(section)
 
     try:
         draft = load_draft(article_id)
@@ -3021,6 +3214,7 @@ for _mod_name in (
     "agentflow.cli.topic_profile_commands",
     "agentflow.cli.skill_commands",
     "agentflow.cli.bootstrap_commands",
+    "agentflow.cli.keys_commands",
 ):
     try:
         __import__(_mod_name)

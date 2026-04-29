@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,9 @@ import click
 import yaml
 
 from agentflow.cli.commands import _emit_json, cli
+from agentflow.config.topic_profiles_loader import user_topic_profiles_path
 from agentflow.shared.agent_bridge import emit_agent_event
+from agentflow.shared.bootstrap import agentflow_home, ensure_user_dirs
 from agentflow.shared.memory import append_memory_event
 from agentflow.shared.topic_profile_lifecycle import (
     apply_suggestion,
@@ -714,3 +717,227 @@ def topic_profile_derive(
 
     if not created:
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# af topic-profile list  (v1.0.4) — markdown table or JSON list
+# af topic-profile set-active <id> (v1.0.4) — switch active profile
+# ---------------------------------------------------------------------------
+
+
+def _intents_current_path() -> Path:
+    """Return ``~/.agentflow/intents/current.yaml`` (creating the dir)."""
+    ensure_user_dirs()
+    p = agentflow_home() / "intents"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "current.yaml"
+
+
+def _read_active_profile_id() -> str | None:
+    """Resolve the currently active profile id from ``intents/current.yaml``.
+
+    Returns ``None`` when the intent file is missing, malformed, or has no
+    ``profile.id`` set. Tolerates a flat ``profile_id`` as a back-compat
+    shortcut.
+    """
+    path = _intents_current_path()
+    if not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    profile = raw.get("profile")
+    if isinstance(profile, dict):
+        pid = str(profile.get("id") or "").strip()
+        if pid:
+            return pid
+    flat = str(raw.get("profile_id") or "").strip()
+    return flat or None
+
+
+def _last_modified_iso(path: Path) -> str:
+    try:
+        ts = path.stat().st_mtime
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _profile_brand(profile: Any) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    pub = profile.get("publisher_account")
+    if isinstance(pub, dict):
+        brand = str(pub.get("brand") or "").strip()
+        if brand:
+            return brand
+    label = str(profile.get("label") or "").strip()
+    return label
+
+
+def _collect_profile_rows() -> list[dict[str, Any]]:
+    """Walk the user-managed profile store and return one dict per profile.
+
+    Source-of-truth for v1.0.4 is the per-profile ``~/.agentflow/profiles/<id>.yaml``
+    layout when present; legacy installs that still keep everything inside the
+    aggregate ``topic_profiles.yaml::profiles`` mapping are also surfaced so
+    the operator never sees an empty list mid-migration.
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    active = _read_active_profile_id()
+
+    profiles_dir = agentflow_home() / "profiles"
+    if profiles_dir.exists() and profiles_dir.is_dir():
+        for entry in sorted(profiles_dir.glob("*.yaml")):
+            pid = entry.stem
+            if not pid or pid in seen:
+                continue
+            try:
+                payload = yaml.safe_load(entry.read_text(encoding="utf-8")) or {}
+            except (yaml.YAMLError, OSError):
+                payload = {}
+            rows.append({
+                "id": pid,
+                "brand": _profile_brand(payload),
+                "last_modified": _last_modified_iso(entry),
+                "is_active": pid == active,
+                "path": str(entry),
+            })
+            seen.add(pid)
+
+    aggregate_path = user_topic_profiles_path()
+    if aggregate_path.exists():
+        try:
+            data = load_user_topic_profiles()
+        except Exception:
+            data = {}
+        profiles = data.get("profiles") if isinstance(data, dict) else None
+        if isinstance(profiles, dict):
+            mtime_iso = _last_modified_iso(aggregate_path)
+            for pid, payload in profiles.items():
+                if not pid or pid in seen:
+                    continue
+                rows.append({
+                    "id": str(pid),
+                    "brand": _profile_brand(payload),
+                    "last_modified": mtime_iso,
+                    "is_active": str(pid) == active,
+                    "path": str(aggregate_path),
+                })
+                seen.add(str(pid))
+
+    rows.sort(key=lambda r: r["id"])
+    return rows
+
+
+def _profile_exists(profile_id: str) -> bool:
+    """Whether a profile with ``profile_id`` exists in either store."""
+    if not profile_id:
+        return False
+    profiles_dir = agentflow_home() / "profiles"
+    if (profiles_dir / f"{profile_id}.yaml").exists():
+        return True
+    if user_topic_profiles_path().exists():
+        try:
+            data = load_user_topic_profiles() or {}
+        except Exception:
+            data = {}
+        profiles = data.get("profiles") if isinstance(data, dict) else None
+        if isinstance(profiles, dict) and profile_id in profiles:
+            return True
+    return False
+
+
+def _render_profiles_markdown(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "(no profiles found)"
+    header = "| id | brand | last_modified | is_active |"
+    sep = "| --- | --- | --- | --- |"
+    lines = [header, sep]
+    for row in rows:
+        marker = "✓" if row["is_active"] else ""
+        brand = row["brand"] or "—"
+        lines.append(
+            f"| {row['id']} | {brand} | {row['last_modified'] or '—'} | {marker} |"
+        )
+    return "\n".join(lines)
+
+
+@topic_profile_group.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def topic_profile_list(as_json: bool) -> None:
+    """List all profiles (id, brand, last_modified ISO, is_active marker)."""
+    rows = _collect_profile_rows()
+    if as_json:
+        _emit_json({"count": len(rows), "items": rows})
+        return
+    click.echo(_render_profiles_markdown(rows))
+
+
+@topic_profile_group.command("set-active")
+@click.argument("profile_id")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def topic_profile_set_active(profile_id: str, as_json: bool) -> None:
+    """Switch the active profile by writing ``profile_id`` into
+    ``~/.agentflow/intents/current.yaml``.
+
+    Validates that the profile exists in the user store before writing.
+    Emits a ``profile_switched`` memory event so ``af report`` can show it.
+    """
+    profile_id = (profile_id or "").strip()
+    if not profile_id:
+        raise click.ClickException("profile_id is required")
+    if not _profile_exists(profile_id):
+        raise click.ClickException(
+            f"profile {profile_id!r} not found in user store "
+            "(checked ~/.agentflow/profiles/<id>.yaml and "
+            "~/.agentflow/topic_profiles.yaml::profiles)"
+        )
+
+    prev_id = _read_active_profile_id()
+    path = _intents_current_path()
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (yaml.YAMLError, OSError):
+            existing = {}
+
+    profile_block = existing.get("profile")
+    if not isinstance(profile_block, dict):
+        profile_block = {}
+    profile_block["id"] = profile_id
+
+    payload: dict[str, Any] = dict(existing)
+    payload["profile"] = profile_block
+    payload["profile_id"] = profile_id
+    payload.setdefault("schema_version", 1)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    append_memory_event(
+        "profile_switched",
+        payload={"from": prev_id, "to": profile_id},
+    )
+
+    result = {
+        "ok": True,
+        "from": prev_id,
+        "to": profile_id,
+        "path": str(path),
+    }
+    if as_json:
+        _emit_json(result)
+        return
+    click.echo(f"active profile: {prev_id or '(none)'} → {profile_id}")
+    click.echo(f"  written to {path}")

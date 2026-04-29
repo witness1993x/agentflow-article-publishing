@@ -63,6 +63,14 @@ rsync -a \
   --exclude='.env' \
   --exclude='.env_copy' \
   --exclude='.env.bak*' \
+  --exclude='.env_config*' \
+  --exclude='env_config*' \
+  --exclude='*env_config copy*' \
+  --exclude='secrets/' \
+  --exclude='*.key' \
+  --exclude='*.pem' \
+  --exclude='id_rsa' \
+  --exclude='id_rsa.pub' \
   --exclude='test_*.txt' \
   --exclude='test_*.py' \
   --exclude='smoke_*.sh' \
@@ -84,6 +92,24 @@ fi
 # required-files check below for d2-skeleton.json). Old guard removed.
 if find "$DEST" -name '.env' ! -name '.env.template' -print -quit | grep -q .; then
   echo "FATAL: a local .env leaked into the bundle" >&2
+  fail=1
+fi
+# Defensive: catch operator-side key dumps that bypass the .env-named convention
+# (e.g. env_config / .env_config / "env_config copy"). v1.0.2 + v1.0.3 bundles
+# leaked these because the rsync exclude was exact-match '.env'. This guard is
+# rsync-independent — it scans the staged dir post-copy.
+if find "$DEST" -type f \( \
+    -iname 'env_config*' -o -iname '.env_config*' \
+    -o -iname '*.key' -o -iname '*.pem' \
+    -o -name 'id_rsa' -o -name 'id_rsa.pub' \
+\) -print -quit | grep -q .; then
+  echo "FATAL: secret-dump file detected in staged bundle (env_config / .env_config / *.key / *.pem / id_rsa). Review rsync excludes." >&2
+  fail=1
+fi
+# Defensive: scan for any file containing API-key / token assignment patterns.
+# Doesn't catch every shape of secret but blocks the most common copy-paste leaks.
+if find "$DEST" -type f \( -name '*.env' -o -name '*.env.*' \) ! -name '.env.template' ! -name '*.template' -print 2>/dev/null | grep -q .; then
+  echo "FATAL: env-shaped file other than .env.template found in bundle" >&2
   fail=1
 fi
 # Refuse if .env.template still defaults to MOCK_LLM=true

@@ -147,15 +147,51 @@ def _step_venv_check() -> dict[str, Any]:
 
 
 def _step_env_seed(repo_root: Path) -> dict[str, Any]:
-    """Copy backend/.env.template -> backend/.env if missing."""
+    """Seed ``~/.agentflow/secrets/.env`` from ``backend/.env.template``.
+
+    v1.0.4 moved the canonical secrets file out of the repo and into the
+    operator's key folder. This step:
+
+    * Creates ``~/.agentflow/secrets/`` at mode 0700 if missing.
+    * Copies ``backend/.env.template`` -> ``~/.agentflow/secrets/.env`` and
+      chmods 0600 if the target doesn't already exist.
+    * If a legacy ``backend/.env`` exists from a pre-v1.0.4 install AND the
+      new target doesn't exist yet, prefers migrating the legacy file
+      (preserves operator-set values) over re-seeding from template.
+    """
     res = _step("env-seed")
     backend = repo_root / "backend"
-    env_path = backend / ".env"
+    legacy_env_path = backend / ".env"
     template_path = backend / ".env.template"
 
-    if env_path.exists():
+    secrets_dir = Path.home() / ".agentflow" / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        secrets_dir.chmod(0o700)
+    except OSError:
+        pass
+    target = secrets_dir / ".env"
+
+    if target.exists():
         res["status"] = "skipped"
-        res["detail"] = f"{env_path} already exists"
+        res["detail"] = f"{target} already exists"
+        return res
+
+    # Prefer migrating an existing legacy .env (operator might have set values
+    # before upgrading). Otherwise seed from template.
+    if legacy_env_path.exists():
+        try:
+            shutil.copy2(legacy_env_path, target)
+        except OSError as err:
+            res["status"] = "failed"
+            res["detail"] = f"migrate from legacy failed: {err}"
+            return res
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+        res["status"] = "ok"
+        res["detail"] = f"migrated legacy {legacy_env_path} -> {target}"
         return res
 
     if not template_path.exists():
@@ -164,14 +200,19 @@ def _step_env_seed(repo_root: Path) -> dict[str, Any]:
         return res
 
     try:
-        shutil.copy2(template_path, env_path)
+        shutil.copy2(template_path, target)
     except OSError as err:
         res["status"] = "failed"
         res["detail"] = f"copy failed: {err}"
         return res
 
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
     res["status"] = "ok"
-    res["detail"] = f"created {env_path} from template"
+    res["detail"] = f"created {target} from template"
     return res
 
 
@@ -854,7 +895,12 @@ def bootstrap(
       --json            machine-readable output
     """
     repo_root = _repo_root()
-    env_path = repo_root / "backend" / ".env"
+    # v1.0.4: env_path is now operator's key folder; legacy backend/.env still
+    # works as a fallback when present.
+    env_path = Path.home() / ".agentflow" / "secrets" / ".env"
+    legacy_env_path = repo_root / "backend" / ".env"
+    if not env_path.exists() and legacy_env_path.exists():
+        env_path = legacy_env_path
 
     # --next-step: pure read-only state detection, no setup
     if next_step:
