@@ -4,7 +4,9 @@ Single-user writing/publishing tool that compresses per-article workflow from 5-
 
 **Form factor**: skill-first. The daily flow lives inside Claude Code as a small set of skills at `.claude/skills/` (`agentflow-*`). No standalone Web UI or HTTP server is needed. A full-featured `af` CLI sits underneath — the skills just orchestrate it.
 
-The earlier Next.js + FastAPI implementation is preserved under `_legacy/` for reference.
+> **Sibling repo (skills only)**: [`witness1993x/agentflow-skills`](https://github.com/witness1993x/agentflow-skills) — a thin ~90 KB distribution of just the SKILL.md files. Install it into any workspace where you want the orchestration prompts available, while this repo provides the `af` runtime that those skills shell out to.
+
+The earlier Next.js + FastAPI implementation is preserved under `_legacy/` for reference (not bundled in this public repo).
 
 ## What it does
 
