@@ -1,283 +1,180 @@
-# Install AgentFlow (外部测试版)
+# Install AgentFlow
 
-> Snapshot date: 2026-04-28
-> Target: Claude Code + Python 3.11+
+> Snapshot: 2026-04-30
+> Target: Python 3.11+, Claude Code or Cursor as the harness (optional but recommended)
+> Runtime version: see [`backend/pyproject.toml`](backend/pyproject.toml); release notes in [`CHANGELOG.md`](CHANGELOG.md).
 
-## ⚡ 5-Minute Mock Quickstart
+This document is **agent-driven**. It tells a Claude Code / Cursor / OpenClaw harness how to walk the install path on your behalf without asking you to type anything beyond credentials. A human can read it top-to-bottom too — every step is also doable manually.
 
-For a fast end-to-end mock run (no real keys needed):
+## TL;DR — the agent loop
 
-```bash
-# 1. install backend
-cd backend && python3 -m venv .venv && source .venv/bin/activate && pip install -e .
-
-# 2. install skills
-af skill-install
-
-# 3. mock setup (no api keys needed)
-echo 'MOCK_LLM=true' > .env
-
-# 4. mock smoke
-af hotspots --json | tee /tmp/h.json
-HID=$(python -c 'import json; print(json.load(open("/tmp/h.json"))["hotspots"][0]["id"])')
-af write "$HID" --auto-pick --json | tee /tmp/a.json
-AID=$(python -c 'import json; print(json.load(open("/tmp/a.json"))["article_id"])')
-af preview "$AID" --json >/dev/null
-af publish "$AID" --force-strip-images --json
-af memory-tail --limit 5 --json
-```
-
-完整 real-key 安装见下面。
-
-## What's in this bundle
-
-```
-agentflow-article-publishing/
-├── backend/                    # Python source + af CLI
-│   ├── agentflow/              # 5 agents (D0-D4) + shared/cli/config
-│   ├── prompts/                # 7 prompt templates
-│   ├── requirements.txt
-│   ├── pyproject.toml
-│   └── .env.template           # copy to .env and fill keys
-├── .claude/skills/             # 7 Claude Code skills
-│   ├── agentflow/
-│   ├── agentflow-style/
-│   ├── agentflow-hotspots/
-│   ├── agentflow-write/
-│   ├── agentflow-publish/
-│   ├── agentflow-tweet/
-│   └── agentflow-newsletter/
-├── config-examples/            # seed configs → ~/.agentflow/
-├── docs/                       # PRD / SOLUTION / backlog MEMOs
-├── samples/README.md           # (put your 3-5 past articles here)
-├── scripts/
-├── README.md
-├── CCREVIEW_HANDOFF.md
-└── _legacy/api + _legacy/tests # historical Next.js+FastAPI refs (no node_modules)
-```
-
-Excluded from this bundle (rebuild locally):
-- `backend/.venv/` — platform-specific Python venv
-- `backend/.env` — your real API keys
-- `_legacy/frontend/node_modules/` — 868MB, not needed
-- `__pycache__/`, `.DS_Store`
-- `samples/*.docx`, `*.pdf` — previous author's private articles
-
-## Install steps
-
-### 1. Unpack
+After cloning the runtime repo and creating the venv, the agent calls one command in a loop until it returns `stage: "ready"`:
 
 ```bash
-tar -xzf agentflow-bundle-2026-04-28.tar.gz
-cd agentflow-article-publishing
+af bootstrap --next-step --json
 ```
 
-### 2. Python venv + deps
+Each call returns JSON like:
+
+```json
+{
+  "current_state": "missing_profile",
+  "next_command": "af topic-profile init -i --profile <name>",
+  "reason": "~/.agentflow/topic_profiles.yaml does not exist",
+  "stage": "init",
+  "mode": "harness"
+}
+```
+
+The agent executes `next_command`, then re-runs `af bootstrap --next-step --json`. Repeat until `current_state == "ready"`. That's the whole self-deploy contract.
+
+## Mode A vs Mode B/C — auto-detected
+
+| Mode | When | Daemon required? |
+|---|---|---|
+| **A — harness-only** | `TELEGRAM_BOT_TOKEN` not set anywhere | No — Claude Code / Cursor drives `af` directly. Approve/reject via reply messages in the chat session. |
+| **B — TG-review only** | `TELEGRAM_BOT_TOKEN` set | Yes — `af review-daemon` long-polls Telegram so cards land on your phone. |
+| **C — hybrid** | Same as B | Yes — daemon mirrors gates to Telegram while harness still drives the pipeline. |
+
+The bootstrap detector reads `TELEGRAM_BOT_TOKEN` from `~/.agentflow/secrets/.env` (or `~/.agentflow/secrets/telegram.env`, or process env, or `backend/.env`) and infers the mode. **You do not pick the mode explicitly** — your credentials choice picks it.
+
+## Step 0 — clone + venv (one-time)
 
 ```bash
-cd backend
-python3 -m venv .venv
+git clone https://github.com/witness1993x/agentflow-article-publishing.git
+cd agentflow-article-publishing/backend
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e .          # reads pyproject.toml, registers `af` CLI
-# or: pip install -r requirements.txt
+pip install -e .
 ```
 
-Verify:
+Verify the CLI is on `$PATH`:
 
 ```bash
-af --help
-af --version    # 0.1.0
+af --version          # should print "af, version <pyproject version>"
 ```
 
-### 3. Install Claude Code skill harness
+## Step 1 — start the agent loop
 
-One command symlinks all 7 skills into your Claude Code skills dir:
+From the harness session (Claude Code, Cursor, etc.) or from a plain shell:
 
 ```bash
-af skill-install                # default target: ~/.claude/skills
-# af skill-install --cursor     # also install into Cursor's skills dir
-# af skill-install --target /custom/path
+af bootstrap --next-step --json
 ```
 
-This replaces the old 7-line manual `ln -s` loop. The command is idempotent —
-re-running it just refreshes the symlinks.
+The agent dispatches on `current_state`. Reference table for all states:
 
-<details>
-<summary>Fallback / advanced — manual symlink</summary>
+| `current_state` | Meaning | `next_command` (canonical) | Stage |
+|---|---|---|---|
+| `no_env` | No `~/.agentflow/secrets/.env` and no legacy `backend/.env` | `af bootstrap` (seeds from `backend/.env.template`) | `init` |
+| `unknown` | I/O error reading the env file | `af doctor` (then re-run bootstrap) | `init` |
+| `skills_not_installed` | Neither `~/.claude/skills/` nor `~/.cursor/skills/` populated | `af skill-install` | `init` |
+| `missing_real_keys` | `LLM_PROVIDER` set + `MOCK_LLM != true` + provider key empty | `af onboard --section <provider>` | `init` |
+| `missing_profile` | No `~/.agentflow/topic_profiles.yaml`, or no profile inside | `af topic-profile init -i --profile <name>` (or `--from-file`) | `init` |
+| `incomplete_profile` | Profile lacks brand/voice/do/dont/product_facts/keyword_groups | `af topic-profile init -i --profile <id>` or `af topic-profile derive --profile <id>` | `init` |
+| `missing_chat_id` (B/C only) | `TELEGRAM_BOT_TOKEN` set but bot hasn't seen a `/start` yet | Send `/start` to your bot in Telegram (auto-captures `chat_id`) | `init` |
+| `daemon_not_running` (B/C only) | Heartbeat missing or > 5min stale | `af review-daemon &` (or systemd / launchd) | `init` |
+| `ready` | All checks pass | `af hotspots --gate-a-top-k 3` | `ready` |
 
-If `af skill-install` is unavailable (older builds) or you want fine control,
-you can still link skills by hand:
+Mode A operators (no `TELEGRAM_BOT_TOKEN`) skip the `missing_chat_id` and `daemon_not_running` states entirely. They land on `ready` straight from `incomplete_profile` resolution. The `ready` payload still surfaces `optional_next` describing how to upgrade to Mode B later.
+
+### Credentials — `af onboard` writes here
+
+Secrets live at `~/.agentflow/secrets/.env` (catch-all) and per-service files at `~/.agentflow/secrets/<service>.env`:
+
+```
+~/.agentflow/secrets/
+├── .env                  # catch-all (operator-friendly single-file)
+├── telegram.env          # only Mode B/C operators need this
+├── atlascloud.env        # image generation
+├── ghost.env             # publishing
+├── moonshot.env          # primary LLM
+├── jina.env              # embeddings (D1 clustering)
+└── <service>.env         # see `af keys-where` for full list
+```
+
+Use the wizard to write them — never hand-edit unless you know what you're doing:
 
 ```bash
-cd ..    # project root
-for s in agentflow agentflow-style agentflow-hotspots agentflow-write agentflow-publish agentflow-tweet agentflow-newsletter; do
-  ln -sf "$(pwd)/.claude/skills/$s" "$HOME/.claude/skills/$s"
-done
+af onboard                      # full guided wizard (interactive)
+af onboard --section moonshot   # just one section
+af onboard --section telegram   # for Mode B/C operators
 ```
 
-Or just launch Claude Code with this project as cwd; skills under
-`.claude/skills/` auto-register for the session.
-
-</details>
-
-### 4. Configure .env
+To inspect what's loaded and where:
 
 ```bash
-cp .env.template .env
-# Edit .env — at minimum:
-#   MOCK_LLM=true           (default; leave true for dry runs)
-# For real-key runs you'll also want:
-#   MOONSHOT_API_KEY=...    (generation; Kimi K2.6)
-#   JINA_API_KEY=...        (embeddings for D1 clustering)
-#   TWITTER_BEARER_TOKEN=...(optional; D1 falls back to RSS+HN)
-#   GHOST_ADMIN_API_URL=... (optional; only if publishing to Ghost)
-#   GHOST_ADMIN_API_KEY=... (format: 24hex:hex_secret)
-#   AGENTFLOW_IMAGE_LIBRARY=~/Pictures/agentflow   (optional; for af image-auto-resolve)
+af keys-where        # precedence + per-var source map
+af keys-show         # masked values + source paths
+af keys-edit ghost   # opens $EDITOR on ~/.agentflow/secrets/ghost.env
 ```
 
-The CLI auto-loads `backend/.env` on startup (doesn't override existing env vars).
+`backend/.env` still works as a back-compat fallback for installs predating v1.0.4 — but new installs should use `~/.agentflow/secrets/`.
 
-**或者**直接跑 `af onboard` 一站式凭据向导 —— 它会交互式问每一个 key、把结果写到
-`backend/.env`，并在每步给出"为什么需要这个 key / 怎么申请"的提示。如果你只是
-做 mock 跑、什么都不填，让它跳过就好。
+### Mock-mode quickstart
 
-If you want to attach an external automation agent, also see
-`docs/integrations/AGENT_BRIDGE.md`. The relevant env vars are:
-
-- `REVIEW_DASHBOARD_TOKEN`
-- `AGENTFLOW_AGENT_BRIDGE_TOKEN`
-- `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`
-- `AGENTFLOW_AGENT_EVENT_AUTH_HEADER`
-- `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS`
-
-### 5. Bootstrap a topic profile
-
-Topic profiles (`F1` series) scope hotspots / write / publish to a single
-content vertical (e.g. "ai-coding", "ml-infra"). Pick one of:
+Want to drive a full pipeline without any real API keys? One command:
 
 ```bash
-# Interactive: CLI walks you through name / keywords / sources / tone
-af topic-profile init -i --profile <id>
-
-# Or from a YAML patch file:
-af topic-profile init --profile <id> --from-file path/to/patch.yaml
+af bootstrap --mock --first-run    # writes MOCK_LLM=true, runs the agent loop
 ```
 
-Optional — let the LLM reverse-engineer profile fields from a seed description:
+After that, `af hotspots --json | af write … --auto-pick --json | af preview … | af publish --force-strip-images` all run end-to-end against deterministic fixtures. Nothing leaves your machine.
+
+## Step 2 — operate
+
+Once `current_state == "ready"`:
 
 ```bash
-af topic-profile derive --profile <id>
+af hotspots --gate-a-top-k 3        # D1: today's topics
+af write <hotspot_id> --auto-pick   # D2: skeleton + fill
+af preview <article_id>             # D3: platform-adapted versions
+af publish <article_id>             # D4: real publish (or mock)
 ```
 
-Profiles land at `~/.agentflow/profiles/<id>.yaml` and become the default
-scope for subsequent `af hotspots` / `af write` calls when you pass
-`--profile <id>`.
+The harness usually orchestrates this via the public skill distribution (`witness1993x/agentflow-skills`). See `.claude/skills/agentflow*/SKILL.md` once installed via `af skill-install`.
 
-### 6. Learn style + keyword candidates from a public handle
+## Linux VM deploy (Mode B / C / production)
 
-`af learn-from-handle` (F2) pulls a target handle's recent posts, derives a
-voice/tone fingerprint plus keyword candidates, and writes both back into
-the profile:
+If you want the daemon running 24/7 (Mode B/C), use the deploy bundle:
 
 ```bash
-af learn-from-handle <handle> --profile <id>
-# e.g. af learn-from-handle simonwillison --profile ai-coding
+# On your laptop
+bash scripts/build_deploy_bundle.sh ~/Desktop/agentflow-deploy.tar.gz
+scp ~/Desktop/agentflow-deploy.tar.gz user@vm:/tmp/
+
+# On the VM
+ssh user@vm
+sudo tar -xzf /tmp/agentflow-deploy.tar.gz -C /opt/
+sudo bash /opt/agentflow-deploy/deploy.sh
+sudo -u agentflow /opt/agentflow/backend/.venv/bin/af onboard
+sudo systemctl restart agentflow-review
 ```
 
-This complements (and on most setups replaces) the older
-`af learn-style --dir ../samples/` flow. If you'd rather seed from local
-samples, drop 3-5 articles into `samples/` and run:
+The deploy bundle excludes any local `.env` / `env_config*` / `*.key` / `*.pem` (sanity-guarded since v1.0.4); you fill `.env` on the VM via `af onboard`, not by SCP'ing it.
 
-```bash
-PYTHONPATH=. af learn-style --dir ../samples/
-PYTHONPATH=. af learn-style --show
-```
+See [`agentflow-deploy/INSTALL_LINUX.md`](agentflow-deploy/INSTALL_LINUX.md) for the systemd unit details.
 
-### 7. Launch the review daemon
+## Where things live
 
-The review daemon watches drafts / publish queue and keeps the dashboard
-fresh. Pick the mode that fits your env:
+| Path | Owner | Purpose |
+|---|---|---|
+| `~/.agentflow/secrets/.env` | operator | API keys, tokens, env-var-style config |
+| `~/.agentflow/secrets/<service>.env` | operator | Per-service slice (overrides catch-all) |
+| `~/.agentflow/topic_profiles.yaml` | operator | Brand / voice / sources / keywords |
+| `~/.agentflow/style_profile.yaml` | `af learn-style` | Voice fingerprint from your past articles |
+| `~/.agentflow/hotspots/<date>.json` | `af hotspots` | Daily D1 scan output |
+| `~/.agentflow/drafts/<article_id>/` | `af write/fill/edit` | Skeleton, draft.md, metadata, platform_versions |
+| `~/.agentflow/memory/events.jsonl` | every CLI mutation | Append-only event stream |
+| `~/.agentflow/review/` | review daemon | Heartbeat, pending-edit state, short-id index |
+| `backend/.env.template` | repo | Schema reference for the secrets file |
+| `backend/.env` | (legacy) | Fallback if `~/.agentflow/secrets/.env` doesn't exist yet |
 
-```bash
-# Foreground (good for first-time verification, Ctrl+C to stop)
-af review-daemon
+## Troubleshooting
 
-# Background via systemd (Linux); template:
-#   ExecStart=/usr/bin/env af review-daemon
-#   Restart=on-failure
-# launchd plist on macOS works the same way.
-```
-
-Logs tail at `~/.agentflow/logs/agentflow.log`; events at
-`~/.agentflow/memory/events.jsonl`.
-
-### 8. Verify (mock smoke)
-
-```bash
-cd backend && source .venv/bin/activate
-
-MOCK_LLM=true PYTHONPATH=. af hotspots --json 2>/dev/null > /tmp/h.json
-HID=$(python -c 'import json; print(json.load(open("/tmp/h.json"))["hotspots"][0]["id"])')
-
-MOCK_LLM=true PYTHONPATH=. af write "$HID" --auto-pick --json 2>/dev/null > /tmp/a.json
-AID=$(python -c 'import json; print(json.load(open("/tmp/a.json"))["article_id"])')
-
-MOCK_LLM=true PYTHONPATH=. af preview "$AID" --json 2>/dev/null >/dev/null
-MOCK_LLM=true PYTHONPATH=. af publish "$AID" --force-strip-images --json 2>/dev/null
-MOCK_LLM=true PYTHONPATH=. af memory-tail --limit 5 --json
-```
-
-Expected: all commands exit 0; `~/.agentflow/` gets created with `hotspots/`, `drafts/`, `memory/`, `publish_history.jsonl`.
-
-After filling `.env` with real keys, drop `MOCK_LLM=true` from commands above. Expect:
-
-- `af hotspots` takes ~45-90s (Twitter + RSS + HN real fetch, then Jina clustering + Kimi angle mining)
-- `af write --auto-pick` takes ~60-90s (Kimi skeleton + 4-section fill)
-- `af publish` against Ghost: use `GHOST_STATUS=draft` in env to publish as draft for safety
-- `af newsletter-preview-send <newsletter_id> --to self` is the safest first Resend check; use it before `newsletter-send`
-- `af tweet-publish <tweet_id> --dry-run` is the safest first Twitter check; the read-only `TWITTER_BEARER_TOKEN` is not enough to post
-
-## Daily flow (in Claude Code)
-
-```
-/agentflow-style       # weekly — refresh voice from your past articles
-/agentflow-hotspots    # daily — pick a topic (add "只关心 X" for topic-targeted)
-/agentflow-write <hotspot_id>
-/agentflow-publish <article_id>
-```
-
-Each skill wraps `af` subcommands; see `.claude/skills/<skill>/SKILL.md` for the exact contract.
-
-## Where state lives
-
-All runtime state is local at `~/.agentflow/`:
-
-- `style_profile.yaml` — D0 output
-- `sources.yaml` — your KOL / RSS / HN config (copy from `config-examples/sources.example.yaml` on first run)
-- `hotspots/<YYYY-MM-DD>.json` — D1 daily scans
-- `drafts/<article_id>/` — skeleton / draft.md / metadata / platform_versions
-- `medium/<article_id>/` — Medium export / package / ops checklist artifacts
-- `publish_history.jsonl` — one row per publish + rollback
-- `memory/events.jsonl` — append-only cross-article event log
-- `logs/agentflow.log` + `llm_calls.jsonl` — debugging tail
-
-## Key docs
-
-- `README.md` — CLI reference, platform setup
-- `docs/PRD_OVERVIEW.md` — product vision, roadmap, user stories
-- `docs/SOLUTION_OVERVIEW.md` — architecture, modules, data models
-- `docs/CC_ONE_PAGE_SUMMARY.md` — 1-page status (含本轮实 Key 验证结果)
-- `docs/backlog/MEMORY_TO_DEFAULTS.md` — Memory → Default Strategy 设计
-- `docs/backlog/IMAGE_INSERTION_STRATEGY.md` — 图片插入策略
-- `docs/backlog/TOPIC_INTENT_FRAMEWORK.md` — 话题意图跨 flow 框架
-- `CCREVIEW_HANDOFF.md` — Claude Code review handoff
-
-## Known limitations (as of 2026-04-28 snapshot)
-
-1. LinkedIn publish 与 Twitter / Resend 真 key 仍需你自己的最后一轮实网验证
-2. `af image-auto-resolve` 当前只做本地图库匹配；reference 抓图 / 网络图源 / strict LLM 二次确认还没做
-3. `af publish` 只覆盖长文平台；Twitter 与 newsletter 仍是独立 `af tweet-*` / `af newsletter-*` 流程
-4. `af publish-rollback` 只覆盖 Ghost；LinkedIn/Medium API 不支持程序化 delete，email 也无法 unsend
-5. Medium 推荐走新的半自动 browser-ops 流程：先 `af medium-export` / `af medium-package` / `af medium-ops-checklist`，再由人或 browser operator 在 Medium UI 内完成导入与发布
-6. Kimi 生成段落偶尔超 `max_length_words`（D3 adapter 会做平台级二次拆分兜底）
-7. Ghost Admin API 偶发 SSL handshake 失败；已加兜底，重跑即可
+- **`af` not found** → `source backend/.venv/bin/activate` (or add the venv's bin to `$PATH`).
+- **`agentflow.*` import errors** → run from `backend/` with `PYTHONPATH=.` set, or just `pip install -e .` again.
+- **`af bootstrap --next-step --json` returns `current_state: unknown`** → the env file exists but can't be read; check `ls -la ~/.agentflow/secrets/.env` for permissions.
+- **Bootstrap loop never reaches `ready`** → run `af doctor` to see which credential the loop is stuck on.
+- **`af doctor` shows source `backend/.env` instead of `~/.agentflow/secrets/.env`** → run `af bootstrap` (or `af onboard`); they migrate the legacy file on first invocation.
+- **Anything else** → tail `~/.agentflow/logs/agentflow.log`.

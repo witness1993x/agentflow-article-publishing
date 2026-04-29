@@ -16,6 +16,52 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.5] — 2026-04-30
+
+A documentation + bootstrap-detector release. The install path is now
+**agent-driven**: a Claude Code / Cursor / OpenClaw harness can self-deploy
+AgentFlow end-to-end by looping on `af bootstrap --next-step --json` until
+the detector reports `stage: "ready"`. The detector previously forced every
+operator into Mode B/C (Telegram review daemon required); v1.0.5 fixes that
+to honour the architectural rule that the daemon is opt-in.
+
+### Fixed
+
+- **`_detect_next_step` no longer treats the Telegram daemon as a universal
+  blocker.** The detector now auto-resolves the operator's mode from
+  `TELEGRAM_BOT_TOKEN` presence and skips TG-only checks
+  (`missing_chat_id`, `daemon_not_running`) for Mode A (harness-only)
+  operators. Mode B/C operators (TG token set) still see those states as
+  blocking, exactly as before. New `mode` field added to every
+  `bootstrap --next-step --json` payload (`harness` / `tg_review` /
+  `unknown`).
+- **`ready` payload for Mode A surfaces an `optional_next` field** describing
+  how to upgrade to Mode B/C later, so an agent that hits `ready` knows
+  the daemon path exists without the previous false signal that the
+  daemon was required.
+- **`_resolved_env_var` helper** reads the requested var from both the
+  `.env` file and `os.environ`, so an operator who pre-exports
+  `TELEGRAM_BOT_TOKEN` from the shell (or has systemd inject it) is
+  correctly classified as Mode B/C.
+
+### Changed
+
+- **`INSTALL.md` rewritten as agent-driven** install doc. Top-level TL;DR
+  is the bootstrap loop; full state table maps each `current_state` to
+  its canonical `next_command`; secrets locations + `af onboard` /
+  `af keys-*` commands documented; Mode A vs B/C contract spelled out.
+  Removes the stale `echo 'MOCK_LLM=true' > .env` step from v1.0.0 era
+  (writes to the wrong file post-v1.0.4).
+
+### Pairs with sibling repo
+
+- `witness1993x/agentflow-skills v1.0.3` adds
+  `agentflow/references/install.md` — harness-side companion to the
+  runtime install doc, structured as the single source of truth on
+  what the agent should do for each `current_state`. The top-level
+  `agentflow/SKILL.md` "Default entry" block is rewritten to point at
+  it.
+
 ## [1.0.4] — 2026-04-29
 
 A four-front release closing a security leak, relocating secrets to the

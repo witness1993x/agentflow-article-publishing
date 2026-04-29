@@ -487,39 +487,77 @@ def _step_start_daemon() -> dict[str, Any]:
     return res
 
 
-def _detect_next_step(env_path: Path) -> dict[str, Any]:
-    """Detect current init state and return the next command for the user.
+def _resolved_env_var(env_text: str, name: str) -> str:
+    """First non-empty of (.env file value, os.environ[name]).
 
-    Used by `af bootstrap --next-step` so an AI / skill can orchestrate the
-    init path without ever receiving the user's credentials. Each branch is
-    graceful — IO errors collapse to ``unknown`` rather than raising.
-
-    Detection order (first match wins):
-
-      1. .env missing                      → cp .env.template .env
-      2. TELEGRAM_BOT_TOKEN empty          → af onboard --section telegram
-      3. config.json missing or chat_id    → user sends /start to bot
-         empty
-      4. ~/.claude/skills or ~/.cursor/    → af skill-install
-         skills missing
-      5. real keys requested but missing   → af onboard --section <missing>
-         (LLM_PROVIDER set + MOCK_LLM!=true)
-      6. topic_profiles.yaml missing or no → af topic-profile init -i
-         healthy profile (brand+voice+do/   --profile <id>
-         dont/product_facts/keyword_groups)
-      7. heartbeat missing or > 5min stale → af review-daemon &
-      8. all good                          → af hotspots --gate-a-top-k 3
+    The bootstrap detector runs BEFORE the runtime fully initialises, so
+    ``os.environ`` may not have the file values loaded yet. But on a host
+    where systemd / launchd injects env vars (or where the operator
+    pre-exported them), the file may be empty while the var is live in the
+    process env. Check both.
     """
-    # 1. .env existence
+    raw = (_env_var_value(env_text, name) or "").strip()
+    if raw:
+        return raw
+    return (os.environ.get(name) or "").strip()
+
+
+def _detect_next_step(env_path: Path) -> dict[str, Any]:
+    """Detect current init state and return the next command.
+
+    Drives the agent self-deploy loop:
+
+        while result["stage"] != "ready":
+            run(result["next_command"])
+            result = af bootstrap --next-step --json
+
+    Each branch is graceful — IO errors collapse to ``unknown`` rather than
+    raising, so a partial-failure environment still produces actionable
+    output.
+
+    Two operating modes (auto-detected from credentials presence):
+
+    * **harness** (Mode A) — Claude Code / Cursor drives ``af`` directly via
+      the skill harness. No Telegram bot, no daemon. The default for new
+      operators. Detection: ``TELEGRAM_BOT_TOKEN`` not set anywhere.
+    * **tg_review** (Mode B/C) — operator wants phone-based approval gates.
+      Daemon long-polls TG; cards land in chat. Detection:
+      ``TELEGRAM_BOT_TOKEN`` set in the secrets file or process env.
+
+    Detection order (first non-``ready`` match wins):
+
+      1. .env missing                       → seed via ``af bootstrap``
+      2. ~/.claude/skills or ~/.cursor/     → ``af skill-install``
+         skills missing
+      3. real keys requested but missing    → ``af onboard --section <id>``
+         (LLM_PROVIDER set + MOCK_LLM!=true)
+      4. topic_profiles.yaml missing or no  → ``af topic-profile init -i``
+         healthy profile
+      [TG only — Mode B/C detected]
+      5. TELEGRAM_BOT_TOKEN: declared by mode detection above; if user wants
+         TG but token isn't set, that's a config decision (set the token
+         in ``~/.agentflow/secrets/telegram.env`` to opt into Mode B).
+      6. config.json missing or chat_id     → user sends /start to bot
+         empty
+      [End TG-only]
+      7. heartbeat missing or > 5min stale  → ``af review-daemon &``
+         (only emitted when mode==tg_review; stage="optional", not "init",
+         so an agent in Mode A skips it)
+      8. all good                           → ``af hotspots ...``
+    """
+    # 1. .env (or secrets file) existence
     if not env_path.exists():
         return {
             "current_state": "no_env",
-            "next_command": "cp .env.template .env",
+            "next_command": (
+                "af bootstrap   # seeds ~/.agentflow/secrets/.env from template"
+            ),
             "reason": f".env missing at {env_path}",
             "stage": "init",
+            "mode": "unknown",
         }
 
-    # Read .env once for steps 2, 5
+    # Read .env once for the rest of the detector
     try:
         env_text = _read_env_text(env_path)
     except OSError as err:
@@ -528,42 +566,12 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
             "next_command": "af doctor",
             "reason": f"could not read {env_path}: {err}",
             "stage": "init",
+            "mode": "unknown",
         }
 
-    # 2. TELEGRAM_BOT_TOKEN
-    tg_token = (_env_var_value(env_text, "TELEGRAM_BOT_TOKEN") or "").strip()
-    if not tg_token:
-        return {
-            "current_state": "missing_telegram_token",
-            "next_command": "af onboard --section telegram",
-            "reason": "TELEGRAM_BOT_TOKEN is empty in .env",
-            "stage": "init",
-        }
-
-    # 3. config.json + review_chat_id
-    config_path = Path(os.path.expanduser("~/.agentflow/review/config.json"))
-    chat_id_ok = False
-    try:
-        if config_path.exists():
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(cfg, dict):
-                chat_id = cfg.get("review_chat_id")
-                if chat_id is not None and str(chat_id).strip():
-                    chat_id_ok = True
-    except (OSError, ValueError):
-        chat_id_ok = False
-
-    if not chat_id_ok:
-        return {
-            "current_state": "missing_chat_id",
-            "next_command": (
-                "send /start to your bot in Telegram (auto-captures chat_id)"
-            ),
-            "reason": (
-                f"{config_path} missing or review_chat_id empty"
-            ),
-            "stage": "init",
-        }
+    # Mode resolution: harness vs tg_review (auto from token presence).
+    tg_token = _resolved_env_var(env_text, "TELEGRAM_BOT_TOKEN")
+    mode = "tg_review" if tg_token else "harness"
 
     # 4. skill harness install
     claude_skills = Path(os.path.expanduser("~/.claude/skills"))
@@ -585,6 +593,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
                 "neither ~/.claude/skills nor ~/.cursor/skills has any skills"
             ),
             "stage": "init",
+            "mode": mode,
         }
 
     # 5. Real-key check (only if MOCK_LLM != true and LLM_PROVIDER is set)
@@ -613,6 +622,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
                         f"{expected_key} empty (run af doctor for full matrix)"
                     ),
                     "stage": "init",
+                    "mode": mode,
                 }
 
     # 6. topic_profile 完整度
@@ -625,6 +635,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
                 "next_command": "af topic-profile init -i --profile <name>",
                 "reason": "~/.agentflow/topic_profiles.yaml does not exist",
                 "stage": "init",
+                "mode": mode,
             }
         with profiles_yaml.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
@@ -660,44 +671,85 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
                 "next_command": "af topic-profile init -i --profile <id>  # 或 af topic-profile derive --profile <id>",
                 "reason": "no profile in topic_profiles.yaml has complete publisher_account (need brand+voice+do[2]+dont[2]+product_facts[3]+keyword_groups[3])",
                 "stage": "init",
+                "mode": mode,
             }
-    except Exception as err:
-        pass  # graceful: 解析失败 fall through 到 daemon 检查
+    except Exception:
+        pass  # graceful: parse failure falls through to mode-specific gates
 
-    # 7. heartbeat freshness
-    hb_path = Path(os.path.expanduser("~/.agentflow/review/last_heartbeat.json"))
-    hb_fresh = False
-    if hb_path.exists():
+    # Mode B / C only: chat_id capture + daemon heartbeat. In Mode A
+    # (harness-only) the operator never set TELEGRAM_BOT_TOKEN, so these
+    # checks are entirely skipped.
+    if mode == "tg_review":
+        # 5. config.json + review_chat_id
+        config_path = Path(os.path.expanduser("~/.agentflow/review/config.json"))
+        chat_id_ok = False
         try:
-            data = json.loads(hb_path.read_text(encoding="utf-8"))
-            ts_str = data.get("timestamp", "") if isinstance(data, dict) else ""
-            if ts_str:
-                ts = datetime.fromisoformat(ts_str)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                age = (datetime.now(timezone.utc) - ts).total_seconds()
-                if age < 300:  # 5 min
-                    hb_fresh = True
+            if config_path.exists():
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                if isinstance(cfg, dict):
+                    chat_id = cfg.get("review_chat_id")
+                    if chat_id is not None and str(chat_id).strip():
+                        chat_id_ok = True
         except (OSError, ValueError):
-            hb_fresh = False
+            chat_id_ok = False
 
-    if not hb_fresh:
-        return {
-            "current_state": "daemon_not_running",
-            "next_command": "af review-daemon &  # or systemd / launchd",
-            "reason": (
-                f"{hb_path} missing or older than 5min"
-            ),
-            "stage": "init",
-        }
+        if not chat_id_ok:
+            return {
+                "current_state": "missing_chat_id",
+                "next_command": (
+                    "send /start to your bot in Telegram (auto-captures chat_id)"
+                ),
+                "reason": f"{config_path} missing or review_chat_id empty",
+                "stage": "init",
+                "mode": mode,
+            }
 
-    # 8. all good
-    return {
+        # 7. heartbeat freshness — Mode B/C blocking; Mode A wouldn't reach here.
+        hb_path = Path(os.path.expanduser("~/.agentflow/review/last_heartbeat.json"))
+        hb_fresh = False
+        if hb_path.exists():
+            try:
+                data = json.loads(hb_path.read_text(encoding="utf-8"))
+                ts_str = data.get("timestamp", "") if isinstance(data, dict) else ""
+                if ts_str:
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - ts).total_seconds()
+                    if age < 300:  # 5 min
+                        hb_fresh = True
+            except (OSError, ValueError):
+                hb_fresh = False
+
+        if not hb_fresh:
+            return {
+                "current_state": "daemon_not_running",
+                "next_command": "af review-daemon &  # or systemd / launchd",
+                "reason": (
+                    f"{hb_path} missing or older than 5min "
+                    "(only relevant in Mode B/C; Mode A doesn't need the daemon)"
+                ),
+                "stage": "init",
+                "mode": mode,
+            }
+
+    # 8. all good — both modes converge here.
+    payload: dict[str, Any] = {
         "current_state": "ready",
         "next_command": "af hotspots --gate-a-top-k 3  # 扫第一批 hotspot",
         "reason": "all init checks pass",
-        "stage": "operational",
+        "stage": "ready",
+        "mode": mode,
     }
+    # Mode A operators sometimes upgrade to Mode B later. Surface the daemon
+    # path as an OPTIONAL next without blocking ready.
+    if mode == "harness":
+        payload["optional_next"] = (
+            "If you later want phone-based Telegram approval, set "
+            "TELEGRAM_BOT_TOKEN in ~/.agentflow/secrets/telegram.env, "
+            "send /start to the bot, then `af review-daemon &`."
+        )
+    return payload
 
 
 def _step_kick_hotspots() -> dict[str, Any]:
