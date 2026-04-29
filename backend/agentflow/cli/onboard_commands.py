@@ -38,12 +38,23 @@ def _P(env: str, prompt: str) -> dict[str, Any]:  # plain (visible) key
 
 
 _SECTIONS: list[dict[str, Any]] = [
-    {"id": "telegram", "label": "Telegram review bot", "optional": False,
-     "why": "Posts Gate A/B/C cards to your phone and captures approve/reject taps.",
-     "required_for": ["af review-daemon"], "probe": "check_telegram",
-     "keys": [_S("TELEGRAM_BOT_TOKEN", "Bot token from @BotFather"),
-              _P("TELEGRAM_REVIEW_CHAT_ID",
-                 "Your chat_id (or blank — daemon auto-captures on /start)")]},
+    # v1.0.6 reorder: identity / writing-engine FIRST, then media credentials.
+    # Previous ordering put `telegram` first which surprised operators ("why
+    # is onboard asking for media before brand?"). Identity is now front-loaded:
+    # profile → llm → embeddings → atlas → telegram (Mode B/C only) → per-platform.
+    {"id": "profile", "label": "Profile / identity (brand, voice, sources, rules)",
+     "optional": False,
+     "why": "AgentFlow writes AS your brand in your voice. Without a profile "
+            "every downstream agent leans on a generic template that won't sound "
+            "like you. This step doesn't write env keys — it writes your "
+            "publisher profile to ~/.agentflow/topic_profiles.yaml and is the "
+            "TRUE first step. Run `af topic-profile init -i --profile <id>` "
+            "(interactive) or `--from-file <path>` (yaml). Existing profile? "
+            "skip this section.",
+     "required_for": ["af hotspots", "af write", "af fill"],
+     "probe": None,
+     "keys": [],
+     "interactive_action": "topic_profile_init"},
     {"id": "llm", "label": "LLM provider (Moonshot / Anthropic)", "optional": False,
      "why": "Powers D1/D2/D3 generation. Needs at least one working provider.",
      "required_for": ["af hotspots", "af write", "af fill", "af edit"],
@@ -62,6 +73,15 @@ _SECTIONS: list[dict[str, Any]] = [
             "publisher_account.image_prompt_hints in topic_profiles.yaml.",
      "required_for": ["af image-generate", "image gate"], "probe": "check_atlas",
      "keys": [_S("ATLASCLOUD_API_KEY", "AtlasCloud API key")]},
+    {"id": "telegram", "label": "Telegram review bot (Mode B/C only)",
+     "optional": True,
+     "why": "Mode B/C only — phone-based approve/reject for Gate A/B/C cards. "
+            "Mode A (harness-only via Claude Code / Cursor) does NOT need this. "
+            "Skip this section if the operator works inside the chat session.",
+     "required_for": ["af review-daemon (Mode B/C)"], "probe": "check_telegram",
+     "keys": [_S("TELEGRAM_BOT_TOKEN", "Bot token from @BotFather"),
+              _P("TELEGRAM_REVIEW_CHAT_ID",
+                 "Your chat_id (or blank — daemon auto-captures on /start)")]},
     {"id": "twitter", "label": "Twitter / X (OAuth 1.0a + bearer)", "optional": True,
      "why": "Posts threads / single tweets and reads KOL signals during hotspots.",
      "required_for": ["af tweet-*", "--platforms twitter_thread/single"],

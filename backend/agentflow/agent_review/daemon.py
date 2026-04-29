@@ -2154,31 +2154,116 @@ def _handle_message(update: dict[str, Any]) -> None:
     uid = sender.get("id")
     if text == "/start":
         # First /start ever — capture as operator (chat_id == uid in DM).
-        if get_review_chat_id() is None and chat_id is not None:
+        first_contact = get_review_chat_id() is None and chat_id is not None
+        if first_contact:
             set_review_chat_id(int(chat_id))
             configure_bot_menu(int(chat_id))
             tg_client.send_message(
                 chat_id,
-                "✅ chat\\_id 已记录\\. 此后 Gate A/B/C 通知会发到这个会话\\.\n"
-                "也可以把这个 id 写到 \\.env 的 `TELEGRAM\\_REVIEW\\_CHAT\\_ID` 持久化\\.",
+                "✅ chat\\_id 已记录\\. 此后 Gate A/B/C 通知会发到这个会话\\.",
                 parse_mode="MarkdownV2",
             )
             _log.info("captured review chat_id: %s", chat_id)
             _audit({"kind": "start", "chat_id": chat_id, "uid": uid, "captured_operator": True})
+            # Fall through to dispatch — don't return early.
+        else:
+            # Subsequent /start — gate by uid auth.
+            if not auth.is_authorized(uid):
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ 未授权\\. 你的 uid 是 `{uid}`\\.\n"
+                    f"请操作员在终端运行: `af review-auth-add {uid}`",
+                    parse_mode="MarkdownV2",
+                )
+                _log.warning("unauthorized /start from uid=%s chat_id=%s", uid, chat_id)
+                _audit({"kind": "start_unauthorized", "uid": uid, "chat_id": chat_id})
+                return
+
+        # v1.0.6: /start auto-dispatches based on bootstrap state. The operator
+        # never has to know about /onboard, /doctor, /scan order — the bot
+        # picks the next step from `af bootstrap --next-step --json`.
+        try:
+            from agentflow.cli.bootstrap_commands import (
+                _detect_next_step, _read_env_text,  # type: ignore
+            )
+            from pathlib import Path as _Path
+            secrets_env = _Path.home() / ".agentflow" / "secrets" / ".env"
+            legacy_env = _Path(__file__).resolve().parents[2] / "backend" / ".env"
+            env_path = secrets_env if secrets_env.exists() else legacy_env
+            next_state = _detect_next_step(env_path)
+        except Exception as err:
+            _log.warning("/start: detect_next_step failed: %s", err)
+            tg_client.send_message(
+                chat_id, "review bot 在线\\.", parse_mode="MarkdownV2"
+            )
+            _audit({"kind": "start", "chat_id": chat_id, "uid": uid, "next_step_error": str(err)})
             return
-        # Subsequent /start — gate by uid auth.
-        if not auth.is_authorized(uid):
+
+        cs = next_state.get("current_state", "unknown")
+        nc = next_state.get("next_command", "")
+        reason = next_state.get("reason", "")
+        mode = next_state.get("mode", "unknown")
+        _audit({"kind": "start", "chat_id": chat_id, "uid": uid,
+                "current_state": cs, "mode": mode})
+
+        if cs == "ready":
+            opt = next_state.get("optional_next") or ""
+            body = (
+                f"✅ 已 ready (mode={mode})\\. \n"
+                f"下一步：`/scan` 主动拉热点；或 `/help` 看完整命令面板\\."
+            )
+            if opt:
+                body += f"\n\n_optional:_ {_render.escape_md2(opt)}"
+            tg_client.send_message(chat_id, body, parse_mode="MarkdownV2")
+            return
+
+        if cs in ("missing_profile", "incomplete_profile"):
             tg_client.send_message(
                 chat_id,
-                f"❌ 未授权\\. 你的 uid 是 `{uid}`\\.\n"
-                f"请操作员在终端运行: `af review-auth-add {uid}`",
+                f"⚙️ 检测到状态：`{_render.escape_md2(cs)}`\n"
+                f"原因：{_render.escape_md2(reason[:200])}\n\n"
+                "正在自动开启 `/onboard` 引导式 profile 设置…",
                 parse_mode="MarkdownV2",
             )
-            _log.warning("unauthorized /start from uid=%s chat_id=%s", uid, chat_id)
-            _audit({"kind": "start_unauthorized", "uid": uid, "chat_id": chat_id})
+            _handle_onboard(chat_id, uid, [], "/start auto-dispatch")
             return
-        tg_client.send_message(chat_id, "review bot 在线\\.", parse_mode="MarkdownV2")
-        _audit({"kind": "start", "chat_id": chat_id, "uid": uid})
+
+        if cs == "missing_real_keys":
+            tg_client.send_message(
+                chat_id,
+                f"⚙️ 检测到缺 LLM key\\. \n"
+                f"在终端运行：`{_render.escape_md2(nc)}`\n"
+                f"原因：{_render.escape_md2(reason[:200])}",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        if cs == "missing_chat_id":
+            # Already handled — chat_id just got captured above.
+            tg_client.send_message(
+                chat_id, "review bot 在线\\. 完成 chat\\_id 捕获\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        if cs == "daemon_not_running":
+            tg_client.send_message(
+                chat_id,
+                "✅ daemon 已活着 \\(你看到这条消息说明它在跑\\)\\. \n"
+                "心跳文件可能仅是 stale；其他 init check 已过\\.\n"
+                "下一步：`/scan`\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        # Generic fallback for skills_not_installed / no_env / unknown.
+        tg_client.send_message(
+            chat_id,
+            f"⚙️ init 状态：`{_render.escape_md2(cs)}` \\(mode={mode}\\)\n"
+            f"在终端运行：`{_render.escape_md2(nc)}`\n"
+            f"原因：{_render.escape_md2(reason[:200])}",
+            parse_mode="MarkdownV2",
+        )
         return
 
     # Non-/start text: check if this uid is in the middle of an ✏️ edit flow.

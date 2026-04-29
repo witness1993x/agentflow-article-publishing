@@ -16,6 +16,54 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.6] — 2026-04-30
+
+Two operator-visible fixes from a real Telegram-bot session:
+
+1. **`/start` did not auto-flow into onboarding.** The operator typed
+   `/start`, captured chat_id, got `review bot 在线`, and was then on
+   their own — no hint that profile setup was needed, no auto-dispatch
+   to `/onboard`.
+2. **`af onboard` asked for "media" before identity.** The first section
+   was `telegram`, then `llm`, then `embeddings`, then `atlas`, then
+   `twitter` / `ghost` / `linkedin`. Operators reasonably objected:
+   "why are you asking which platform I publish on before asking who I
+   am?" Identity (brand / voice / sources / rules) wasn't anywhere in
+   the CLI onboard at all — it was siloed in the TG `/onboard` flow.
+
+### Fixed
+
+- **`/start` now smart-dispatches** based on `_detect_next_step`. The
+  handler runs the same state machine `af bootstrap --next-step --json`
+  drives, and reacts:
+  - `ready` → "✅ 已 ready" + hint to run `/scan`
+  - `missing_profile` / `incomplete_profile` → auto-starts the
+    `/onboard` profile-setup session (operator just answers prompts)
+  - `missing_real_keys` → tells operator the exact `af onboard
+    --section <provider>` command to run in their terminal
+  - `daemon_not_running` → reassures (the daemon IS alive if `/start`
+    got delivered) and points at `/scan`
+  - other states → echoes the canonical `next_command` + reason
+
+  First-`/start`-ever no longer needs a follow-up hint. Operators in
+  fresh installs get walked through automatically.
+
+- **`onboard` `_SECTIONS` reordered** to put identity FIRST. New order:
+  1. **`profile`** — brand, voice, sources, rules (NEW; routes to
+     `af topic-profile init -i` or `--from-file`). Required.
+  2. `llm` — Moonshot / Anthropic. Required.
+  3. `embeddings` — Jina / OpenAI. Required.
+  4. `atlas` — AtlasCloud image generation. Required.
+  5. `telegram` — Mode B/C only. **Optional** (was Required).
+  6–11. per-platform / channel — twitter, ghost, linkedin, webhook,
+     resend, style. All Optional.
+
+  The Telegram section being Optional aligns with v1.0.4's
+  daemon-opt-in posture (Mode A operators never need the bot at all).
+  The `profile` section is a pseudo-section: it doesn't write env
+  vars; it dispatches to `af topic-profile init` (interactive) so
+  identity setup lives in one canonical place across CLI and TG.
+
 ## [1.0.5] — 2026-04-30
 
 A documentation + bootstrap-detector release. The install path is now
