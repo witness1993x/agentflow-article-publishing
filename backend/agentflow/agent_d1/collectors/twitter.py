@@ -156,20 +156,41 @@ async def collect(
 ) -> list[RawSignal]:
     """Collect recent tweets from a set of KOL handles.
 
-    Returns deterministic mocks if ``MOCK_LLM=true`` or if TWITTER_BEARER_TOKEN
-    is missing. Never raises — per-handle failures are logged and skipped.
+    Behaviour matrix:
+
+    * ``MOCK_LLM=true``                    → deterministic fixtures (mock).
+    * No ``TWITTER_BEARER_TOKEN`` AND      → SKIP (return empty, log warning).
+      ``MOCK_LLM`` not set                   This avoids polluting real hotspots
+                                             scans with synthetic tweets when
+                                             the operator hasn't opted into
+                                             Twitter and forgot to set
+                                             ``MOCK_LLM=true``.
+    * Bearer token present                 → real Twitter API.
+
+    Never raises — per-handle failures are logged and skipped.
     """
     if not kol_handles:
         return []
 
     bearer_present = bool(os.getenv("TWITTER_BEARER_TOKEN"))
-    if _is_mock() or not bearer_present:
-        reason = "MOCK_LLM=true" if _is_mock() else "TWITTER_BEARER_TOKEN missing"
-        _log.info("twitter.collect: using mock data (%s)", reason)
+    if _is_mock():
+        # Explicit opt-in to mocks — used by CI / smoke tests / dev runs.
+        _log.info("twitter.collect: using mock data (MOCK_LLM=true)")
         out: list[RawSignal] = []
         for handle in kol_handles:
             out.extend(_mock_tweets(handle, max_results_per_kol))
         return out
+
+    if not bearer_present:
+        # Operator hasn't supplied a Twitter token AND hasn't opted into
+        # mocks. Silently mocking would inject synthetic-looking tweets into a
+        # production hotspots scan, corrupting downstream clustering /
+        # angle-mining / publish decisions. Skip instead.
+        _log.warning(
+            "twitter.collect: skipping (no TWITTER_BEARER_TOKEN, "
+            "MOCK_LLM not set; refusing to fabricate signals)"
+        )
+        return []
 
     try:
         return await asyncio.to_thread(

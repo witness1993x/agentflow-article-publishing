@@ -16,6 +16,42 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.8] — 2026-04-30
+
+Three operator-visible bugs from a real Telegram-bot session:
+
+1. **`/audit` failed with `Bad Request: can't parse entities`.** The
+   audit-tail message header `📋 *Audit* (last N)` had unescaped `(`
+   and `)`, which Telegram MarkdownV2 reserves. Same root cause for
+   the `/start` "✅ 已 ready (mode=harness)" line that I introduced in
+   v1.0.6 — also unescaped parens.
+2. **Twitter collector silently mocked when no token was supplied.**
+   On a real-key install where `TWITTER_BEARER_TOKEN` was simply not
+   set, the collector emitted deterministic-mock tweets into the
+   hotspots scan, polluting clustering / angle-mining / publish
+   decisions with synthetic signals. The operator never opted into
+   mock mode.
+3. (Diagnostic only — not fixed) `/scan` occasionally takes long
+   enough that the operator re-issues it before the first one
+   completes. The 300s subprocess timeout + `_notify_spawn_failure`
+   path is in place; the most common cause is a slow Twitter API
+   round-trip, which fix #2 partially mitigates by skipping Twitter
+   when no token is set.
+
+### Fixed
+
+- `daemon.py::_send_audit_tail` — `\(last N\)` MarkdownV2-escaped.
+- `daemon.py::_handle_message` `/start` "ready" branch — the
+  `\(mode=...\)` parens are escaped, and `mode` flows through
+  `escape_md2` to handle future tokens.
+- `agent_d1/collectors/twitter.py::collect` — three-way behaviour
+  matrix:
+  * `MOCK_LLM=true` → deterministic fixtures (mock).
+  * No `TWITTER_BEARER_TOKEN` AND `MOCK_LLM` not set → SKIP (return
+    empty, log warning). Refuses to fabricate signals into a real
+    scan.
+  * Bearer token present → real Twitter API.
+
 ## [1.0.7] — 2026-04-30
 
 Brand-leak follow-up. Fresh operators bootstrapping from the deploy bundle

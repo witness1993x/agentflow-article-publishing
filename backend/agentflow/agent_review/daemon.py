@@ -906,7 +906,10 @@ def _send_audit_tail(chat_id: int | None, *, limit: int = 20) -> None:
     if not decisions:
         tg_client.send_message(chat_id, "📋 audit 暂无 callback/slash 记录", parse_mode=None)
         return
-    lines: list[str] = [f"📋 *Audit* (last {_render.escape_md2(len(decisions))})", ""]
+    lines: list[str] = [
+        f"📋 *Audit* \\(last {_render.escape_md2(len(decisions))}\\)",
+        "",
+    ]
     for ev in decisions:
         ts = str(ev.get("audit_ts") or "")[11:19]  # HH:MM:SS
         kind = str(ev.get("kind") or "?")
@@ -2209,7 +2212,7 @@ def _handle_message(update: dict[str, Any]) -> None:
         if cs == "ready":
             opt = next_state.get("optional_next") or ""
             body = (
-                f"✅ 已 ready (mode={mode})\\. \n"
+                f"✅ 已 ready \\(mode\\={_render.escape_md2(mode)}\\)\\. \n"
                 f"下一步：`/scan` 主动拉热点；或 `/help` 看完整命令面板\\."
             )
             if opt:
