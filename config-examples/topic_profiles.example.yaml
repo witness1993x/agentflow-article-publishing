@@ -1,111 +1,65 @@
 version: "1.0"
-last_updated: "2026-04-25"
+last_updated: "2026-04-30"
+
+# This file is the SCHEMA EXAMPLE. The two profiles below are placeholder
+# templates a fresh operator can copy and overwrite. AgentFlow framework code
+# is brand-neutral: real brand / voice / sources / keywords belong to the
+# operator and live at ~/.agentflow/topic_profiles.yaml (NOT here).
+#
+# To bootstrap your own profile from the harness:
+#   af topic-profile init -i --profile <your-id>           # interactive
+#   af topic-profile init --profile <your-id> --from-file <path>  # from yaml
+#
+# Or in the openclaw skill distribution: copy
+# .claude/skills/agentflow/assets/topic_profile.yaml, fill it in, and pass
+# via --from-file.
 
 profiles:
-  chainstream:
-    label: "ChainStream"
-    summary: "AI-native crypto infrastructure for real-time on-chain data and AI execution."
-    intent: "围绕 AI-native crypto infrastructure、real-time on-chain data、multi-chain streaming、MCP execution、smart money、KYT/KYA 合规能力展开。"
+  # ---------------------------------------------------------------------------
+  # Generic placeholder. Replace `your-brand` with a slug that matches your
+  # publisher_account. KEEP nothing here verbatim; the field shapes are what
+  # the schema demands, not the values.
+  # ---------------------------------------------------------------------------
+  your-brand:
+    label: "Your Brand"
+    summary: "One-paragraph elevator pitch describing what you publish about."
+    intent: "围绕你的核心赛道展开（产品、技术、人物、市场观察等任选）。"
     keyword_groups:
       core:
-        - "AI-native crypto infrastructure"
-        - "web3 data infrastructure"
-        - "on-chain data"
-        - "real-time on-chain data"
-        - "multi-chain data"
-      transport:
-        - "Kafka Streams"
-        - "WebSocket"
-        - "streaming"
-        - "real-time stream"
-        - "low-latency"
-      ai_execution:
-        - "MCP"
-        - "AI execution"
-        - "AI agent"
-        - "natural language to on-chain operations"
-        - "agent tooling"
-      data_objects:
-        - "smart money"
-        - "dex.trades"
-        - "dex.pools"
-        - "transfers"
-        - "balances"
-        - "token-prices"
-        - "token-holdings"
-        - "token-market-caps"
-        - "candlesticks"
-        - "trade-stats"
-      compliance:
-        - "KYT"
-        - "KYA"
-        - "compliance"
-        - "risk control"
-        - "suspicious flag"
-      chains:
-        - "Ethereum"
-        - "Solana"
-        - "BSC"
-        - "TRON"
-        - "cross-chain"
+        - "core-keyword-1"
+        - "core-keyword-2"
+        - "core-keyword-3"
+      product:
+        - "your-product-feature-1"
+        - "your-product-feature-2"
       ecosystem:
-        - "indexer"
-        - "subgraph"
-        - "RPC"
-        - "ETL"
-        - "data warehouse"
-        - "analytics pipeline"
+        - "competitor-or-peer-1"
+        - "category-tag-1"
+        - "category-tag-2"
     hotspot_terms:
-      - "AI-native crypto infrastructure"
-      - "web3 data infrastructure"
-      - "on-chain data"
-      - "real-time on-chain data"
-      - "multi-chain data"
-      - "Kafka Streams"
-      - "WebSocket"
-      - "MCP"
-      - "AI execution"
-      - "smart money"
-      - "KYT"
-      - "KYA"
-      - "dex.trades"
-      - "dex.pools"
-      - "transfers"
-      - "balances"
-      - "token-prices"
-      - "token-holdings"
-      - "token-market-caps"
-      - "candlesticks"
-      - "trade-stats"
-      - "Ethereum"
-      - "Solana"
-      - "BSC"
-      - "TRON"
-      - "cross-chain"
-      - "indexer"
-      - "subgraph"
-      - "RPC"
-      - "ETL"
-      - "analytics pipeline"
+      - "core-keyword-1"
+      - "core-keyword-2"
+      - "your-product-feature-1"
+      - "competitor-or-peer-1"
     search_queries:
-      - "Kafka Streams"
-      - "real-time on-chain data"
-      - "web3 data infrastructure"
-      - "MCP"
-      - "smart money"
-    default_search_query: "Kafka Streams"
+      - "core-keyword-1"
+      - "your-product-feature-1"
+    default_search_query: "core-keyword-1"
     avoid_terms:
-      - "general AI hype"
-      - "consumer chatbot"
-      - "celebrity crypto"
-      - "macro politics"
+      - "off-topic-noise-1"
+      - "off-topic-noise-2"
     publisher_account:
-      brand: "ChainStream"
+      brand: "Your Brand"
       output_language: "zh-Hans"
       image_prompt_hints:
-        - "real-time data pipelines, streaming abstractions, infra diagrams"
-        - "sober editorial tone, dark neutral palette, no exchange UI screenshots"
+        - "describe the visual identity you want for cover images"
+        - "color palette, style register, what to avoid"
 
+  # ---------------------------------------------------------------------------
+  # Second example — kept as a vertical-specific schema demo (AI infra). Edit
+  # or remove freely. Demonstrates a sparser profile where keyword_groups has
+  # only two buckets and several optional fields are omitted.
+  # ---------------------------------------------------------------------------
   ai_infra:
     label: "AI Infra"
     summary: "Foundational infra for training, inference, agent runtime, and observability."

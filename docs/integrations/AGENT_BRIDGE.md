@@ -106,7 +106,7 @@ Returns article summaries:
     "article_id": "hs_20260427_001-...",
     "title": "AI-native architecture ...",
     "current_state": "channel_pending_review",
-    "publisher": "ChainStream",
+    "publisher": "your-brand",
     "published_url": null,
     "last_transition_at": "2026-04-27T10:00:00+00:00"
   }

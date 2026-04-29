@@ -206,6 +206,55 @@ class LearningReviewTests(AgentflowHomeTestCase):
 
 
 class TopicProfileIntentTests(AgentflowHomeTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # v1.0.7 made config-examples/topic_profiles.example.yaml brand-neutral
+        # (no more chainstream). These tests use chainstream as their own
+        # fixture, so seed it into the test's AGENTFLOW_HOME directly rather
+        # than relying on the now-neutral example file.
+        topic_profiles = {
+            "version": "1.0",
+            "profiles": {
+                "chainstream": {
+                    "label": "ChainStream",
+                    "summary": "AI-native crypto infrastructure for real-time on-chain data and AI execution.",
+                    "intent": "AI-native crypto infra fixture for tests.",
+                    "keyword_groups": {
+                        "core": [
+                            "AI-native crypto infrastructure",
+                            "real-time on-chain data",
+                            "Kafka Streams",
+                        ],
+                        "ai_execution": ["MCP", "AI execution", "AI agent"],
+                        "ecosystem": ["Ethereum", "Solana", "BSC"],
+                    },
+                    "hotspot_terms": [
+                        "AI-native crypto infrastructure",
+                        "real-time on-chain data",
+                        "Kafka Streams",
+                        "MCP",
+                    ],
+                    "search_queries": [
+                        "Kafka Streams",
+                        "real-time on-chain data",
+                        "web3 data infrastructure",
+                        "MCP",
+                    ],
+                    "default_search_query": "Kafka Streams",
+                    "avoid_terms": ["celebrity crypto", "macro politics"],
+                    "publisher_account": {
+                        "brand": "ChainStream",
+                        "output_language": "zh-Hans",
+                    },
+                },
+            },
+        }
+        import yaml as _yaml
+        (self.home / "topic_profiles.yaml").write_text(
+            _yaml.safe_dump(topic_profiles, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
     def test_stale_session_intent_expires_before_shadowing_default_profile(self) -> None:
         stale_intent = {
             "schema_version": 1,
@@ -755,6 +804,10 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
         self.assertEqual(list_payload["count"], 0)
 
     def test_intent_set_triggers_profile_setup_prompt_when_user_profile_missing(self) -> None:
+        # This specific test asserts mode="init" — i.e. the chainstream
+        # profile is NOT in the user's topic_profiles.yaml. The class setUp
+        # seeds it (because the other 3 tests depend on it); override here.
+        (self.home / "topic_profiles.yaml").unlink(missing_ok=True)
         runner = CliRunner()
         with (
             patch(

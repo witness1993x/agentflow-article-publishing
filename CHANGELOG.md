@@ -16,6 +16,37 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.7] — 2026-04-30
+
+Brand-leak follow-up. Fresh operators bootstrapping from the deploy bundle
+were ending up with a `chainstream` topic profile baked in via
+`config-examples/topic_profiles.example.yaml`, which the framework loader
+falls back to when `~/.agentflow/topic_profiles.yaml` doesn't exist yet.
+The result: a brand-new install would scan hotspots under "Publisher
+default → ChainStream" without the operator ever choosing that brand.
+Same root cause as v1.0.2's daemon prompts, different file.
+
+### Fixed
+
+- **`config-examples/topic_profiles.example.yaml` rewritten** to a
+  brand-neutral schema demo. Replaced the `chainstream` profile (full
+  brand, keyword_groups, hotspot_terms, search_queries, publisher_account)
+  with a placeholder `your-brand` profile that demonstrates the schema
+  without injecting any real brand identity. The second `ai_infra`
+  profile is kept as a vertical-specific schema example.
+- **`docs/integrations/AGENT_BRIDGE.md`** example payload uses
+  `"publisher": "your-brand"` instead of `"publisher": "ChainStream"`.
+
+### Notes
+
+- `docs/PHASE_REPORT_2026-04-27.md` (historical phase report) still
+  mentions ChainStream — left as-is since it's a closed retrospective,
+  not framework code.
+- `backend/tests/` test fixtures continue to use `chainstream` as a test
+  string. Per the project's brand-neutrality contract, framework code +
+  configs + integration docs must be neutral; test fixtures (clearly
+  scoped to test data) are exempt.
+
 ## [1.0.6] — 2026-04-30
 
 Two operator-visible fixes from a real Telegram-bot session:
