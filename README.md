@@ -1,4 +1,6 @@
-# AgentFlow Article Publishing (v0.1 MVP)
+# AgentFlow Article Publishing
+
+**Version:** `1.0.0` (see [`backend/pyproject.toml`](backend/pyproject.toml) for the canonical string; release notes in [`CHANGELOG.md`](CHANGELOG.md)).
 
 Single-user writing/publishing tool that compresses per-article workflow from 5-7h down to ~90min.
 
