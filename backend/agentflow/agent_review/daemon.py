@@ -662,7 +662,7 @@ def _send_status_summary(chat_id: int | None) -> None:
     if not rows:
         tg_client.send_message(chat_id, "✨ 无 pending 卡片", parse_mode=None)
         return
-    lines: list[str] = [f"📊 *Pending* ({_render.escape_md2(len(rows))})", ""]
+    lines: list[str] = [f"📊 *Pending* \\({_render.escape_md2(len(rows))}\\)", ""]
     for aid, gate_label, title, age in rows[:30]:
         aid_short = aid[:8] if len(aid) > 8 else aid
         lines.append(
@@ -685,7 +685,7 @@ def _send_queue_summary(chat_id: int | None, *, limit: int = 5) -> None:
         tg_client.send_message(chat_id, "✨ 队列空", parse_mode=None)
         return
     lines: list[str] = [
-        f"📋 *Queue* (top {_render.escape_md2(min(limit, len(rows)))} oldest)",
+        f"📋 *Queue* \\(top {_render.escape_md2(min(limit, len(rows)))} oldest\\)",
         "",
     ]
     for aid, gate_label, title, age in rows[:limit]:
@@ -934,7 +934,7 @@ def _send_auth_debug(chat_id: int | None, uid: int | None) -> None:
         return
     rows = sorted(_ACTION_REQ.items(), key=lambda kv: (kv[0][0], kv[0][1]))
     lines: list[str] = [
-        f"🔐 *Auth Debug* (uid `{_render.escape_md2(uid)}`)",
+        f"🔐 *Auth Debug* \\(uid `{_render.escape_md2(uid)}`\\)",
         "",
     ]
     for (gate, action), required in rows:
@@ -2265,7 +2265,7 @@ def _handle_message(update: dict[str, Any]) -> None:
         # Generic fallback for skills_not_installed / no_env / unknown.
         tg_client.send_message(
             chat_id,
-            f"⚙️ init 状态：`{_render.escape_md2(cs)}` \\(mode={mode}\\)\n"
+            f"⚙️ init 状态：`{_render.escape_md2(cs)}` \\(mode\\={_render.escape_md2(mode)}\\)\n"
             f"在终端运行：`{_render.escape_md2(nc)}`\n"
             f"原因：{_render.escape_md2(reason[:200])}",
             parse_mode="MarkdownV2",
@@ -3678,7 +3678,7 @@ def _route(
                     extra={"resume_only": True},
                 )
                 resume_text = (
-                    f"🚫 已取消 Gate D · article=`{_render.escape_md2(article_id)}`\n\n"
+                    f"🚫 已取消 Gate D · article\\=`{_render.escape_md2(article_id)}`\n\n"
                     "点 🔄 恢复重新选择渠道。"
                 )
                 resume_kb = {

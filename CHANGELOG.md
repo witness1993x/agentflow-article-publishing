@@ -16,6 +16,33 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.13] — 2026-05-01
+
+Five more `Bad Request: can't parse entities` MarkdownV2 escape leaks
+caught from a real Telegram session. v1.0.6 introduced parens, v1.0.8
+fixed `/audit` and one `/start` line, v1.0.13 finishes the sweep across
+the operator-output formatters and Gate D resume card.
+
+### Fixed
+
+- `daemon.py::_send_status_summary` — `📊 *Pending* (N)` → `📊 *Pending* \\(N\\)`.
+- `daemon.py::_send_queue_summary` — `📋 *Queue* (top N oldest)` →
+  `📋 *Queue* \\(top N oldest\\)`.
+- `daemon.py::_send_auth_debug` — `🔐 *Auth Debug* (uid ...)` →
+  `🔐 *Auth Debug* \\(uid ...\\)`.
+- `daemon.py::_handle_message` `/start` generic-fallback branch —
+  `\\(mode={mode}\\)` had escaped parens but the literal `=` and the
+  inline `{mode}` value were not escaped. Now `\\(mode\\={escape_md2(mode)}\\)`.
+- `daemon.py::_route` Gate D `D:cancel` resume card —
+  `· article=\`{...}\`` → `· article\\=\`{...}\``.
+
+### Tests
+
+- `MarkdownV2EscapeRegressionTests` × 3:
+  * `_send_status_summary` body uses `\\(N\\)`, not bare parens.
+  * `_send_queue_summary` body uses `\\(top N oldest\\)`, not bare parens.
+  * `_send_auth_debug` body uses `\\(uid ...\\)`, not bare parens.
+
 ## [1.0.12] — 2026-05-01
 
 Closes the last "real-mode silently emits placeholder data" gap found in

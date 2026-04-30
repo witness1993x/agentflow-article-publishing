@@ -2828,6 +2828,73 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class MarkdownV2EscapeRegressionTests(AgentflowHomeTestCase):
+    """v1.0.13 — Telegram MarkdownV2 send_message used to fail with
+    ``Bad Request: can't parse entities`` whenever a daemon-emitted
+    operator message contained literal ``(`` / ``)`` / ``=`` that hadn't
+    been backslash-escaped. Each test below exercises one of the affected
+    code paths and asserts the body uses ``\\(`` / ``\\)`` / ``\\=`` in
+    the literal positions where the bug was."""
+
+    def _capture_messages(self, fn, *args, **kwargs) -> list[str]:
+        sent: list[str] = []
+
+        def _capture(_chat_id, text, *_a, **_kw):
+            sent.append(text)
+
+        with patch(
+            "agentflow.agent_review.daemon.tg_client.send_message",
+            side_effect=_capture,
+        ):
+            fn(*args, **kwargs)
+        return sent
+
+    def _seed_pending_article(self, article_id: str = "hs_test_001") -> None:
+        from agentflow.agent_review import state
+        from agentflow.shared.bootstrap import agentflow_home
+        draft = agentflow_home() / "drafts" / article_id
+        draft.mkdir(parents=True, exist_ok=True)
+        (draft / "metadata.json").write_text(
+            json.dumps({"title": "real title"}), encoding="utf-8",
+        )
+        state.transition(
+            article_id, gate="A",
+            to_state=state.STATE_DRAFT_PENDING_REVIEW,
+            actor="test", decision="seed", force=True,
+        )
+
+    def test_status_summary_escapes_parens(self) -> None:
+        self._seed_pending_article()
+        sent = self._capture_messages(review_daemon._send_status_summary, 456)
+        self.assertEqual(len(sent), 1)
+        body = sent[0]
+        self.assertIn("📊 *Pending* \\(", body)
+        self.assertIn("\\)", body)
+        self.assertNotIn("📊 *Pending* (", body)
+
+    def test_queue_summary_escapes_parens(self) -> None:
+        self._seed_pending_article()
+        sent = self._capture_messages(review_daemon._send_queue_summary, 456)
+        self.assertEqual(len(sent), 1)
+        body = sent[0]
+        self.assertIn("📋 *Queue* \\(top ", body)
+        self.assertIn(" oldest\\)", body)
+        self.assertNotIn("📋 *Queue* (", body)
+
+    def test_auth_debug_escapes_parens(self) -> None:
+        with patch(
+            "agentflow.agent_review.daemon.auth.is_authorized", return_value=True,
+        ):
+            sent = self._capture_messages(
+                review_daemon._send_auth_debug, 456, 123,
+            )
+        self.assertEqual(len(sent), 1)
+        body = sent[0]
+        self.assertIn("🔐 *Auth Debug* \\(uid `", body)
+        self.assertIn("`\\)", body)
+        self.assertNotIn("🔐 *Auth Debug* (uid", body)
+
+
 class HotspotsMockLeakDoctorTests(AgentflowHomeTestCase):
     """v1.0.11 — `af doctor` surfaces historical mock-tagged hotspot files
     so the operator can `rm` them at their discretion."""
