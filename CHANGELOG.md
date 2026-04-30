@@ -16,6 +16,28 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.11] — 2026-05-01
+
+`af doctor` now surfaces historical mock-tagged hotspot files on disk.
+v1.0.8 + v1.0.10 closed the production paths; this catches the static
+state operators inherit from earlier installs so they can `rm` rather
+than be misled by `af review-list` showing fake-source articles.
+
+### Added
+
+- `agent_review.preflight.check_hotspots_mock_leak` — scans
+  `~/.agentflow/hotspots/*.json` for known `_MOCK_TEMPLATES` text
+  fingerprints (the three twitter mock templates) and `"mock": true`
+  raw_metadata tags. Reports as **WARN** (not FAIL) so it doesn't block
+  startup; surfaces filenames so the operator knows what to delete.
+- Wired into `preflight.all_checks()` right after `check_mock_mode` —
+  shows up in `af doctor` between MOCK_LLM and Telegram rows.
+
+### Tests
+
+- `HotspotsMockLeakDoctorTests` × 4: clean dir, no-dir, template
+  fingerprint hit, `"mock": true` raw_metadata hit.
+
 ## [1.0.10] — 2026-05-01
 
 Hard guarantee that real-mode hotspots scans never emit mock-tagged signals

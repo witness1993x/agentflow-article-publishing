@@ -2828,6 +2828,56 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class HotspotsMockLeakDoctorTests(AgentflowHomeTestCase):
+    """v1.0.11 — `af doctor` surfaces historical mock-tagged hotspot files
+    so the operator can `rm` them at their discretion."""
+
+    def test_clean_dir_passes(self) -> None:
+        from agentflow.agent_review import preflight
+        (self.home / "hotspots").mkdir(parents=True, exist_ok=True)
+        (self.home / "hotspots" / "2026-05-01.json").write_text(
+            json.dumps({"hotspots": [{"id": "real_1", "topic_one_liner": "ok"}]}),
+            encoding="utf-8",
+        )
+        result = preflight.check_hotspots_mock_leak()
+        self.assertTrue(result.ok)
+        self.assertIn("clean", result.message)
+
+    def test_template_fingerprint_caught(self) -> None:
+        from agentflow.agent_review import preflight
+        (self.home / "hotspots").mkdir(parents=True, exist_ok=True)
+        (self.home / "hotspots" / "2026-04-29.json").write_text(
+            json.dumps({
+                "hotspots": [{
+                    "source_references": [{
+                        "text_snippet": "Spent the day wiring Claude Code subagents into our QA loop"
+                    }]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        result = preflight.check_hotspots_mock_leak()
+        self.assertFalse(result.ok)
+        self.assertIn("2026-04-29.json", result.message)
+        self.assertIn("2026-04-29.json", result.extra["contaminated_files"])
+
+    def test_raw_metadata_mock_true_caught(self) -> None:
+        from agentflow.agent_review import preflight
+        (self.home / "hotspots").mkdir(parents=True, exist_ok=True)
+        (self.home / "hotspots" / "2026-04-23.json").write_text(
+            json.dumps({"hotspots": [{"raw_metadata": {"mock": True}}]}),
+            encoding="utf-8",
+        )
+        result = preflight.check_hotspots_mock_leak()
+        self.assertFalse(result.ok)
+        self.assertIn("2026-04-23.json", result.extra["contaminated_files"])
+
+    def test_no_dir_passes(self) -> None:
+        from agentflow.agent_review import preflight
+        result = preflight.check_hotspots_mock_leak()
+        self.assertTrue(result.ok)
+
+
 class HotspotsMockGuardTests(AgentflowHomeTestCase):
     """v1.0.10 — refuse to let mock-tagged signals reach D1 output when
     MOCK_LLM is not explicitly opted into. Belt-and-suspenders against

@@ -399,6 +399,54 @@ def check_mock_mode() -> CheckResult:
     return cr
 
 
+# Distinctive prefixes from agent_d1/collectors/twitter.py::_MOCK_TEMPLATES.
+# Used by check_hotspots_mock_leak to spot historical pre-v1.0.8 contamination.
+_TWITTER_MOCK_FINGERPRINTS: tuple[str, ...] = (
+    "Spent the day wiring",
+    "Vibe Coding is not replacing",
+    "Agent frameworks are massively overfit",
+)
+
+
+def check_hotspots_mock_leak() -> CheckResult:
+    """Scan ``~/.agentflow/hotspots/*.json`` for mock-template fingerprints
+    or ``"mock": true`` raw_metadata tags. v1.0.8 fixed twitter's silent-
+    mock fallback and v1.0.10 added a structural drop guard, but pre-v1.0.8
+    files on disk can still mislead ``af review-list`` and downstream
+    dashboards. Reports as WARN (not FAIL) so the operator can `rm` at their
+    discretion."""
+    import re as _re
+    cr = CheckResult(name="hotspots mock-leak audit", env_var=None)
+    cr.present = True
+    hotspots_dir = agentflow_home() / "hotspots"
+    if not hotspots_dir.is_dir():
+        cr.valid = True
+        cr.message = "no hotspots dir yet (no scans run)"
+        return cr
+    contaminated: list[str] = []
+    pattern = _re.compile('"mock"\\s*:\\s*true', _re.IGNORECASE)
+    for path in sorted(hotspots_dir.glob("*.json")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if pattern.search(text) or any(fp in text for fp in _TWITTER_MOCK_FINGERPRINTS):
+            contaminated.append(path.name)
+    if not contaminated:
+        cr.valid = True
+        cr.message = "clean — no historical mock signals on disk"
+        return cr
+    cr.valid = False
+    preview = ", ".join(contaminated[:3])
+    suffix = "" if len(contaminated) <= 3 else f", +{len(contaminated) - 3} more"
+    cr.message = (
+        f"{len(contaminated)} file(s) contain mock fingerprints: {preview}{suffix} "
+        f"— pre-v1.0.8 leak; rm to clean"
+    )
+    cr.extra = {"contaminated_files": contaminated}
+    return cr
+
+
 # ---------------------------------------------------------------------------
 # Aggregations per command
 # ---------------------------------------------------------------------------
@@ -407,6 +455,7 @@ def check_mock_mode() -> CheckResult:
 def all_checks(*, fresh: bool = False) -> list[CheckResult]:
     return [
         check_mock_mode(),
+        check_hotspots_mock_leak(),
         check_telegram(fresh=fresh),
         check_review_chat_id(),
         check_atlas(),
