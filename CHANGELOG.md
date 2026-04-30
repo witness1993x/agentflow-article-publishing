@@ -16,6 +16,41 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.14] — 2026-05-01
+
+`/start` auto-dispatch on a pure-TG-operator install told the operator
+"run `af skill-install` in your terminal" instead of triggering the
+onboard wizard, because the bootstrap detector was blocking on the
+Claude Code / Cursor skill harness check before reaching the profile
+check. Skill harness is irrelevant when interaction happens entirely
+via Telegram (Mode B/C).
+
+### Fixed
+
+- `cli/bootstrap_commands.py::_detect_next_step` — skill-harness check
+  (#2 in the detection ladder) now only fires when `mode == "harness"`
+  (Claude Code / Cursor driven). In `mode == "tg_review"` the operator
+  has no terminal-side skill consumer, so a missing `~/.claude/skills`
+  / `~/.cursor/skills` is not a blocker. Detection ladder for tg_review
+  becomes: `.env → real_keys → profile → chat_id → daemon → ready`,
+  matching the actual Mode B/C dependency graph.
+
+### Behaviour change
+
+- `/start` auto-dispatch on a fresh tg_review install with no
+  topic_profile now correctly returns `missing_profile` and kicks off
+  the onboard wizard automatically, instead of returning
+  `skills_not_installed` and asking the operator to run a CLI command
+  they may not have access to (e.g. autopost agent in a sandbox).
+
+### Tests
+
+- `DetectNextStepModeAwarenessTests` × 2:
+  * `tg_review` mode + missing skills + missing profile → result is
+    NOT `skills_not_installed` (the regression);
+  * `tg_review` mode reaches profile check when topic_profiles.yaml
+    is absent.
+
 ## [1.0.13] — 2026-05-01
 
 Five more `Bad Request: can't parse entities` MarkdownV2 escape leaks

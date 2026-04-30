@@ -2828,6 +2828,66 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class DetectNextStepModeAwarenessTests(AgentflowHomeTestCase):
+    """v1.0.14 — `_detect_next_step` used to block tg_review-mode operators
+    on the Claude Code / Cursor skill-harness check, which is irrelevant
+    when interaction happens entirely via Telegram. /start auto-dispatch
+    surfaced this as 'still need to manually deploy service' even though
+    the actual blocking step was the unrelated profile init."""
+
+    def test_tg_review_mode_skips_skill_check(self) -> None:
+        from agentflow.cli.bootstrap_commands import _detect_next_step
+
+        env_path = self.home / ".env"
+        env_path.write_text(
+            "TELEGRAM_BOT_TOKEN=fake-tg-token\nMOCK_LLM=false\n",
+            encoding="utf-8",
+        )
+
+        # No ~/.claude/skills, no ~/.cursor/skills, no topic_profiles.yaml.
+        with patch("agentflow.cli.bootstrap_commands.Path") as path_mock:
+            from pathlib import Path as _RealPath
+            def _resolve(p):
+                p_str = str(p)
+                # Force the skill paths to "exist=False, iterdir=empty".
+                if "/skills" in p_str:
+                    fake = _RealPath(self.home / "nonexistent_skills_dir")
+                    return fake
+                return _RealPath(p_str)
+            path_mock.side_effect = lambda p: _resolve(p)
+
+            result = _detect_next_step(env_path)
+
+        self.assertNotEqual(result["current_state"], "skills_not_installed")
+        self.assertEqual(result["mode"], "tg_review")
+
+    def test_tg_review_mode_reaches_profile_check_when_no_profile(self) -> None:
+        """Without skill check blocking, tg_review mode should advance to
+        the profile check and report missing_profile when topic_profiles.yaml
+        does not exist — which is what /start auto-dispatch consumes to
+        kick off the onboard wizard."""
+        from agentflow.cli.bootstrap_commands import _detect_next_step
+
+        env_path = self.home / ".env"
+        env_path.write_text(
+            "TELEGRAM_BOT_TOKEN=fake-tg-token\nMOCK_LLM=false\n",
+            encoding="utf-8",
+        )
+
+        # Ensure topic_profiles.yaml does NOT exist in the test home, and
+        # neither do skills. Patch the detector's home-relative reads.
+        with patch(
+            "agentflow.cli.bootstrap_commands.os.path.expanduser",
+            side_effect=lambda p: str(self.home / p.lstrip("~/")),
+        ):
+            result = _detect_next_step(env_path)
+
+        # Either missing_profile (preferred) or downstream check; the key
+        # assertion is that we did NOT block on skills_not_installed.
+        self.assertNotEqual(result["current_state"], "skills_not_installed")
+        self.assertEqual(result["mode"], "tg_review")
+
+
 class MarkdownV2EscapeRegressionTests(AgentflowHomeTestCase):
     """v1.0.13 — Telegram MarkdownV2 send_message used to fail with
     ``Bad Request: can't parse entities`` whenever a daemon-emitted

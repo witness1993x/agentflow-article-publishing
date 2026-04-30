@@ -573,28 +573,34 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
     tg_token = _resolved_env_var(env_text, "TELEGRAM_BOT_TOKEN")
     mode = "tg_review" if tg_token else "harness"
 
-    # 4. skill harness install
-    claude_skills = Path(os.path.expanduser("~/.claude/skills"))
-    cursor_skills = Path(os.path.expanduser("~/.cursor/skills"))
-    try:
-        claude_ok = claude_skills.exists() and any(claude_skills.iterdir())
-    except OSError:
-        claude_ok = False
-    try:
-        cursor_ok = cursor_skills.exists() and any(cursor_skills.iterdir())
-    except OSError:
-        cursor_ok = False
+    # 4. skill harness install — only relevant for Mode A (harness). Mode B/C
+    # operators interact via Telegram, never via Claude Code / Cursor, so the
+    # skill harness is informational at most. Blocking /start on it makes a
+    # pure-TG operator see "go run af skill-install in your terminal" even
+    # though they may have no terminal access at all (e.g. running daemon
+    # inside a sandbox / container with no Claude Code installed).
+    if mode == "harness":
+        claude_skills = Path(os.path.expanduser("~/.claude/skills"))
+        cursor_skills = Path(os.path.expanduser("~/.cursor/skills"))
+        try:
+            claude_ok = claude_skills.exists() and any(claude_skills.iterdir())
+        except OSError:
+            claude_ok = False
+        try:
+            cursor_ok = cursor_skills.exists() and any(cursor_skills.iterdir())
+        except OSError:
+            cursor_ok = False
 
-    if not (claude_ok or cursor_ok):
-        return {
-            "current_state": "skills_not_installed",
-            "next_command": "af skill-install",
-            "reason": (
-                "neither ~/.claude/skills nor ~/.cursor/skills has any skills"
-            ),
-            "stage": "init",
-            "mode": mode,
-        }
+        if not (claude_ok or cursor_ok):
+            return {
+                "current_state": "skills_not_installed",
+                "next_command": "af skill-install",
+                "reason": (
+                    "neither ~/.claude/skills nor ~/.cursor/skills has any skills"
+                ),
+                "stage": "init",
+                "mode": mode,
+            }
 
     # 5. Real-key check (only if MOCK_LLM != true and LLM_PROVIDER is set)
     mock_llm = (_env_var_value(env_text, "MOCK_LLM") or "").strip().lower()
