@@ -16,6 +16,35 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.10] — 2026-05-01
+
+Hard guarantee that real-mode hotspots scans never emit mock-tagged signals
+into clustering / persistence, even if a future collector regresses or the
+runtime env is misconfigured. v1.0.8 fixed twitter's silent-mock fallback;
+this is the structural guard that makes the same regression impossible
+across all collectors going forward.
+
+### Added
+
+- `agent_d1.main._collect_all` — when `MOCK_LLM` is not explicitly `"true"`,
+  signals carrying `raw_metadata.mock=True` are dropped before clustering
+  with a visible `_log.error` audit. Previously a regressed collector could
+  silently pollute a real scan with deterministic templates (this is exactly
+  what produced the 04-29 hotspots batch where four KOL handles all "tweeted"
+  the same `_MOCK_TEMPLATES[0]` text).
+- `agent_d1.main._provenance_summary` — per-source `{real, mock}` counts
+  emitted at INFO level after collection, so the operator can audit at a
+  glance which collector contributed what.
+
+### Tests
+
+- `HotspotsMockGuardTests::test_real_mode_filters_mock_tagged_signals`
+  — fakes a mixed batch (2 real + 2 mock-tagged) under `MOCK_LLM=false`,
+  asserts only the 2 real survive `_collect_all`.
+- `HotspotsMockGuardTests::test_mock_mode_preserves_mock_signals` — same
+  fixture under `MOCK_LLM=true` keeps both, so the guard does not break
+  legitimate mock smoke runs.
+
 ## [1.0.9] — 2026-05-01
 
 `/start` → auto-onboard wizard was silently dead on slash-command entry,

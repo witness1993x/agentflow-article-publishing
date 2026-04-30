@@ -92,6 +92,22 @@ def _hn_config(sources: dict[str, Any]) -> tuple[bool, list[str] | None, int]:
     return enabled, keywords, min_score
 
 
+def _is_mock_signal(sig: RawSignal) -> bool:
+    meta = getattr(sig, "raw_metadata", None)
+    return isinstance(meta, dict) and meta.get("mock") is True
+
+
+def _provenance_summary(signals: list[RawSignal]) -> dict[str, dict[str, int]]:
+    """Per-source real/mock counts. Used for audit logging at end of collection."""
+    out: dict[str, dict[str, int]] = {}
+    for sig in signals:
+        bucket = out.setdefault(
+            sig.source or "unknown", {"real": 0, "mock": 0},
+        )
+        bucket["mock" if _is_mock_signal(sig) else "real"] += 1
+    return out
+
+
 async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
     handles = _twitter_handles(sources)
     feeds = _rss_feeds(sources)
@@ -113,7 +129,32 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
             continue
         all_signals.extend(res)
 
-    _log.info("collectors produced %d signals", len(all_signals))
+    # Structural guard: when MOCK_LLM is not explicitly opted into, refuse to
+    # let any signal tagged ``raw_metadata.mock=True`` reach clustering /
+    # ranking / persistence. v1.0.8 fixed twitter's silent-mock fallback;
+    # this is the belt-and-suspenders catch for any future collector that
+    # regresses, env that's misconfigured at runtime, or test fixture that
+    # leaks through a partial seed. Visible audit so the operator notices.
+    explicit_mock = os.environ.get("MOCK_LLM", "").strip().lower() == "true"
+    if not explicit_mock:
+        before = len(all_signals)
+        all_signals = [s for s in all_signals if not _is_mock_signal(s)]
+        dropped = before - len(all_signals)
+        if dropped:
+            _log.error(
+                "real-mode hotspots scan: dropped %d mock-tagged signals "
+                "(MOCK_LLM is not 'true' but a collector emitted "
+                "raw_metadata.mock=True). This indicates a collector bug "
+                "or accidental fixture seed; investigate.",
+                dropped,
+            )
+
+    _log.info(
+        "collectors produced %d signals (provenance=%s, mock_mode=%s)",
+        len(all_signals),
+        _provenance_summary(all_signals),
+        explicit_mock,
+    )
     return all_signals
 
 

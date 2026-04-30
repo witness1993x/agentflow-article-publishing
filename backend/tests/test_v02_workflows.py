@@ -2828,5 +2828,114 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class HotspotsMockGuardTests(AgentflowHomeTestCase):
+    """v1.0.10 — refuse to let mock-tagged signals reach D1 output when
+    MOCK_LLM is not explicitly opted into. Belt-and-suspenders against
+    collector regressions, env misconfiguration, fixture seed leaks."""
+
+    def _signal(
+        self, source: str, item_id: str, mock: bool,
+    ) -> object:
+        from agentflow.shared.models import RawSignal
+        return RawSignal(
+            source=source,
+            source_item_id=item_id,
+            author=f"@{source}_user",
+            text=f"text from {item_id}",
+            url=f"https://example.com/{source}/{item_id}",
+            published_at=datetime.now(timezone.utc),
+            engagement={},
+            raw_metadata={"mock": True} if mock else {"mock": False},
+        )
+
+    def test_real_mode_filters_mock_tagged_signals(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+
+        signals = [
+            self._signal("twitter", "real_1", mock=False),
+            self._signal("twitter", "mock_1", mock=True),
+            self._signal("hackernews", "real_2", mock=False),
+            self._signal("rss", "mock_2", mock=True),
+        ]
+
+        async def _fake_twitter(*_a, **_kw): return [signals[0], signals[1]]
+        async def _fake_rss(*_a, **_kw): return [signals[3]]
+        async def _fake_hn(*_a, **_kw): return [signals[2]]
+
+        with (
+            patch.dict(os.environ, {"MOCK_LLM": "false"}, clear=False),
+            patch(
+                "agentflow.agent_d1.main.twitter_collector.collect",
+                side_effect=_fake_twitter,
+            ),
+            patch(
+                "agentflow.agent_d1.main.rss_collector.collect",
+                side_effect=_fake_rss,
+            ),
+            patch(
+                "agentflow.agent_d1.main.hn_collector.collect",
+                side_effect=_fake_hn,
+            ),
+        ):
+            collected = asyncio.run(
+                d1_main._collect_all(
+                    {
+                        "twitter_kols": [{"handle": "x"}],
+                        "rss_feeds": [{"url": "https://example.com/feed"}],
+                        "hackernews": {"enabled": True},
+                    }
+                )
+            )
+
+        self.assertEqual(len(collected), 2)
+        ids = sorted(s.source_item_id for s in collected)
+        self.assertEqual(ids, ["real_1", "real_2"])
+        for sig in collected:
+            meta = getattr(sig, "raw_metadata", None)
+            self.assertFalse(
+                isinstance(meta, dict) and meta.get("mock") is True,
+                f"mock-tagged signal {sig.source_item_id} leaked into output",
+            )
+
+    def test_mock_mode_preserves_mock_signals(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+
+        signals = [
+            self._signal("twitter", "mock_1", mock=True),
+            self._signal("hackernews", "mock_2", mock=True),
+        ]
+
+        async def _fake_twitter(*_a, **_kw): return [signals[0]]
+        async def _fake_rss(*_a, **_kw): return []
+        async def _fake_hn(*_a, **_kw): return [signals[1]]
+
+        with (
+            patch.dict(os.environ, {"MOCK_LLM": "true"}, clear=False),
+            patch(
+                "agentflow.agent_d1.main.twitter_collector.collect",
+                side_effect=_fake_twitter,
+            ),
+            patch(
+                "agentflow.agent_d1.main.rss_collector.collect",
+                side_effect=_fake_rss,
+            ),
+            patch(
+                "agentflow.agent_d1.main.hn_collector.collect",
+                side_effect=_fake_hn,
+            ),
+        ):
+            collected = asyncio.run(
+                d1_main._collect_all(
+                    {
+                        "twitter_kols": [{"handle": "x"}],
+                        "rss_feeds": [],
+                        "hackernews": {"enabled": True},
+                    }
+                )
+            )
+
+        self.assertEqual(len(collected), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
