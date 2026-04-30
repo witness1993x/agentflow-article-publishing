@@ -184,24 +184,20 @@ this is a pure analytics layer. Recommended cron:
     | xargs -n1 af review-publish-stats --json >>~/.agentflow/logs/stats.log
 ```
 
-## Known stubs
+## Auxiliary gate actions
 
-The following Gate buttons render in Telegram but are **not yet wired** —
-pressing them only acks with a `"<action> 已记录（动作链下一轮接通）"` toast
-and does **not** change article state, mutate metadata, or trigger any
-follow-up code path. They fall through the catch-all stub branch at the end
-of `daemon._route` (see the `KNOWN STUB CALLBACKS` comment near
-`_ACTION_REQ` in `agentflow/agent_review/daemon.py`).
+The following Gate buttons live alongside the primary review actions and are
+fully wired through `daemon._route`. They do not advance the gate state
+machine on their own; instead they surface extra context to the operator
+(diff/full image), schedule a re-post, or mint follow-up image jobs.
 
-| Gate | Action  | Rendered as              | Status |
-|------|---------|--------------------------|--------|
-| A    | `expand`  | "🔍 展开摘要"           | stub   |
-| A    | `defer`   | "🕒 稍后再看"           | stub   |
-| B    | `diff`    | "🧾 看 diff"            | stub   |
-| B    | `defer`   | "🕒 稍后再审"           | stub   |
-| C    | `regen`   | "🔁 重新生图"           | stub   |
-| C    | `relogo`  | "🏷 重做 logo"          | stub   |
-| C    | `full`    | "📐 看大图"             | stub   |
-| C    | `defer`   | "🕒 稍后再审"           | stub   |
-
-Wire these in `daemon._route` before relying on them in production flows.
+| Gate | Action  | Rendered as       | Effect |
+|------|---------|-------------------|--------|
+| A    | `expand`  | "📋 全文"        | Reply with the full hotspot batch JSON |
+| A    | `defer`   | "⏰ 4h 后"       | Schedule deferred Gate A re-post via deferred-repost store |
+| B    | `diff`    | "📋 diff"        | Reply with `unified_diff(draft.md, medium_preview.md)` |
+| B    | `defer`   | "⏰ 2h 后"       | Schedule deferred Gate B re-post |
+| C    | `regen`   | "🔁 再生成"      | Re-spawn `af image-gate --mode cover-only` |
+| C    | `relogo`  | "🎨 换 logo 位置"| Cycle `brand_overlay.anchor` and re-apply overlay |
+| C    | `full`    | "🖼 全分辨率"    | Send the original 2k cover.png as a Telegram document |
+| C    | `defer`   | "⏰ 2h 后"       | Schedule deferred Gate C re-post |

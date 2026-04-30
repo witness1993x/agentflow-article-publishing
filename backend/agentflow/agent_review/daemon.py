@@ -259,7 +259,7 @@ def _session_display_name(session: dict[str, Any]) -> str:
 
 
 def _send_profile_setup_question(session: dict[str, Any]) -> None:
-    chat_id = session.get("active_chat_id")
+    chat_id = session.get("active_chat_id") or session.get("chat_id")
     if chat_id is None:
         return
     step_index = int(session.get("step_index") or 0)
@@ -1202,6 +1202,9 @@ def _start_profile_setup_session(
     session = {
         "uid": int(uid),
         "chat_id": int(chat_id),
+        "active_uid": int(uid),
+        "active_chat_id": int(chat_id),
+        "status": "collecting",
         "profile_id": target_pid,
         "step_index": 0,
         "answers": {},
@@ -3086,16 +3089,10 @@ def _handle_callback(update: dict[str, Any]) -> None:
         )
 
 
-# KNOWN STUB CALLBACKS — these go through the catch-all "已记录" branch at
-# the end of _route. Buttons appear but pressing them does NOT change state
-# or trigger any code path. Wire them up before relying on them in flows:
-#   A:expand / A:defer / B:diff / B:defer
-#   C:regen / C:relogo / C:full / C:defer
-# (mirrored in templates/state_machine.md → "Known stubs" section).
-#
-# (gate, action) → required action verb. Anything not in this map falls
-# through to the legacy "any authorized uid is fine" check (safe default
-# since unmapped actions are stubs that don't mutate state).
+# (gate, action) → required action verb for auth.is_authorized. Pairs not in
+# this map fall through to the legacy "any authorized uid is fine" check.
+# Keep entries in sync with the buttons rendered by render.render_gate_*
+# and the branches in _route below.
 _ACTION_REQ: dict[tuple[str, str], str] = {
     ("P", "start"): "review",
     ("P", "later"): "review",

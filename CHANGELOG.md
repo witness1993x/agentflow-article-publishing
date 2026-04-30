@@ -16,6 +16,45 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.9] — 2026-05-01
+
+`/start` → auto-onboard wizard was silently dead on slash-command entry,
+plus stale doc rot mislabelling 8 wired callbacks as stubs.
+
+### Fixed
+
+- `daemon.py::_start_profile_setup_session` — sessions created via the
+  slash-command path (`/start` auto-dispatch, `/onboard`,
+  `/profile-init`) now write `status="collecting"` + `active_uid` +
+  `active_chat_id`, matching the schema that `find_active_session_for_uid`
+  filters on and `_send_profile_setup_question` reads. Previously the
+  wizard printed its prelude ("⚙️ 开始引导式 onboard…") and then the
+  first question was never sent (sender bailed on missing
+  `active_chat_id`), and even if Q1 had been sent the user's reply
+  would have been dropped (lookup filters on `active_uid` +
+  `status=="collecting"`, neither set). Test
+  `test_profile_session_reply_advances_and_applies` had been passing
+  by handcrafting fixtures with the correct keys, so the broken real
+  entry path didn't surface in CI.
+- `daemon.py::_send_profile_setup_question` — defensively falls back
+  to `session.get("chat_id")` when `active_chat_id` is absent, so
+  legacy sessions on disk (mid-flight when the daemon restarts) don't
+  hang.
+
+### Docs
+
+- `daemon.py::_ACTION_REQ` header comment — removed the stale "KNOWN
+  STUB CALLBACKS" block listing `A:expand` / `A:defer` / `B:diff` /
+  `B:defer` / `C:regen` / `C:relogo` / `C:full` / `C:defer`. All eight
+  have real handlers in `_route` (verified via grep + read of each
+  branch) and matching `_ACTION_REQ` permission entries.
+- `agent_review/templates/state_machine.md::"Known stubs"` table →
+  renamed `"Auxiliary gate actions"` and rewritten with the actual
+  effect of each button (replies with batch JSON / unified-diff /
+  2k cover; schedules deferred-repost; cycles brand_overlay anchor;
+  re-spawns image-gate). Emoji labels in the table now match what
+  `render.render_gate_*` actually emits.
+
 ## [1.0.8] — 2026-04-30
 
 Three operator-visible bugs from a real Telegram-bot session:
