@@ -15,6 +15,7 @@ don't hammer remote APIs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -24,6 +25,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agentflow.shared.bootstrap import agentflow_home
+
+
+def _token_fp(token: str | None) -> str:
+    """8-hex-char fingerprint of an API token. Used as cache-key suffix so
+    rotating a credential invalidates its cached probe result instead of
+    silently returning yesterday's failure for last-week's token."""
+    if not token:
+        return "none"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
 _PROBE_CACHE_SECONDS = 3600  # 1h
@@ -80,7 +90,7 @@ def _write_cache(data: dict[str, Any]) -> None:
     _cache_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _cache_get(name: str) -> dict[str, Any] | None:
+def _cache_get(name: str, token_fp: str | None = None) -> dict[str, Any] | None:
     cache = _read_cache().get(name)
     if not cache:
         return None
@@ -89,16 +99,29 @@ def _cache_get(name: str) -> dict[str, Any] | None:
         return None
     if time.time() - ts > _PROBE_CACHE_SECONDS:
         return None
+    # v1.0.16: invalidate when the bound token rotates. Stored entries
+    # without ``token_fp`` (pre-v1.0.16) are also treated as miss to force
+    # a re-probe under the new schema.
+    if token_fp is not None and cache.get("token_fp") != token_fp:
+        return None
     return cache
 
 
-def _cache_put(name: str, valid: bool, message: str, extra: dict[str, Any] | None = None) -> None:
+def _cache_put(
+    name: str,
+    valid: bool,
+    message: str,
+    extra: dict[str, Any] | None = None,
+    *,
+    token_fp: str | None = None,
+) -> None:
     cache = _read_cache()
     cache[name] = {
         "ts": time.time(),
         "valid": valid,
         "message": message,
         "extra": extra or {},
+        "token_fp": token_fp,
     }
     _write_cache(cache)
 
@@ -127,17 +150,24 @@ def _probe(
     fn: Callable[[], tuple[bool, str, dict[str, Any] | None]],
     *,
     fresh: bool,
+    token_fp: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Run a remote probe with cache. ``fresh`` bypasses the cache."""
+    """Run a remote probe with cache. ``fresh`` bypasses the cache.
+
+    ``token_fp`` (when provided) binds the cache entry to a specific
+    credential fingerprint — rotating the token invalidates the cached
+    failure so the next ``af doctor`` re-probes against the new token
+    instead of returning yesterday's "401" result for last-week's token.
+    """
     if not fresh:
-        hit = _cache_get(name)
+        hit = _cache_get(name, token_fp=token_fp)
         if hit:
             return bool(hit["valid"]), str(hit.get("message", "")), dict(hit.get("extra") or {})
     try:
         valid, message, extra = fn()
     except Exception as err:  # pragma: no cover
         valid, message, extra = False, f"probe error: {err}", None
-    _cache_put(name, valid, message, extra)
+    _cache_put(name, valid, message, extra, token_fp=token_fp)
     return valid, message, dict(extra or {})
 
 
@@ -160,7 +190,9 @@ def check_telegram(*, fresh: bool = False) -> CheckResult:
         username = me.get("username")
         return True, f"@{username}", {"username": username, "id": me.get("id")}
 
-    valid, msg, extra = _probe("telegram", _probe_fn, fresh=fresh)
+    valid, msg, extra = _probe(
+        "telegram", _probe_fn, fresh=fresh, token_fp=_token_fp(token),
+    )
     cr.valid = valid
     cr.message = msg
     cr.extra = extra
@@ -206,7 +238,10 @@ def _probe_openai_compat(name: str, env_token: str, base_url: str, fresh: bool) 
                 return True, "valid", None
         return False, f"HTTP {resp.status_code}: {resp.text[:120]}", None
 
-    valid, msg, extra = _probe(name.replace(" ", "_").lower(), _probe_fn, fresh=fresh)
+    valid, msg, extra = _probe(
+        name.replace(" ", "_").lower(), _probe_fn,
+        fresh=fresh, token_fp=_token_fp(token),
+    )
     cr.valid = valid
     cr.message = msg
     cr.extra = extra
@@ -243,7 +278,9 @@ def check_anthropic(*, fresh: bool = False) -> CheckResult:
                 return True, "valid", None
         return False, f"HTTP {resp.status_code}: {resp.text[:120]}", None
 
-    valid, msg, extra = _probe("anthropic", _probe_fn, fresh=fresh)
+    valid, msg, extra = _probe(
+        "anthropic", _probe_fn, fresh=fresh, token_fp=_token_fp(token),
+    )
     cr.valid = valid
     cr.message = msg
     cr.extra = extra
@@ -271,7 +308,9 @@ def check_jina(*, fresh: bool = False) -> CheckResult:
             return True, "valid", None
         return False, f"HTTP {resp.status_code}: {resp.text[:120]}", None
 
-    valid, msg, extra = _probe("jina", _probe_fn, fresh=fresh)
+    valid, msg, extra = _probe(
+        "jina", _probe_fn, fresh=fresh, token_fp=_token_fp(token),
+    )
     cr.valid = valid
     cr.message = msg
     cr.extra = extra

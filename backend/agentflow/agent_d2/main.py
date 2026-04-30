@@ -313,6 +313,28 @@ def save_draft(
     md_path = target_dir / "draft.md"
     md_path.write_text("\n".join(parts), encoding="utf-8")
 
+    # v1.0.16: snapshot the active profile's last_updated_at at draft time,
+    # so post_gate_b can surface a warning when the profile is edited
+    # after the draft is saved (and the existing draft therefore predates
+    # the new rules / facts pool).
+    profile_snapshot: dict[str, Any] = (
+        existing_meta.get("profile_snapshot") or {}
+    )
+    try:
+        from agentflow.cli.topic_profile_commands import _read_active_profile_id  # type: ignore
+        from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+        active_pid = _read_active_profile_id()
+        if active_pid:
+            profiles_data = load_user_topic_profiles() or {}
+            profiles_map = profiles_data.get("profiles") or {} if isinstance(profiles_data, dict) else {}
+            current_profile = profiles_map.get(active_pid) or {}
+            profile_snapshot = {
+                "profile_id": active_pid,
+                "last_updated_at": current_profile.get("last_updated_at") or "",
+            }
+    except Exception:
+        pass
+
     metadata = {
         **existing_meta,
         **(extra_metadata or {}),
@@ -324,6 +346,7 @@ def save_draft(
         "saved_at": datetime.now().isoformat(),
         "opening": opening,
         "closing": closing,
+        "profile_snapshot": profile_snapshot,
     }
     with metadata_path.open("w", encoding="utf-8") as fh:
         json.dump(metadata, fh, ensure_ascii=False, indent=2)

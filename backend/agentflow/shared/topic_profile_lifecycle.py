@@ -147,6 +147,11 @@ def upsert_profile(
     profiles = _profiles_mapping(data)
     current = deepcopy(profiles.get(profile_id) or seed_profile(profile_id))
     merged = deep_merge(current, patch, replace_lists=replace_lists)
+    # v1.0.16: per-profile last_updated_at stamp so consumers (D2 draft
+    # creation, post_gate_b's outdated check) can detect when a draft was
+    # written against an older snapshot of the profile and warn the
+    # operator before they ship content under stale rules.
+    merged["last_updated_at"] = datetime.now(timezone.utc).isoformat()
     profiles[profile_id] = merged
     data.setdefault("version", "1.0")
     data["last_updated"] = datetime.now().date().isoformat()

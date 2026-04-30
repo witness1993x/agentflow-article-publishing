@@ -116,6 +116,25 @@ def peek_raw(short_id: str) -> dict[str, Any] | None:
         return _read().get(short_id)
 
 
+def attach_message_id(short_id: str, tg_message_id: int | None) -> bool:
+    """v1.0.16: stamp the Telegram message_id of the card the sid was
+    rendered into onto the entry. Used by triggers._revoke_prior_card_keyboard
+    to clear the inline keyboard on a stale card before sending a fresh
+    one. Returns False if the entry is missing / expired / revoked.
+    """
+    if tg_message_id is None:
+        return False
+    with _LOCK:
+        index = _read()
+        entry = index.get(short_id)
+        if not entry or _is_expired(entry) or entry.get("revoked_at"):
+            return False
+        entry["tg_message_id"] = int(tg_message_id)
+        index[short_id] = entry
+        _write(index)
+        return True
+
+
 def set_extra(short_id: str, key: str, value: Any) -> bool:
     """Mutate a single key in entry['extra']. Returns False if entry missing/expired.
 

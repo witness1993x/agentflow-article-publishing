@@ -235,6 +235,7 @@ def post_gate_a(
         config_suggestions=config_suggestions or [],
     )
     sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+    _sid.attach_message_id(sid, sent.get("message_id"))
     return {
         "gate": "A",
         "short_id": sid,
@@ -286,6 +287,42 @@ _DRAFT_PATH = [
 ]
 
 
+def _revoke_prior_card_keyboard(
+    gate: str, article_id: str, chat_id: int | str,
+) -> None:
+    """v1.0.16: when a fresh Gate B/C/D card is about to land, clear the
+    inline keyboard on any prior active card for the same (gate,
+    article_id). The operator's TG history then has exactly one
+    interactable card per gate, eliminating the "which card do I click,
+    the v1 or v2?" confusion the autopost feedback flagged. Also
+    revokes the old short_id so callbacks against the now-buttonless
+    card surface the soft-revoke "✓ 已处理 (重复点击)" branch instead
+    of executing twice.
+    """
+    try:
+        existing = _sid.find_active(gate=gate, article_id=article_id)
+    except Exception:
+        existing = None
+    if not existing:
+        return
+    old_sid, entry = existing
+    old_message_id = entry.get("tg_message_id")
+    if old_message_id:
+        try:
+            tg_client.edit_message_reply_markup(
+                chat_id, int(old_message_id), reply_markup={},
+            )
+        except Exception as err:  # pragma: no cover — best-effort
+            _log.info(
+                "stale-card keyboard cleanup failed for %s/%s msg=%s: %s",
+                gate, article_id, old_message_id, err,
+            )
+    try:
+        _sid.revoke(old_sid)
+    except Exception:
+        pass
+
+
 def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | None:
     """Post the Gate B card to the configured review chat.
 
@@ -298,6 +335,8 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     if chat_id is None:
         _log.warning("no review chat_id — skipping Gate B post for %s", article_id)
         return None
+
+    _revoke_prior_card_keyboard("B", article_id, chat_id)
 
     _ensure_state(
         article_id,
@@ -320,6 +359,63 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     )
 
     self_lines, blockers = self_check.check_gate_b(article_id)
+
+    # v1.0.16: warn if the bound topic profile has been edited after this
+    # draft was last saved. The snapshot was stamped by agent_d2.main.save_draft.
+    snapshot = meta.get("profile_snapshot") or {}
+    snap_pid = str(snapshot.get("profile_id") or "")
+    snap_updated = str(snapshot.get("last_updated_at") or "")
+    if snap_pid and snap_updated:
+        try:
+            from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+            profiles_data = load_user_topic_profiles() or {}
+            profiles_map = (
+                profiles_data.get("profiles") or {}
+                if isinstance(profiles_data, dict) else {}
+            )
+            cur_profile = profiles_map.get(snap_pid) or {}
+            cur_updated = str(cur_profile.get("last_updated_at") or "")
+            if cur_updated and cur_updated > snap_updated:
+                meta["draft_outdated_by_profile_change"] = True
+                self_lines = list(self_lines) + [
+                    f"⚠ profile {snap_pid} 已在 draft 之后被更新 — "
+                    f"建议 /onboard 之后重跑 af edit / fill 让新约束生效"
+                ]
+                # Persist the flag so downstream consumers (review-list,
+                # publish gates) can also see it.
+                try:
+                    meta_path = (
+                        agentflow_home() / "drafts" / article_id / "metadata.json"
+                    )
+                    if meta_path.exists():
+                        existing = json.loads(meta_path.read_text(encoding="utf-8"))
+                        existing["draft_outdated_by_profile_change"] = True
+                        meta_path.write_text(
+                            json.dumps(existing, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                except Exception:
+                    pass
+        except Exception as err:  # pragma: no cover — best-effort
+            _log.info("profile-outdated check skipped for %s: %s", article_id, err)
+
+    # v1.0.16: language-consistency lint. Surfaces an extra warning line
+    # in self_check when the body's CJK/ASCII mix violates the profile's
+    # declared output_language. Cheap, regex-only.
+    try:
+        from agentflow.agent_d2.language_lint import detect_mixed_language
+        body_text = "\n\n".join(
+            (s.get("content_markdown") or "") for s in sections
+        )
+        lang_warn = detect_mixed_language(
+            body_text,
+            (publisher.get("output_language") or "").strip(),
+        )
+        if lang_warn:
+            self_lines = list(self_lines) + [lang_warn]
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("language lint skipped for %s: %s", article_id, err)
+
     opening = (meta.get("opening") or "").strip()
     if not opening and sections:
         opening = (sections[0].get("content_markdown") or "").strip()
@@ -340,6 +436,7 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
 
     sent = tg_client.send_message(chat_id, text, reply_markup=kb)
     message_id = sent.get("message_id")
+    _sid.attach_message_id(sid, message_id)
 
     body_doc = render.export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
@@ -979,6 +1076,8 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
         _log.warning("no review chat_id — skipping Gate C post for %s", article_id)
         return None
 
+    _revoke_prior_card_keyboard("C", article_id, chat_id)
+
     _ensure_state(
         article_id,
         target=_state.STATE_IMAGE_PENDING_REVIEW,
@@ -1010,6 +1109,7 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
     )
     sent = tg_client.send_photo(chat_id, summary["cover_path"], caption=caption, reply_markup=kb)
     message_id = sent.get("message_id")
+    _sid.attach_message_id(sid, message_id)
 
     try:
         _state.transition(
@@ -1078,6 +1178,7 @@ def post_image_gate_picker(article_id: str) -> dict[str, Any] | None:
         )
         return None
 
+    _sid.attach_message_id(sid, sent.get("message_id"))
     return {
         "gate": "I",
         "article_id": article_id,
@@ -1174,6 +1275,8 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
         _log.warning("no review chat_id — skipping Gate D post for %s", article_id)
         return None
 
+    _revoke_prior_card_keyboard("D", article_id, chat_id)
+
     try:
         meta = _read_metadata(article_id)
     except FileNotFoundError:
@@ -1243,6 +1346,7 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
     )
     sent = tg_client.send_message(chat_id, text, reply_markup=kb)
     message_id = sent.get("message_id")
+    _sid.attach_message_id(sid, message_id)
 
     try:
         _state.transition(

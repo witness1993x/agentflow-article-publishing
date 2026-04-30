@@ -107,6 +107,54 @@ def send_message(
     return _post("sendMessage", payload)
 
 
+_PHOTO_OPTIMIZE_THRESHOLD_BYTES = 1_000_000   # 1 MB
+_PHOTO_OPTIMIZE_LONG_EDGE_PX   = 1600
+_PHOTO_OPTIMIZE_JPEG_QUALITY   = 85
+
+
+def _optimize_photo_for_telegram(photo_path: Path) -> Path:
+    """Return a path safe to send to Telegram's sendPhoto endpoint.
+
+    Telegram's photo cap is technically 10MB but in practice large PNGs
+    (esp. cover assets > 1MB from the Atlas image generator) hit upload
+    timeouts on flaky links. v1.0.16: when the source is over
+    ``_PHOTO_OPTIMIZE_THRESHOLD_BYTES``, transcode to JPEG, downscale to
+    1600px long edge, and write a sibling ``*_tgopt.jpg``. Source file is
+    untouched. Falls back to the original path if Pillow is unavailable
+    or the optimize step itself raises.
+    """
+    try:
+        size = photo_path.stat().st_size
+    except OSError:
+        return photo_path
+    if size <= _PHOTO_OPTIMIZE_THRESHOLD_BYTES:
+        return photo_path
+    try:
+        from PIL import Image
+    except ImportError:
+        return photo_path
+    try:
+        with Image.open(photo_path) as im:
+            im = im.convert("RGB") if im.mode != "RGB" else im
+            w, h = im.size
+            long_edge = max(w, h)
+            if long_edge > _PHOTO_OPTIMIZE_LONG_EDGE_PX:
+                ratio = _PHOTO_OPTIMIZE_LONG_EDGE_PX / long_edge
+                im = im.resize(
+                    (int(w * ratio), int(h * ratio)),
+                    Image.LANCZOS,
+                )
+            out_path = photo_path.with_name(photo_path.stem + "_tgopt.jpg")
+            im.save(
+                out_path, "JPEG",
+                quality=_PHOTO_OPTIMIZE_JPEG_QUALITY,
+                optimize=True,
+            )
+        return out_path
+    except Exception:
+        return photo_path
+
+
 def send_photo(
     chat_id: int | str,
     photo_path: Path | str,
@@ -115,9 +163,18 @@ def send_photo(
     reply_markup: dict[str, Any] | None = None,
     parse_mode: str | None = "MarkdownV2",
 ) -> dict[str, Any]:
+    """Send a photo to Telegram.
+
+    v1.0.16: large source images (> ~1MB) are transcoded to JPEG +
+    resized before upload to avoid sendPhoto timeouts. Upload-layer
+    failures (Timeout / ConnectionError / 413 entity too large) fall
+    back to ``send_document`` with the original file so the operator
+    still gets the asset; the Gate flow can decide what to do next.
+    """
     photo_path = Path(photo_path)
     if not photo_path.exists():
         raise TelegramError(f"send_photo: file not found {photo_path}")
+    upload_path = _optimize_photo_for_telegram(photo_path)
     data: dict[str, Any] = {"chat_id": chat_id}
     if parse_mode is not None:
         data["parse_mode"] = parse_mode
@@ -125,8 +182,28 @@ def send_photo(
         data["caption"] = caption
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup)
-    with photo_path.open("rb") as fh:
-        return _post_multipart("sendPhoto", data, {"photo": fh})
+    try:
+        with upload_path.open("rb") as fh:
+            return _post_multipart("sendPhoto", data, {"photo": fh})
+    except (
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+    ) as upload_err:
+        # Upload-layer failure (network timeout, RST). Fall back to
+        # send_document with the ORIGINAL file so operators still see
+        # the asset; sendDocument tolerates larger payloads and isn't
+        # subject to the same image-pipeline timeouts.
+        try:
+            return send_document(
+                chat_id, photo_path,
+                caption=(caption or "")
+                + "\n\n_(image upload fell back to file: "
+                + str(upload_err)[:80] + ")_",
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+        except Exception:
+            raise upload_err
 
 
 def send_document(

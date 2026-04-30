@@ -2828,6 +2828,150 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class V016BatchTests(AgentflowHomeTestCase):
+    """v1.0.16 — five operator-feedback fixes batched: token-aware
+    preflight cache (#1a), image compression for sendPhoto (#5), stale
+    Gate card keyboard cleanup (#4a), profile-snapshot outdated flag
+    (#2a), language consistency lint (#3b)."""
+
+    # ---- #1a: token-aware preflight cache ---------------------------
+    def test_cache_invalidates_on_token_change(self) -> None:
+        from agentflow.agent_review import preflight
+        preflight._cache_put(
+            "telegram", True, "valid (@old_bot)", token_fp="aaaa1111",
+        )
+        # Same fingerprint → hit.
+        hit = preflight._cache_get("telegram", token_fp="aaaa1111")
+        self.assertIsNotNone(hit)
+        # Different fingerprint → miss.
+        miss = preflight._cache_get("telegram", token_fp="bbbb2222")
+        self.assertIsNone(miss)
+
+    def test_cache_pre_v016_entry_treated_as_miss(self) -> None:
+        from agentflow.agent_review import preflight
+        # Manually plant a pre-v016 cache entry (no token_fp key).
+        cache = {
+            "telegram": {
+                "ts": __import__("time").time(),
+                "valid": False,
+                "message": "HTTP 401",
+                "extra": {},
+            }
+        }
+        preflight._write_cache(cache)
+        miss = preflight._cache_get("telegram", token_fp="aaaa1111")
+        self.assertIsNone(miss)
+
+    # ---- #5: photo optimize + fallback -----------------------------
+    def test_small_photo_passes_through_unmodified(self) -> None:
+        from agentflow.agent_review import tg_client
+        small = self.home / "small.png"
+        small.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        out = tg_client._optimize_photo_for_telegram(small)
+        self.assertEqual(out, small)
+
+    def test_large_photo_gets_optimized(self) -> None:
+        import os as _os
+        from PIL import Image
+        from agentflow.agent_review import tg_client
+        big = self.home / "big.png"
+        # High-entropy 2400x1600 noise so PNG can't compress below 1MB.
+        rng = _os.urandom(2400 * 1600 * 4)
+        Image.frombytes("RGBA", (2400, 1600), rng).save(
+            big, "PNG", compress_level=0,
+        )
+        self.assertGreater(big.stat().st_size, 1_000_000)
+        out = tg_client._optimize_photo_for_telegram(big)
+        self.assertNotEqual(out, big)
+        self.assertTrue(out.exists())
+        self.assertLess(out.stat().st_size, big.stat().st_size)
+        # Long edge clamped.
+        with Image.open(out) as im:
+            self.assertLessEqual(max(im.size), 1600)
+
+    def test_send_photo_falls_back_to_send_document_on_timeout(self) -> None:
+        import requests
+        from agentflow.agent_review import tg_client
+        photo = self.home / "p.png"
+        photo.write_bytes(b"\x89PNG" + b"\x00" * 50)
+        with (
+            patch(
+                "agentflow.agent_review.tg_client._post_multipart",
+                side_effect=requests.exceptions.Timeout("upload timed out"),
+            ),
+            patch(
+                "agentflow.agent_review.tg_client.send_document",
+                return_value={"message_id": 99},
+            ) as doc_mock,
+        ):
+            result = tg_client.send_photo(456, photo)
+        doc_mock.assert_called_once()
+        self.assertEqual(result["message_id"], 99)
+
+    # ---- #4a: stale Gate card keyboard cleanup ---------------------
+    def test_revoke_prior_card_keyboard_clears_old_message(self) -> None:
+        from agentflow.agent_review import triggers, short_id as _sid
+        sid = _sid.register(
+            gate="B", article_id="hs_x_001", ttl_hours=24,
+        )
+        # v1.0.16: tg_message_id is stamped via the attach setter, not
+        # at register time. Simulate the post-send flow.
+        self.assertTrue(_sid.attach_message_id(sid, 42))
+        with patch(
+            "agentflow.agent_review.triggers.tg_client.edit_message_reply_markup",
+        ) as edit_mock:
+            triggers._revoke_prior_card_keyboard("B", "hs_x_001", 456)
+        edit_mock.assert_called_once()
+        args = edit_mock.call_args
+        self.assertEqual(args.args[0], 456)
+        self.assertEqual(args.args[1], 42)
+        # Old sid revoked.
+        self.assertIsNone(_sid.resolve(sid))
+
+    # ---- #2a: profile snapshot + outdated flag ---------------------
+    def test_language_lint_flags_zh_with_too_much_ascii(self) -> None:
+        from agentflow.agent_d2.language_lint import detect_mixed_language
+        # 30+ chinese chars + lots of english content → over 15%.
+        body = "中文段落开头" + "这是一段中文" * 5 + (
+            " this is a long english passage that should trip the threshold "
+            "because the ratio of ascii letters to cjk chars rises above 15 percent"
+        )
+        warn = detect_mixed_language(body, "zh-Hans")
+        self.assertIsNotNone(warn)
+        self.assertIn("language drift", warn)
+
+    def test_language_lint_passes_clean_zh(self) -> None:
+        from agentflow.agent_d2.language_lint import detect_mixed_language
+        body = (
+            "这是一段干净的中文内容。它讨论的是后端架构的演进路径，"
+            "包括从单体到微服务，再到事件驱动架构的若干阶段。"
+            "全程没有掺杂英文段落，仅在必要的术语处用括号注释一下。"
+            "继续展开数据流的细节，从入口到出口的每一跳都应留下审计痕迹，"
+            "便于事后追溯。下游消费者也需要约定明确的契约，避免漂移。"
+        )
+        warn = detect_mixed_language(body, "zh-Hans")
+        self.assertIsNone(warn)
+
+    def test_language_lint_whitelists_brand_terms(self) -> None:
+        """Brand terms in the whitelist (AgentFlow, Telegram, Claude, API,
+        Moonshot, Kimi, Anthropic, OpenAI, Jina, Atlas, Kafka, Redis,
+        PostgreSQL, K8s) shouldn't trip the lint when the surrounding
+        body is clearly Chinese."""
+        from agentflow.agent_d2.language_lint import detect_mixed_language
+        body = (
+            "AgentFlow 的 Telegram 机器人和 Claude API 已经接通，"
+            "整体走 Moonshot 兼容协议。Jina 用来生成嵌入，"
+            "Atlas 处理图像，"
+            "底层依赖 Kafka 加 Redis 加 PostgreSQL 这套常规组合，"
+            "不打算引入 K8s 这种重型基础设施。"
+            "目前所有任务都跑在单台机器上面观察效果，再扩展。"
+            "如果未来要上集群，再切换到合适的编排层。"
+            "下一步重点放在内容质量上，把约束做精细。"
+        )
+        warn = detect_mixed_language(body, "zh-Hans")
+        self.assertIsNone(warn)
+
+
 class DetectNextStepModeAwarenessTests(AgentflowHomeTestCase):
     """v1.0.14 — `_detect_next_step` used to block tg_review-mode operators
     on the Claude Code / Cursor skill-harness check, which is irrelevant

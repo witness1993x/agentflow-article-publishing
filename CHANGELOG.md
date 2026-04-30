@@ -16,6 +16,75 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.16] — 2026-05-01
+
+Five fixes from a real production-experience report on the autopost
+side: two P0 production blockers + three P1 reliability/UX wins.
+Bigger architectural items from the same report (full draft-refresh
+command, fact-grounded hallucination linter, single-source-of-truth
+refactor) deferred to a separate design pass.
+
+### Fixed (P0 — production blockers)
+
+- **`agent_review/tg_client.py::send_photo`** (#5) — large cover
+  PNGs (typical Atlas output ~2.5MB) now go through
+  `_optimize_photo_for_telegram` first: when source > 1MB, transcode
+  to JPEG, downscale long edge to 1600px, quality=85. Pillow already
+  in deps; original file untouched (`*_tgopt.jpg` sibling). On
+  `requests.Timeout` / `ConnectionError`, falls back to
+  `send_document` with the original so the operator still gets the
+  asset. Previously a 2.5MB PNG would timeout the Gate C card and
+  leave the article stuck in `image_pending_review` with no
+  recovery path.
+- **`agent_review/preflight.py::_probe`** (#1a) — cache entries now
+  bind to a `token_fp` (8-hex sha256 of the relevant API token);
+  rotating the token invalidates its cached probe result. Pre-v1.0.16
+  cache entries (no `token_fp` key) are also treated as miss to
+  force a re-probe under the new schema. Previously, rotating a
+  Telegram bot token left `af doctor` returning yesterday's "401" for
+  ~1h (cache TTL) even though the new token was healthy.
+
+### Added (P1)
+
+- **`agent_review/triggers.py::_revoke_prior_card_keyboard`** (#4a) —
+  before posting a fresh Gate B/C/D card, find any active short_id
+  for the same `(gate, article_id)`, edit its inline keyboard to `{}`
+  on the old TG message, and revoke the old sid. Operator's TG
+  history now has at most one interactable card per gate; old cards
+  show no buttons (visibly stale) and clicks against them surface
+  the existing soft-revoke "✓ 已处理" branch.
+- **`agent_review/short_id.py::attach_message_id`** — supporting
+  setter so #4a can find the old message_id to edit. Wired into
+  `post_gate_a/b/c/d` and `post_image_gate_picker` after each
+  `tg_client.send_message` / `send_photo`. Closes a latent gap:
+  `entry.get("tg_message_id")` was being read by Gate A's idempotent
+  duplicate-check (and now #4a) but never written.
+- **`agent_d2/main.py::save_draft`** + **`triggers.post_gate_b`**
+  (#2a) — drafts now stamp `metadata.profile_snapshot = {profile_id,
+  last_updated_at}` at save time. `topic_profile_lifecycle.upsert_profile`
+  stamps a per-profile `last_updated_at` on every write. Gate B
+  re-checks at post time: when current profile is newer than the
+  stamped snapshot, sets `metadata.draft_outdated_by_profile_change=true`
+  and prepends a `⚠ profile {id} 已在 draft 之后被更新` warning to the
+  card's self-check section. The operator sees that the active draft
+  predates the latest profile rules before approving.
+- **`agent_d2/language_lint.py::detect_mixed_language`** (#3b) — new
+  module. For `output_language=zh-Hans` profiles, computes the
+  ASCII-letter / CJK-char ratio in the body (after stripping a brand
+  whitelist of API/JSON/AgentFlow/Telegram/etc.); >15% → warning
+  appended to the Gate B self-check lines. Symmetric for `output_language=en`.
+  Catches the "中文段落里突然冒出大段英文" content-quality issue
+  flagged in the autopost report.
+
+### Tests
+
+- `V016BatchTests` × 9: cache invalidates on token rotation; pre-v1.0.16
+  entry treated as miss; small photo passes through unmodified; large
+  photo gets optimized to JPEG ≤1600px; send_photo Timeout falls
+  back to send_document; stale-card keyboard cleanup edits the right
+  message; language lint flags zh body with >15% English; passes
+  clean zh; passes brand-whitelisted Chinese-with-English-acronyms.
+
 ## [1.0.15] — 2026-05-01
 
 Two operator-facing message cleanups in the `/start` auto-dispatch
