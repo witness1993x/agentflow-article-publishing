@@ -16,6 +16,29 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.15] — 2026-05-01
+
+Two operator-facing message cleanups in the `/start` auto-dispatch
+branches that were either redundant or self-contradictory.
+
+### Fixed
+
+- `/start` `missing_profile` / `incomplete_profile` branch
+  (`daemon.py::_handle_message`) — dropped the
+  `"⚙️ 检测到状态：{cs} / 原因：... / 正在自动开启 /onboard..."`
+  preamble. `_handle_onboard` (called immediately after) sends its own
+  `"⚙️ 开始引导式 onboard：将依次询问 brand / voice / sources / rules。"`
+  intro and then the wizard sends Q1, so the operator no longer reads
+  three near-identical "we're starting the wizard" lines before getting
+  to the actual question.
+- `/start` `daemon_not_running` branch — replaced the contradictory
+  `"✅ daemon 已活着 (你看到这条消息说明它在跑). 心跳文件可能仅是 stale；其他 init check 已过."`
+  message with a `_write_heartbeat()` refresh + plain `"✅ 已 ready..."`.
+  The branch only fires when the heartbeat is stale at probe time;
+  refreshing it before reply makes the next probe legitimate, and the
+  operator sees the same `ready` UX as a normal install instead of a
+  message that admits the heartbeat is wrong.
+
 ## [1.0.14] — 2026-05-01
 
 `/start` auto-dispatch on a pure-TG-operator install told the operator

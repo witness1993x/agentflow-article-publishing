@@ -2224,13 +2224,10 @@ def _handle_message(update: dict[str, Any]) -> None:
             return
 
         if cs in ("missing_profile", "incomplete_profile"):
-            tg_client.send_message(
-                chat_id,
-                f"⚙️ 检测到状态：`{_render.escape_md2(cs)}`\n"
-                f"原因：{_render.escape_md2(reason[:200])}\n\n"
-                "正在自动开启 `/onboard` 引导式 profile 设置…",
-                parse_mode="MarkdownV2",
-            )
+            # No preamble — _handle_onboard sends its own intro and then
+            # the wizard sends Q1. Adding a "detected state X, dispatching
+            # /onboard" message here just makes the user read three
+            # near-identical lines before the actual question lands.
             _handle_onboard(chat_id, uid, [], "/start auto-dispatch")
             return
 
@@ -2253,11 +2250,19 @@ def _handle_message(update: dict[str, Any]) -> None:
             return
 
         if cs == "daemon_not_running":
+            # By definition: if we're replying, the daemon is alive. The
+            # only reason _detect_next_step returned daemon_not_running is
+            # that the heartbeat file was stale or missing at probe time.
+            # Refresh the heartbeat (so subsequent /start or doctor calls
+            # see fresh) and treat this as ready — no point telling the
+            # operator about a stale-looking heartbeat we just wrote past.
+            try:
+                _write_heartbeat()
+            except Exception:
+                pass
             tg_client.send_message(
                 chat_id,
-                "✅ daemon 已活着 \\(你看到这条消息说明它在跑\\)\\. \n"
-                "心跳文件可能仅是 stale；其他 init check 已过\\.\n"
-                "下一步：`/scan`\\.",
+                "✅ 已 ready\\. 下一步：`/scan` 主动拉热点；或 `/help` 看完整命令面板\\.",
                 parse_mode="MarkdownV2",
             )
             return
