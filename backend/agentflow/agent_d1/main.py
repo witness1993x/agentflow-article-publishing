@@ -250,11 +250,24 @@ async def run_d1_scan(
         async with semaphore:
             return await viewpoint_miner.mine(cluster, style_profile, content_matrix)
 
-    hotspots: list[Hotspot] = await asyncio.gather(
-        *[_gated_mine(c) for c in selected]
+    mining_results = await asyncio.gather(
+        *[_gated_mine(c) for c in selected],
+        return_exceptions=True,
     )
+    hotspots: list[Hotspot] = []
+    for cluster, result in zip(selected, mining_results):
+        if isinstance(result, Exception):
+            # v1.0.12: real-mode LLM failure on a single cluster drops the
+            # cluster instead of emitting a stub Hotspot with empty angles.
+            # Mock-mode failures stay silent (handled inside mine()).
+            _log.error(
+                "viewpoint mining dropped cluster %s: %s",
+                cluster.cluster_id, result,
+            )
+            continue
+        hotspots.append(result)
 
-    output = D1Output(generated_at=now, hotspots=list(hotspots))
+    output = D1Output(generated_at=now, hotspots=hotspots)
     _save_output(output)
     return output
 

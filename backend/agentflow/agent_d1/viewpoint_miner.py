@@ -8,6 +8,7 @@ prompt. Handles ID generation + maps the LLM JSON back onto the
 from __future__ import annotations
 
 import itertools
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -194,9 +195,26 @@ async def mine(
             prompt=prompt,
             max_tokens=4000,
         )
-    except Exception as err:  # pragma: no cover - defensive
-        _log.warning("viewpoint mining failed for %s: %s", cluster.cluster_id, err)
-        parsed = {}
+    except Exception as err:
+        # In MOCK mode (smoke tests / dev) tolerate fixture misses with a
+        # stub Hotspot so the pipeline keeps running. In real mode propagate
+        # — agent_d1.main.run_d1_scan collects exceptions via
+        # ``asyncio.gather(return_exceptions=True)`` and drops failed
+        # clusters from the output instead of emitting placeholder hotspots
+        # that look real but carry empty angles. This keeps the user's
+        # "every search returns real data" invariant honest.
+        if os.environ.get("MOCK_LLM", "").strip().lower() == "true":
+            _log.warning(
+                "viewpoint mining failed for %s in mock mode → stub: %s",
+                cluster.cluster_id, err,
+            )
+            parsed = {}
+        else:
+            _log.error(
+                "viewpoint mining failed for %s in real mode (will drop cluster): %s",
+                cluster.cluster_id, err,
+            )
+            raise
 
     fresh = freshness_of_cluster(cluster, now)
 

@@ -399,13 +399,17 @@ def check_mock_mode() -> CheckResult:
     return cr
 
 
-# Distinctive prefixes from agent_d1/collectors/twitter.py::_MOCK_TEMPLATES.
-# Used by check_hotspots_mock_leak to spot historical pre-v1.0.8 contamination.
-_TWITTER_MOCK_FINGERPRINTS: tuple[str, ...] = (
-    "Spent the day wiring",
-    "Vibe Coding is not replacing",
-    "Agent frameworks are massively overfit",
-)
+def _twitter_mock_fingerprints() -> tuple[str, ...]:
+    """First 30 chars of each ``_MOCK_TEMPLATES`` entry in
+    ``agent_d1.collectors.twitter``. Derived live from source-of-truth so
+    new templates added there are caught automatically (avoids the
+    hardcoded-fingerprint drift footgun).
+    """
+    try:
+        from agentflow.agent_d1.collectors.twitter import _MOCK_TEMPLATES
+    except ImportError:
+        return ()
+    return tuple(t[:30] for t in _MOCK_TEMPLATES if isinstance(t, str) and t)
 
 
 def check_hotspots_mock_leak() -> CheckResult:
@@ -425,12 +429,13 @@ def check_hotspots_mock_leak() -> CheckResult:
         return cr
     contaminated: list[str] = []
     pattern = _re.compile('"mock"\\s*:\\s*true', _re.IGNORECASE)
+    fingerprints = _twitter_mock_fingerprints()
     for path in sorted(hotspots_dir.glob("*.json")):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if pattern.search(text) or any(fp in text for fp in _TWITTER_MOCK_FINGERPRINTS):
+        if pattern.search(text) or any(fp in text for fp in fingerprints):
             contaminated.append(path.name)
     if not contaminated:
         cr.valid = True

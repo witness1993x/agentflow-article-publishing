@@ -16,6 +16,46 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.12] — 2026-05-01
+
+Closes the last "real-mode silently emits placeholder data" gap found in
+the third audit pass: when a real LLM call fails inside the viewpoint
+miner, the cluster is now dropped instead of producing a stub Hotspot
+with empty angles. Same theme as v1.0.8 / v1.0.10 / v1.0.11 — every
+hotspot in `~/.agentflow/hotspots/*.json` must reflect real upstream
+data.
+
+### Fixed
+
+- `agent_d1/viewpoint_miner.py::mine` — `LLMClient.chat_json` failure now
+  re-raises in real mode (`MOCK_LLM != "true"`). Previously the exception
+  was swallowed and a Hotspot with empty `mainstream_views`,
+  `overlooked_angles`, and `suggested_angles` was returned — looked real
+  in `af review-list`, evaded `check_hotspots_mock_leak` (no `mock=true`
+  flag set). Mock mode keeps the old stub-on-fixture-miss behavior so
+  smoke tests still close their loop.
+- `agent_d1/main.py::run_d1_scan` — switched cluster mining from
+  `asyncio.gather(...)` to `asyncio.gather(..., return_exceptions=True)`,
+  drops failed clusters with `_log.error` audit. Net effect: a partial
+  scan emits only the clusters whose viewpoint mining succeeded; total
+  failure emits zero hotspots (which is honest) instead of N stubs.
+
+### Hardened
+
+- `agent_review/preflight.py::_twitter_mock_fingerprints` — derived live
+  from `agent_d1.collectors.twitter._MOCK_TEMPLATES` instead of three
+  hardcoded prefixes. If a future engineer adds a 4th mock template, the
+  doctor probe catches it automatically. Closes the fragility flagged by
+  the v1.0.11 audit pass.
+
+### Tests
+
+- `ViewpointMinerRealModeFailureTests` × 3:
+  * `mine` raises `RuntimeError` in real mode on LLM failure;
+  * `mine` returns a stub in mock mode on fixture miss (back-compat);
+  * `run_d1_scan` drops the failed cluster, emits only the successful
+    one, no stub hotspot in output.
+
 ## [1.0.11] — 2026-05-01
 
 `af doctor` now surfaces historical mock-tagged hotspot files on disk.

@@ -2878,6 +2878,108 @@ class HotspotsMockLeakDoctorTests(AgentflowHomeTestCase):
         self.assertTrue(result.ok)
 
 
+class ViewpointMinerRealModeFailureTests(AgentflowHomeTestCase):
+    """v1.0.12 — when LLM fails in real mode, viewpoint_miner.mine() must
+    raise so run_d1_scan can drop the cluster instead of emitting a stub
+    Hotspot with empty angles that looks real but isn't."""
+
+    def _cluster(self, cluster_id: str = "c1") -> object:
+        from agentflow.shared.models import RawSignal, TopicCluster
+        return TopicCluster(
+            cluster_id=cluster_id,
+            signals=[RawSignal(
+                source="hackernews",
+                source_item_id="hn_1",
+                author="hn",
+                text="some real source text",
+                url="https://example.com/x",
+                published_at=datetime.now(timezone.utc),
+                engagement={"score": 50},
+            )],
+            centroid_embedding=[0.1, 0.2],
+            summary_one_liner="topic",
+        )
+
+    def test_mine_raises_in_real_mode_on_llm_failure(self) -> None:
+        from agentflow.agent_d1 import viewpoint_miner
+        from agentflow.shared.llm_client import LLMClient
+
+        async def _boom(*_a, **_kw):
+            raise RuntimeError("upstream LLM 500")
+
+        with (
+            patch.dict(os.environ, {"MOCK_LLM": "false"}, clear=False),
+            patch.object(LLMClient, "chat_json", side_effect=_boom),
+        ):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(viewpoint_miner.mine(self._cluster(), {}, {}))
+
+    def test_mine_returns_stub_in_mock_mode_on_fixture_miss(self) -> None:
+        from agentflow.agent_d1 import viewpoint_miner
+        from agentflow.shared.llm_client import LLMClient
+
+        async def _boom(*_a, **_kw):
+            raise FileNotFoundError("fixture missing")
+
+        with (
+            patch.dict(os.environ, {"MOCK_LLM": "true"}, clear=False),
+            patch.object(LLMClient, "chat_json", side_effect=_boom),
+        ):
+            result = asyncio.run(viewpoint_miner.mine(self._cluster(), {}, {}))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.recommended_series, "B")
+
+    def test_run_d1_scan_drops_failed_clusters_in_real_mode(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        from agentflow.shared.models import (
+            RawSignal,
+            TopicCluster,
+        )
+
+        good_cluster = self._cluster("good")
+        bad_cluster = self._cluster("bad")
+
+        async def _fake_collect(*_a, **_kw):
+            return [good_cluster.signals[0], bad_cluster.signals[0]]
+
+        async def _fake_cluster(_signals):
+            return [good_cluster, bad_cluster]
+
+        async def _fake_mine(cluster, *_, **__):
+            if cluster.cluster_id == "bad":
+                raise RuntimeError("LLM 500 for bad cluster")
+            from agentflow.shared.models import Hotspot
+            return Hotspot(
+                id="hs_good",
+                topic_one_liner="good topic",
+                source_references=[],
+                mainstream_views=[],
+                overlooked_angles=[],
+                recommended_series="B",
+                series_confidence=0.5,
+                suggested_angles=[],
+                freshness_score=0.5,
+                depth_potential="medium",
+                generated_at=datetime.now(timezone.utc),
+            )
+
+        with (
+            patch.dict(os.environ, {"MOCK_LLM": "false"}, clear=False),
+            patch("agentflow.agent_d1.main._collect_all", side_effect=_fake_collect),
+            patch("agentflow.agent_d1.main.clustering.cluster", side_effect=_fake_cluster),
+            patch("agentflow.agent_d1.main.scoring.select_top", return_value=[good_cluster, bad_cluster]),
+            patch("agentflow.agent_d1.main.viewpoint_miner.mine", side_effect=_fake_mine),
+            patch("agentflow.agent_d1.main.viewpoint_miner.reset_id_counter"),
+            patch("agentflow.agent_d1.main.load_style_profile", return_value={}),
+            patch("agentflow.agent_d1.main.load_sources", return_value={}),
+            patch("agentflow.agent_d1.main._load_content_matrix", return_value={}),
+        ):
+            output = asyncio.run(d1_main.run_d1_scan())
+
+        self.assertEqual(len(output.hotspots), 1)
+        self.assertEqual(output.hotspots[0].id, "hs_good")
+
+
 class HotspotsMockGuardTests(AgentflowHomeTestCase):
     """v1.0.10 — refuse to let mock-tagged signals reach D1 output when
     MOCK_LLM is not explicitly opted into. Belt-and-suspenders against
