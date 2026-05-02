@@ -451,6 +451,59 @@ def _twitter_mock_fingerprints() -> tuple[str, ...]:
     return tuple(t[:30] for t in _MOCK_TEMPLATES if isinstance(t, str) and t)
 
 
+def check_active_profile_thinness() -> CheckResult:
+    """v1.0.18: warn when the active topic profile is too thin to anchor
+    drafts against. Drafts produced from a profile with < 3 product_facts
+    or < 2 perspectives tend to read as generic AI/Web3 commentary
+    (autopost called this "泛谈"). The Gate B specificity_lint is the
+    last-line catch; this probe surfaces the upstream root cause as a
+    non-blocking warning so the operator knows to enrich the profile
+    before more drafts are written.
+    """
+    cr = CheckResult(name="active topic profile depth", env_var=None)
+    cr.present = True
+    try:
+        from agentflow.cli.topic_profile_commands import _read_active_profile_id  # type: ignore
+        from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+        active = _read_active_profile_id()
+        if not active:
+            cr.valid = True
+            cr.message = "no active profile (default unset; not blocking)"
+            return cr
+        data = load_user_topic_profiles() or {}
+        profiles = data.get("profiles") or {} if isinstance(data, dict) else {}
+        profile = profiles.get(active) or {}
+        pa = profile.get("publisher_account") or {}
+        facts = pa.get("product_facts") or []
+        persp = pa.get("perspectives") or []
+        n_facts = len([f for f in facts if str(f or "").strip()]) if isinstance(facts, list) else 0
+        n_persp = len([p for p in persp if str(p or "").strip()]) if isinstance(persp, list) else 0
+    except Exception as err:
+        cr.valid = True
+        cr.message = f"could not read profile: {err}"
+        return cr
+    if n_facts >= 3 and n_persp >= 2:
+        cr.valid = True
+        cr.message = f"{active}: {n_facts} facts / {n_persp} perspectives — OK"
+        return cr
+    cr.valid = False
+    gaps: list[str] = []
+    if n_facts < 3:
+        gaps.append(f"product_facts={n_facts} (need ≥3)")
+    if n_persp < 2:
+        gaps.append(f"perspectives={n_persp} (need ≥2)")
+    cr.message = (
+        f"{active} thin: " + ", ".join(gaps)
+        + " — drafts will sound generic. Run af topic-profile init -i to enrich."
+    )
+    cr.extra = {
+        "profile_id": active,
+        "product_facts_count": n_facts,
+        "perspectives_count": n_persp,
+    }
+    return cr
+
+
 def check_hotspots_mock_leak() -> CheckResult:
     """Scan ``~/.agentflow/hotspots/*.json`` for mock-template fingerprints
     or ``"mock": true`` raw_metadata tags. v1.0.8 fixed twitter's silent-
@@ -499,6 +552,7 @@ def check_hotspots_mock_leak() -> CheckResult:
 def all_checks(*, fresh: bool = False) -> list[CheckResult]:
     return [
         check_mock_mode(),
+        check_active_profile_thinness(),
         check_hotspots_mock_leak(),
         check_telegram(fresh=fresh),
         check_review_chat_id(),

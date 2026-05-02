@@ -113,6 +113,20 @@
 4. **开头不重复**: 3 个开头必须风格明显不同
 5. **大纲论点具体**: 不要 "讨论 X 的影响" 这种抽象描述,必须有具体论点
 6. **字数总和校验**: section_outline 的 estimated_words 总和应约等于 {target_length}
+7. **品牌锚定 (anchoring) — 反"泛谈"硬约束**:
+   - **每个 key_argument 必须能映射回 publisher_account_block 中的至少一项**:
+     `product_facts` / `perspectives` / `default_description` 三选一。
+   - 不允许写"通用 AI 行业观察"。如果 hotspot 跟 publisher 自家产品/事实搭不上边,
+     宁可用 publisher 视角下的 hot take(对应 `perspectives`),也不要把它写成
+     行业泛论。
+   - 标题 / 开头 / 结尾候选,**至少 2 个候选**应直接或间接锚定到 publisher 的
+     `brand` / `product_facts` / `default_description`,体现"这是 publisher
+     在写,不是某个泛 AI 自媒体在写"。
+   - 大纲 section_purpose 至少有 1 节明确说明"这节怎么落到 publisher 自家
+     场景/事实/客户/产品上"。
+   - 自检: 写完骨架后,把每个 key_argument 标注其 anchor source (例如
+     `[anchor: product_facts.3]`),如果有任何一条不能 anchor,改它直到能。
+     anchor 标注**不输出到 JSON**, 仅是你内部的 grounding 检查。
 
 ## 质量对比
 
@@ -130,7 +144,15 @@
 - "讨论 Agent 的发展"
 - "分析各种技术路线"
 
-**好的 key_argument 示例**:
+**好的 key_argument 示例 (具体但漂浮 — 不够好)**:
 - "主流 Agent 框架都假设 LLM 能维持长程上下文,但实测超过 20 轮就漂"
 - "Vibe Coding 的真正价值不是让程序员写代码更快,是让 PM 不需要再给程序员讲需求"
+
+**最好的 key_argument 示例 (具体且锚定 publisher 自家事实/视角)**:
+- "我们做 <publisher.brand> 的实测里,框架超过 20 轮上下文就漂 — 这正是
+  我们后来在 <product_facts 中的某项> 里加状态机的原因"
+- "从 publisher 自己客户的 <perspectives 中的某条> 出发,这次 Hotspot
+  反而印证了我们去年的判断: <product_facts 中的某项>"
+
+注意区别: 第二组在第一组的"具体"基础上多了"具体到我们自家",这是反"泛谈"的关键。
 ```

@@ -416,6 +416,17 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     except Exception as err:  # pragma: no cover — best-effort
         _log.info("language lint skipped for %s: %s", article_id, err)
 
+    # v1.0.18: specificity / anchoring lint. Catches drafts that "sound
+    # specific" (have dates / numbers / product names) but those names
+    # are generic AI/Web3 lingo, not the publisher's own brand assets.
+    try:
+        from agentflow.agent_d2.specificity_lint import detect_specificity_drift
+        spec_warn = detect_specificity_drift(sections, publisher)
+        if spec_warn:
+            self_lines = list(self_lines) + [spec_warn]
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("specificity lint skipped for %s: %s", article_id, err)
+
     opening = (meta.get("opening") or "").strip()
     if not opening and sections:
         opening = (sections[0].get("content_markdown") or "").strip()

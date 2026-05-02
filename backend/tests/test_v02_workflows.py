@@ -2828,6 +2828,132 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class SpecificityLintTests(AgentflowHomeTestCase):
+    """v1.0.18 — anchoring lint catches drafts that "sound specific"
+    (have product names / dates / numbers) but those names are generic
+    AI/Web3 lingo, not the publisher's own brand assets."""
+
+    PROFILE = {
+        "brand": "ChainStream",
+        "default_description": "AI-native crypto infra for real-time on-chain data",
+        "product_facts": [
+            "ChainStream uses Kafka Streams to ingest on-chain events",
+            "MCP execution layer for smart-money agents",
+            "Sub-second latency on Solana mainnet",
+        ],
+        "perspectives": [
+            "Most crypto data infra is batch — we are streaming-first",
+            "Agents need on-chain data as a state machine input, not a chart",
+        ],
+    }
+
+    def test_anchored_draft_passes(self) -> None:
+        from agentflow.agent_d2.specificity_lint import detect_specificity_drift
+        sections = [
+            {"content_markdown": (
+                "ChainStream 跑在 Solana 主网,Kafka Streams 是底层管道. "
+                "我们的 MCP 执行层把 on-chain 数据当作 agent 的输入."
+            )},
+            {"content_markdown": (
+                "smart-money 这种场景对 streaming-first 的诉求最强. "
+                "我们的看法是 agents 把数据当 state machine input 用."
+            )},
+        ]
+        warn = detect_specificity_drift(sections, self.PROFILE)
+        self.assertIsNone(warn)
+
+    def test_generic_draft_flagged(self) -> None:
+        from agentflow.agent_d2.specificity_lint import detect_specificity_drift
+        sections = [
+            {"content_markdown": (
+                "AI Agent 的发展经历了几个阶段. 主流框架在 2024 年后才真正起步."
+                "many startups have explored this space."
+            )},
+            {"content_markdown": (
+                "Web3 数据基础设施面临挑战. 行业还在早期阶段, 没有共识."
+            )},
+            {"content_markdown": (
+                "未来几年的趋势是 agent 与 infra 的融合, 哪家先做出标准化谁就赢."
+            )},
+        ]
+        warn = detect_specificity_drift(sections, self.PROFILE)
+        self.assertIsNotNone(warn)
+        self.assertIn("specificity drift", warn)
+
+    def test_no_publisher_returns_none(self) -> None:
+        from agentflow.agent_d2.specificity_lint import detect_specificity_drift
+        warn = detect_specificity_drift(
+            [{"content_markdown": "any text"}], None,
+        )
+        self.assertIsNone(warn)
+
+    def test_thin_profile_skips_lint(self) -> None:
+        """Profile with < 5 anchor tokens can't reliably lint; doctor
+        probe handles the upstream warn separately."""
+        from agentflow.agent_d2.specificity_lint import detect_specificity_drift
+        warn = detect_specificity_drift(
+            [{"content_markdown": "any text here"}],
+            {"brand": "X"},  # only one short token
+        )
+        self.assertIsNone(warn)
+
+
+class ActiveProfileThinnessTests(AgentflowHomeTestCase):
+    """v1.0.18 — `af doctor` surfaces a thin active profile (< 3 facts
+    or < 2 perspectives) before drafts are written."""
+
+    def test_thin_profile_warns(self) -> None:
+        from agentflow.agent_review import preflight
+        with (
+            patch(
+                "agentflow.cli.topic_profile_commands._read_active_profile_id",
+                return_value="brandX",
+            ),
+            patch(
+                "agentflow.shared.topic_profile_lifecycle.load_user_topic_profiles",
+                return_value={
+                    "profiles": {
+                        "brandX": {
+                            "publisher_account": {
+                                "product_facts": ["only one"],
+                                "perspectives": [],
+                            }
+                        }
+                    }
+                },
+            ),
+        ):
+            cr = preflight.check_active_profile_thinness()
+        self.assertFalse(cr.ok)
+        self.assertIn("product_facts=1", cr.message)
+        self.assertIn("perspectives=0", cr.message)
+
+    def test_rich_profile_passes(self) -> None:
+        from agentflow.agent_review import preflight
+        with (
+            patch(
+                "agentflow.cli.topic_profile_commands._read_active_profile_id",
+                return_value="brandY",
+            ),
+            patch(
+                "agentflow.shared.topic_profile_lifecycle.load_user_topic_profiles",
+                return_value={
+                    "profiles": {
+                        "brandY": {
+                            "publisher_account": {
+                                "product_facts": ["a", "b", "c"],
+                                "perspectives": ["x", "y"],
+                            }
+                        }
+                    }
+                },
+            ),
+        ):
+            cr = preflight.check_active_profile_thinness()
+        self.assertTrue(cr.ok)
+        self.assertIn("3 facts / 2 perspectives", cr.message)
+
+
 class HotspotsScheduleTests(AgentflowHomeTestCase):
     """v1.0.17 — daemon-internal cross-OS hotspots scheduler. Replaces
     the macOS-only `af review-cron-install` for Linux / Docker / sandbox

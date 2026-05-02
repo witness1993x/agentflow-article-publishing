@@ -16,6 +16,62 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.18] — 2026-05-02
+
+Drafts coming out of D2 read as generic AI/Web3 commentary instead of
+publisher-specific content (autopost: "没有很贴合具体的产品相关的文章
+出来,都是泛谈"). Three-layer fix — prompt anchoring + Gate B
+specificity lint + upstream profile-thinness probe.
+
+### Changed (D2 prompts — anchoring as a hard rule)
+
+- `prompts/d2_skeleton_generation.md` — added rule #7 "品牌锚定": every
+  `key_argument` must map back to `publisher_account_block` (`product_facts`
+  / `perspectives` / `default_description`); ≥2 of the title/opening/closing
+  candidates must reference brand assets; outline must include ≥1
+  section explicitly grounding the topic in the publisher's own
+  scenario. Self-check: tag each argument's anchor source internally.
+- `prompts/d2_paragraph_filling.md` — added rule #7 mirroring the
+  skeleton constraint at section level: each paragraph must show
+  ≥1 explicit anchor; "if this sentence works for any other company,
+  rewrite it" heuristic. Quality-comparison block extended with a
+  "specific-but-floating vs specific-and-anchored" example pair.
+
+### Added (Gate B specificity lint)
+
+- `agent_d2/specificity_lint.py::detect_specificity_drift` — counts
+  publisher-anchor token hits (drawn from `brand` / `product_facts` /
+  `perspectives` / `default_description`) per body section; section
+  density below 0.5 → warning appended to Gate B card's self-check.
+  Tokens shorter than 4 chars ignored to avoid matching "AI" / "API"
+  noise. Profile too thin (< 5 anchor tokens) skips this lint and
+  defers to the doctor probe below.
+- `agent_review/triggers.post_gate_b` — wired specificity lint right
+  after the v1.0.16 language lint.
+
+### Added (af doctor — upstream root-cause probe)
+
+- `agent_review/preflight.check_active_profile_thinness` — returns
+  WARN when the active profile has < 3 `product_facts` or < 2
+  `perspectives`. Drafts produced from a thin profile have no anchor
+  vocabulary to ground in, so this surfaces the root cause one level
+  upstream of the Gate B lint. Wired into `all_checks` right after
+  `check_mock_mode`.
+
+### Tests
+
+- `SpecificityLintTests` × 4: anchored draft passes, generic draft
+  flagged, missing publisher returns None, thin profile skips the lint.
+- `ActiveProfileThinnessTests` × 2: thin profile warns with
+  actionable message; rich profile passes with count summary.
+
+### Deferred (not in this batch — different problem class)
+
+Hard fact-grounding linter (numbers / compliance / certifications /
+GDPR / partnerships) — needs schema + ruleset + LLM verifier.
+Specificity lint catches "wrong subject"; fact linter catches "wrong
+claim about subject". Different design, different release.
+
 ## [1.0.17] — 2026-05-02
 
 Twice-daily hotspots scan never fired on non-macOS deployments because
