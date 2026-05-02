@@ -2828,6 +2828,99 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class HotspotsScheduleTests(AgentflowHomeTestCase):
+    """v1.0.17 — daemon-internal cross-OS hotspots scheduler. Replaces
+    the macOS-only `af review-cron-install` for Linux / Docker / sandbox
+    deployments where launchctl was a no-op."""
+
+    def test_parse_schedule_drops_bad_slots(self) -> None:
+        from agentflow.agent_review import schedule
+        self.assertEqual(
+            schedule._parse_schedule("09:00, 18:00 ,bad,25:00,18:60"),
+            [(9, 0), (18, 0)],
+        )
+        self.assertEqual(schedule._parse_schedule(""), [])
+        self.assertEqual(schedule._parse_schedule(None), [])
+
+    def test_slot_due_only_after_slot_today_unfired(self) -> None:
+        from agentflow.agent_review import schedule
+        slot = (9, 0)
+        # 09:00:30 same day → due (within 90s window).
+        now = datetime(2026, 5, 2, 9, 0, 30, tzinfo=timezone.utc)
+        self.assertTrue(schedule._slot_due(slot, now, last_fired=None))
+        # 08:59 → not yet due.
+        early = datetime(2026, 5, 2, 8, 59, tzinfo=timezone.utc)
+        self.assertFalse(schedule._slot_due(slot, early, last_fired=None))
+        # 09:30 → outside the 90s window; missed for the day.
+        late = datetime(2026, 5, 2, 9, 30, tzinfo=timezone.utc)
+        self.assertFalse(schedule._slot_due(slot, late, last_fired=None))
+        # 09:00:30 but already fired today → not due.
+        fired_today = datetime(2026, 5, 2, 9, 0, 5, tzinfo=timezone.utc)
+        self.assertFalse(schedule._slot_due(slot, now, last_fired=fired_today))
+        # 09:00:30 today, last fire was yesterday → due.
+        fired_yesterday = datetime(2026, 5, 1, 9, 0, 5, tzinfo=timezone.utc)
+        self.assertTrue(schedule._slot_due(slot, now, last_fired=fired_yesterday))
+
+    def test_due_slots_returns_only_unfired(self) -> None:
+        from agentflow.agent_review import schedule
+        now = datetime(2026, 5, 2, 9, 0, 30, tzinfo=timezone.utc)
+        state = {"18:00": "2026-05-01T18:00:10+00:00"}
+        due = schedule.due_slots(
+            schedule=[(9, 0), (18, 0)], now=now, state=state,
+        )
+        self.assertEqual(due, [(9, 0)])
+
+    def test_fire_due_calls_spawn_and_stamps_state(self) -> None:
+        from agentflow.agent_review import schedule
+        spawn_calls: list[int] = []
+
+        def _fake_spawn(top_k: int) -> None:
+            spawn_calls.append(top_k)
+
+        # Force the wall-clock-driven helpers to see our test slot as due.
+        slot = (datetime.now().astimezone().hour,
+                datetime.now().astimezone().minute)
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
+                "AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K": "5",
+            },
+            clear=False,
+        ):
+            fired = schedule.fire_due(_fake_spawn)
+        self.assertEqual(len(spawn_calls), 1)
+        self.assertEqual(spawn_calls[0], 5)
+        self.assertEqual(len(fired), 1)
+        # Re-firing in the same window should be idempotent (state stamps).
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
+                "AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K": "5",
+            },
+            clear=False,
+        ):
+            fired_again = schedule.fire_due(_fake_spawn)
+        self.assertEqual(len(spawn_calls), 1, "should not re-fire same slot")
+        self.assertEqual(fired_again, [])
+
+    def test_status_disabled_when_env_empty(self) -> None:
+        from agentflow.agent_review import schedule
+        with patch.dict(os.environ, {"AGENTFLOW_HOTSPOTS_SCHEDULE": ""}, clear=False):
+            snap = schedule.status()
+        self.assertFalse(snap["enabled"])
+        self.assertEqual(snap["slots"], [])
+
+    def test_cron_install_refuses_on_non_darwin(self) -> None:
+        from click.testing import CliRunner
+        from agentflow.cli.commands import cli
+        with patch("platform.system", return_value="Linux"):
+            res = CliRunner().invoke(cli, ["review-cron-install"])
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("AGENTFLOW_HOTSPOTS_SCHEDULE", res.output)
+
+
 class V016BatchTests(AgentflowHomeTestCase):
     """v1.0.16 — five operator-feedback fixes batched: token-aware
     preflight cache (#1a), image compression for sendPhoto (#5), stale

@@ -16,6 +16,47 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.17] — 2026-05-02
+
+Twice-daily hotspots scan never fired on non-macOS deployments because
+`af review-cron-install` only knew how to write a launchd plist + run
+`launchctl`. Linux / Docker / sandbox installs (including the autopost
+OpenClaw box) silently had no scheduling at all. Replaced with a
+daemon-internal scheduler that requires no OS-level cron.
+
+### Added
+
+- `agent_review/schedule.py` — pure-function time-slot scheduler.
+  `due_slots(...)` is side-effect-free for testability;
+  `fire_due(spawn)` is the daemon hook; state persisted at
+  `~/.agentflow/review/scheduled_state.json` per slot. Misses by more
+  than 90s on a given day are skipped (no backfill after long
+  downtime).
+- `daemon.run()` housekeeping tick now calls
+  `schedule.fire_due(_spawn_hotspots)` alongside `_scan_timeouts` /
+  `_drain_deferred_reposts`. Cross-OS, no systemd / launchd / cron
+  required.
+- `.env.template` — `AGENTFLOW_HOTSPOTS_SCHEDULE="09:00,18:00"` (empty
+  by default = scheduler off) and `AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K=3`.
+- `af review-schedule-status` CLI — shows the parsed schedule, last
+  fire per slot, next fire per slot. JSON mode for agents.
+
+### Fixed
+
+- `af review-cron-install` now refuses on non-Darwin with a clear
+  pointer to `AGENTFLOW_HOTSPOTS_SCHEDULE` instead of crashing with a
+  `launchctl: command not found` traceback the operator can't act on.
+
+### Tests
+
+- `HotspotsScheduleTests` × 6: `_parse_schedule` drops bad slots;
+  `_slot_due` honours the 90s window + already-fired-today guard +
+  fired-yesterday-still-due; `due_slots` returns only unfired;
+  `fire_due` calls spawn once, stamps state, and is idempotent on
+  re-run within the same window; `status` reports disabled when env
+  is empty; `review-cron-install` refuses on non-Darwin with a
+  pointer to the env-driven path.
+
 ## [1.0.16] — 2026-05-01
 
 Five fixes from a real production-experience report on the autopost

@@ -5090,6 +5090,20 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
                     _log.info("drained %d deferred reposts", fired)
             except Exception as err:  # pragma: no cover
                 _log.warning("deferred repost drain failed: %s", err)
+            # v1.0.17: cross-OS scheduled hotspots. Replaces the macOS-only
+            # launchctl path that left Linux deployments with no working
+            # twice-daily scan. AGENTFLOW_HOTSPOTS_SCHEDULE="09:00,18:00"
+            # (or any HH:MM list) opts in.
+            try:
+                from agentflow.agent_review import schedule as _schedule
+                fired_slots = _schedule.fire_due(_spawn_hotspots)
+                if fired_slots:
+                    _log.info(
+                        "scheduled hotspots fired for slots: %s",
+                        ", ".join(fired_slots),
+                    )
+            except Exception as err:  # pragma: no cover
+                _log.warning("scheduled hotspots scan failed: %s", err)
             last_timeout_scan = now
 
         if not updates:

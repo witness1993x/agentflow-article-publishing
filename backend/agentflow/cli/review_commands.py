@@ -594,7 +594,12 @@ _LAUNCHD_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 
 @cli.command(
     "review-cron-install",
-    help="Install a launchd plist that runs `af hotspots` at fixed times daily.",
+    help=(
+        "Install a launchd plist that runs `af hotspots` at fixed times "
+        "daily. macOS-only. For Linux/Docker/sandbox deployments, set the "
+        "AGENTFLOW_HOTSPOTS_SCHEDULE env var instead — the daemon will "
+        "fire hotspots itself with no OS-level cron required."
+    ),
 )
 @click.option(
     "--times",
@@ -604,8 +609,20 @@ _LAUNCHD_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 )
 def review_cron_install_cmd(times: str) -> None:
     import os as _os
+    import platform as _platform
     import subprocess
     from pathlib import Path
+
+    if _platform.system() != "Darwin":
+        raise click.ClickException(
+            "review-cron-install is macOS-only (writes a launchd plist).\n"
+            "On Linux / Docker / sandbox: set AGENTFLOW_HOTSPOTS_SCHEDULE in\n"
+            "your .env to the same comma-separated HH:MM list (e.g.\n"
+            "AGENTFLOW_HOTSPOTS_SCHEDULE=\"09:00,18:00\") and restart the\n"
+            "review daemon. The daemon's internal scheduler fires hotspots\n"
+            "with no systemd / cron required.\n"
+            "Status: af review-schedule-status"
+        )
 
     parts = [t.strip() for t in (times or "").split(",") if t.strip()]
     intervals: list[tuple[int, int]] = []
@@ -697,6 +714,36 @@ def review_cron_status_cmd() -> None:
         click.echo(res.stdout.strip())
     else:
         click.echo("status:   not loaded")
+
+
+@cli.command(
+    "review-schedule-status",
+    help=(
+        "Show daemon-internal hotspots schedule (cross-OS). Driven by the "
+        "AGENTFLOW_HOTSPOTS_SCHEDULE env var; runs inside the review "
+        "daemon's housekeeping tick — no systemd / launchd needed."
+    ),
+)
+@click.option("--as-json", is_flag=True, help="Emit machine-readable JSON.")
+def review_schedule_status_cmd(as_json: bool) -> None:
+    import json as _json
+    from agentflow.agent_review import schedule as _schedule
+
+    snap = _schedule.status()
+    if as_json:
+        click.echo(_json.dumps(snap, ensure_ascii=False, indent=2))
+        return
+    if not snap["enabled"]:
+        click.echo("schedule: DISABLED (AGENTFLOW_HOTSPOTS_SCHEDULE empty)")
+        click.echo("set AGENTFLOW_HOTSPOTS_SCHEDULE=\"09:00,18:00\" in .env to enable")
+        return
+    click.echo(f"schedule: {snap['raw']}  (top_k={snap['top_k']})")
+    click.echo(f"now:      {snap['now']}")
+    for row in snap["slots"]:
+        last = row["last_fired_at"] or "(never)"
+        click.echo(
+            f"  {row['slot']}  last={last}  next={row['next_fire_at']}"
+        )
 
 
 @cli.command(
