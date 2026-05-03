@@ -53,6 +53,59 @@ _BODY_HARD_CAP_BYTES = 19_000
 _DEFER_DODGE_SECONDS = 60     # how close to HH:00 / HH:30 counts as "rate-limit zone"
 _DEFER_TARGET_OFFSET = 90     # how long to wait when in the zone
 
+# v1.0.20 — env-driven defaults for the per-card text-trim caps. Operators
+# tune these without code changes when stderr is unusually verbose or when
+# they want every reason inline.
+_DEFAULT_REASON_MAXLEN = 80
+_DEFAULT_STDERR_MAXLEN = 500
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _reason_maxlen() -> int:
+    return max(20, _int_env("LARK_WEBHOOK_REASON_MAXLEN", _DEFAULT_REASON_MAXLEN))
+
+
+def _stderr_maxlen() -> int:
+    return max(80, _int_env("LARK_WEBHOOK_STDERR_MAXLEN", _DEFAULT_STDERR_MAXLEN))
+
+
+def _brand_prefix() -> str:
+    raw = (os.environ.get("LARK_WEBHOOK_BRAND_PREFIX") or "").strip()
+    if not raw:
+        return ""
+    # Normalise "[ChainStream]" / "ChainStream" / "[ChainStream] " all to
+    # "[ChainStream] " (with one trailing space) so titles read consistently.
+    inner = raw.strip("[] ")
+    return f"[{inner}] " if inner else ""
+
+
+def _tg_bot_url() -> str:
+    return (os.environ.get("LARK_WEBHOOK_TG_BOT_URL") or "").strip()
+
+
+def _dashboard_url(article_id: str) -> str:
+    """Render the dashboard URL for an article when a template is configured.
+
+    Template form: ``https://dash.example.com/article/{article_id}``.
+    Returns "" when no template / format error.
+    """
+    tmpl = (os.environ.get("LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE") or "").strip()
+    if not tmpl or not article_id:
+        return ""
+    try:
+        return tmpl.format(article_id=article_id)
+    except (KeyError, IndexError, ValueError):
+        return ""
+
 # Single-process serialization so back-to-back fan-outs don't blow the
 # documented 5-per-second cap. Lark allows 100/min, 5/s; we keep a soft
 # floor of 220ms between calls in this process.
@@ -206,7 +259,10 @@ def send_card(
     ``url_actions`` is a list of (label, url) tuples. Lark Custom Bot
     only supports URL buttons — no callback. When the operator clicks,
     the URL opens in their default browser. The button labels follow
-    Lark's `lark_md` convention so emoji renders cleanly.
+    Lark's `lark_md` convention so emoji renders cleanly. Empty / None
+    URL entries are dropped silently so callers don't have to gate.
+
+    v1.0.20: prepends ``LARK_WEBHOOK_BRAND_PREFIX`` to the title when set.
     """
     if not _is_configured():
         return
@@ -217,7 +273,10 @@ def send_card(
             "text": {"content": body_md, "tag": "lark_md"},
         }
     ]
-    if url_actions:
+    cleaned_actions = [
+        (label, url) for label, url in (url_actions or []) if label and url
+    ]
+    if cleaned_actions:
         elements.append({
             "tag": "action",
             "actions": [
@@ -227,8 +286,7 @@ def send_card(
                     "url": url,
                     "type": "default",
                 }
-                for label, url in url_actions
-                if url
+                for label, url in cleaned_actions
             ],
         })
 
@@ -236,7 +294,10 @@ def send_card(
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"content": title, "tag": "plain_text"},
+                "title": {
+                    "content": _brand_prefix() + title,
+                    "tag": "plain_text",
+                },
                 "template": accent,
             },
             "elements": elements,
@@ -268,6 +329,7 @@ def notify_dispatch_result(
     else:
         accent = "green"
         status = f"全部 {len(succeeded)} 平台成功"
+    reason_cap = _reason_maxlen()
     body_lines = [
         f"**{title}**",
         f"`{article_id}`",
@@ -283,11 +345,18 @@ def notify_dispatch_result(
         body_lines.append("")
         body_lines.append("**未发布**:")
         for plat, reason in failed:
-            body_lines.append(f"- ❌ {plat} — {reason[:80]}")
+            r = reason if len(reason) <= reason_cap else reason[: reason_cap - 1] + "…"
+            body_lines.append(f"- ❌ {plat} — {r}")
+    actions: list[tuple[str, str]] = []
+    if failed:
+        # Only nudge to TG when there's something the operator must act on.
+        actions.append(("🔁 去 TG 重试 / 处理", _tg_bot_url()))
+    actions.append(("📊 查看 draft", _dashboard_url(article_id)))
     send_card(
         title="📤 AgentFlow · 发布结果",
         body_md="\n".join(body_lines),
         accent=accent,
+        url_actions=actions,
     )
 
 
@@ -306,6 +375,10 @@ def notify_publish_ready(*, article_id: str, title: str) -> None:
         title="📌 AgentFlow · 待 publish-mark",
         body_md=body,
         accent="blue",
+        url_actions=[
+            ("📌 去 TG 标记", _tg_bot_url()),
+            ("📊 查看 draft", _dashboard_url(article_id)),
+        ],
     )
 
 
@@ -316,6 +389,7 @@ def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
     if scan_count == 0:
         body = "今日扫描完成: 暂无可写热点 (上游空 / filter 过窄 / twitter quota)."
         accent = "grey"
+        actions: list[tuple[str, str]] = []
     else:
         lines = [f"扫到 {scan_count} 个热点, top {len(top_titles)}:", ""]
         for i, t in enumerate(top_titles, 1):
@@ -324,10 +398,13 @@ def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
         lines.append("Gate A 卡已推送到 Telegram 待审核.")
         body = "\n".join(lines)
         accent = "green"
+        # Only show "去选题" when there's actually something to pick.
+        actions = [("📝 去 TG 选题", _tg_bot_url())]
     send_card(
         title="🔎 AgentFlow · 今日热点扫描",
         body_md=body,
         accent=accent,
+        url_actions=actions,
     )
 
 
@@ -337,12 +414,17 @@ def notify_spawn_failure(*, label: str, target_id: str, error_tail: str) -> None
     triggers triage."""
     if not _is_configured():
         return
+    tail = error_tail[-_stderr_maxlen():] if error_tail else "(no stderr)"
     body = (
         f"`{label}` 失败 · target=`{target_id}`\n\n"
-        f"```\n{error_tail[-500:]}\n```"
+        f"```\n{tail}\n```"
     )
     send_card(
         title="❌ AgentFlow · 子任务失败",
         body_md=body,
         accent="red",
+        url_actions=[
+            ("🔧 去 TG 看详情", _tg_bot_url()),
+            ("📊 查看 draft", _dashboard_url(target_id)),
+        ],
     )

@@ -2944,6 +2944,141 @@ class LarkWebhookTests(AgentflowHomeTestCase):
             datetime(2026, 5, 3, 10, 15, 0)
         ))
 
+    # v1.0.20 polish ---------------------------------------------------
+
+    def _capture_lark_payloads(self, fn) -> list[dict[str, Any]]:
+        """Capture the JSON body that lark_webhook would POST."""
+        captured: list[dict[str, Any]] = []
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = '{"code":0}'
+            def json(self): return {"code": 0}
+
+        def _fake(url, json=None, timeout=10, **_):
+            captured.append(json)
+            return _Resp()
+
+        with patch("requests.post", side_effect=_fake):
+            fn()
+        return captured
+
+    def test_brand_prefix_prepended_to_title(self) -> None:
+        from agentflow.shared import lark_webhook
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://example.com/hook/abc",
+                "LARK_WEBHOOK_NO_DEFER": "true",
+                "LARK_WEBHOOK_BRAND_PREFIX": "[ChainStream]",
+                "LARK_WEBHOOK_KEYWORDS": "",
+                "LARK_WEBHOOK_SECRET": "",
+                "LARK_WEBHOOK_TG_BOT_URL": "",
+                "LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE": "",
+            },
+            clear=False,
+        ):
+            payloads = self._capture_lark_payloads(
+                lambda: lark_webhook.send_card(title="🔎 hi", body_md="x")
+            )
+        self.assertEqual(len(payloads), 1)
+        title = payloads[0]["card"]["header"]["title"]["content"]
+        self.assertTrue(title.startswith("[ChainStream] 🔎 hi"))
+
+    def test_actionable_cards_include_tg_button(self) -> None:
+        from agentflow.shared import lark_webhook
+        env = {
+            "LARK_WEBHOOK_URL": "https://example.com/hook/abc",
+            "LARK_WEBHOOK_NO_DEFER": "true",
+            "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/CSPostContentAuditBot",
+            "LARK_WEBHOOK_BRAND_PREFIX": "",
+            "LARK_WEBHOOK_KEYWORDS": "",
+            "LARK_WEBHOOK_SECRET": "",
+            "LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            # publish_ready → must show "去 TG 标记"
+            p1 = self._capture_lark_payloads(lambda: lark_webhook.notify_publish_ready(
+                article_id="aid1", title="t",
+            ))
+            # dispatch with failures → must show "去 TG 重试"
+            p2 = self._capture_lark_payloads(lambda: lark_webhook.notify_dispatch_result(
+                article_id="aid1", title="t",
+                succeeded=["medium"],
+                failed=[("twitter_thread", "rate limit")],
+            ))
+            # dispatch full success → no TG button needed (informational)
+            p3 = self._capture_lark_payloads(lambda: lark_webhook.notify_dispatch_result(
+                article_id="aid1", title="t",
+                succeeded=["medium", "ghost_wordpress"],
+                failed=[],
+            ))
+
+        def _button_urls(payload):
+            actions: list[str] = []
+            for el in payload["card"]["elements"]:
+                if el.get("tag") == "action":
+                    for a in el["actions"]:
+                        actions.append(a["url"])
+            return actions
+
+        self.assertIn("https://t.me/CSPostContentAuditBot", _button_urls(p1[0]))
+        self.assertIn("https://t.me/CSPostContentAuditBot", _button_urls(p2[0]))
+        self.assertNotIn(
+            "https://t.me/CSPostContentAuditBot", _button_urls(p3[0]),
+            "full-success card shouldn't show 'go to TG' button",
+        )
+
+    def test_dashboard_url_template_renders(self) -> None:
+        from agentflow.shared import lark_webhook
+        env = {
+            "LARK_WEBHOOK_URL": "https://example.com/hook/abc",
+            "LARK_WEBHOOK_NO_DEFER": "true",
+            "LARK_WEBHOOK_TG_BOT_URL": "",
+            "LARK_WEBHOOK_BRAND_PREFIX": "",
+            "LARK_WEBHOOK_KEYWORDS": "",
+            "LARK_WEBHOOK_SECRET": "",
+            "LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE":
+                "https://dash.example.com/article/{article_id}",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            payloads = self._capture_lark_payloads(
+                lambda: lark_webhook.notify_publish_ready(
+                    article_id="hs_001", title="t",
+                )
+            )
+        urls: list[str] = []
+        for el in payloads[0]["card"]["elements"]:
+            if el.get("tag") == "action":
+                for a in el["actions"]:
+                    urls.append(a["url"])
+        self.assertIn("https://dash.example.com/article/hs_001", urls)
+
+    def test_reason_maxlen_caps_long_reasons(self) -> None:
+        from agentflow.shared import lark_webhook
+        env = {
+            "LARK_WEBHOOK_URL": "https://example.com/hook/abc",
+            "LARK_WEBHOOK_NO_DEFER": "true",
+            "LARK_WEBHOOK_REASON_MAXLEN": "30",
+            "LARK_WEBHOOK_TG_BOT_URL": "",
+            "LARK_WEBHOOK_BRAND_PREFIX": "",
+            "LARK_WEBHOOK_KEYWORDS": "",
+            "LARK_WEBHOOK_SECRET": "",
+            "LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE": "",
+        }
+        long_reason = "x" * 200
+        with patch.dict(os.environ, env, clear=False):
+            payloads = self._capture_lark_payloads(
+                lambda: lark_webhook.notify_dispatch_result(
+                    article_id="aid", title="t", succeeded=[],
+                    failed=[("plat_x", long_reason)],
+                )
+            )
+        body = payloads[0]["card"]["elements"][0]["text"]["content"]
+        self.assertNotIn("x" * 31, body)
+        self.assertIn("…", body)
+
 
 class SpecificityLintTests(AgentflowHomeTestCase):
     """v1.0.18 — anchoring lint catches drafts that "sound specific"

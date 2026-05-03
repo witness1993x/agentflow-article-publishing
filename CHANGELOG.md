@@ -16,6 +16,46 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.20] — 2026-05-03
+
+Lark card polish — actionable cards now have a TG-bot deep-link button,
+brand prefix in titles, optional dashboard URL template, and tunable
+trim caps. Same v1.0.19 push-only fan-out semantics.
+
+### Added (env-driven, all optional)
+
+- `LARK_WEBHOOK_TG_BOT_URL` — `https://t.me/<bot_username>` deep link.
+  When set, actionable cards get a button linking back to TG so the
+  operator jumps straight to where the real action happens. Cards that
+  add the button: `notify_publish_ready` (📌 去 TG 标记), `notify_dispatch_result`
+  with failures (🔁 去 TG 重试 / 处理), `notify_spawn_failure`
+  (🔧 去 TG 看详情), `notify_hotspots_digest` with hotspots
+  (📝 去 TG 选题). Full-success dispatch and zero-hotspot digest stay
+  button-free (informational only).
+- `LARK_WEBHOOK_BRAND_PREFIX` — prepended to every card title (e.g.
+  `[ChainStream] 🔎 AgentFlow · 今日热点扫描`). Useful when one Lark
+  group hosts multiple AgentFlow instances. Brackets normalized.
+- `LARK_WEBHOOK_DASHBOARD_URL_TEMPLATE` — `https://dash.example.com/article/{article_id}`.
+  When set, every actionable card gets a `📊 查看 draft` button.
+- `LARK_WEBHOOK_REASON_MAXLEN` — failure-reason cap on dispatch cards
+  (default 80, min 20). Truncated values get a `…` suffix.
+- `LARK_WEBHOOK_STDERR_MAXLEN` — stderr-tail cap on spawn-failure cards
+  (default 500, min 80).
+
+### Changed
+
+- `lark_webhook.send_card` — `url_actions` now silently drops entries
+  with empty/missing label or URL so callers don't have to gate
+  per-button. The dashboard / TG buttons exploit this: pass them
+  unconditionally; absent env config = no button rendered.
+
+### Tests
+
+- 4 new in `LarkWebhookTests`: brand prefix prepends correctly;
+  actionable cards show TG button while informational cards do not;
+  dashboard URL template renders with article_id; REASON_MAXLEN caps
+  long reasons with ellipsis. 10 total Lark cases.
+
 ## [1.0.19] — 2026-05-03
 
 Lark Custom Bot fan-out (path A in the Lark integration plan). HITL
