@@ -16,6 +16,73 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.21] — 2026-05-03
+
+Real-deploy report: drafts coming out look "anchored" (every paragraph
+mentions publisher tokens like `Kafka Streams` / `MCP` / `<brand>`)
+but the underlying topic is **completely off-domain** (a TCG卡牌
+customs failure case, hotspot that has no business reaching an
+on-chain data infra publisher). v1.0.18 specificity_lint passed — it
+asks "does the body MENTION publisher tokens?", which gets gamed by
+forced analogies. The actual missing question is: "is the SOURCE
+material in our domain at all?"
+
+Two-layer fix:
+
+### Added — D1 hard topic-fit gate (process layer)
+
+- `agent_review.triggers.post_gate_a` now reads
+  `AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD` (env, default 0 = disabled,
+  recommended prod 0.05). When > 0, hotspots whose Jaccard fit score
+  against publisher tokens is below threshold are DROPPED before
+  composite ranking, not just down-weighted. If the gate eliminates
+  every candidate, post_gate_a returns None with a warning rather
+  than emitting an empty Gate A card.
+- v1.0.20's `AGENTFLOW_FIT_WEIGHT` (soft re-rank) still applies on
+  the survivors. The hard gate is the kill-switch; fit_weight is the
+  preference dial.
+- Stops the LLM from getting an off-topic hotspot as input — which
+  was the actual root cause of the forced-analogy article. Previously
+  `--filter ".*"` kill-switched the soft fit gate by feeding broad
+  signals; the hard threshold survives that.
+
+### Added — `agent_d2/topic_spine_lint` (defense in depth)
+
+- New module. At Gate B post, computes Jaccard overlap between
+  - **A** = tokens from `metadata.topic_one_liner` +
+    `metadata.source_references[*].text_snippet` (the upstream
+    SOURCE material the article was built from)
+  - **B** = tokens from `publisher.product_facts` +
+    `perspectives` + `keyword_groups` (the publisher's DOMAIN scope)
+- < 0.02 (default) → warning appended to the Gate B card's self-check:
+  `⚠ topic-spine misalignment: hotspot 主题与 publisher 领域脱钩 …`
+  Operator decides reject vs. proceed; lint does NOT block the card.
+- Skips silently when either side has < 5 tokens (can't lint reliably).
+- Different signal from `specificity_lint` — that catches "wrong
+  brand voice"; this catches "wrong subject domain".
+
+### Changed
+
+- `cli/commands.py::write` (af write) — now stamps
+  `metadata.topic_one_liner` and `metadata.source_references` from
+  the chosen hotspot record so the spine_lint at Gate B has data to
+  work with. Without this, the lint silently no-ops.
+
+### Tests
+
+- `TopicSpineLintTests` × 4: aligned topic passes; the actual TCG
+  customs hotspot from the autopost report flagged with the new
+  warning; thin spine skipped; thin publisher skipped.
+- `TopicFitHardGateTests` × 2: threshold > 0 drops off-domain
+  hotspot before Gate A even ranks; threshold 0 preserves v1.0.20
+  legacy behavior (off-domain still surfaces, just downranked).
+
+### Recommended config (chainstream-service overlay 1.0.1+)
+
+```env
+AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=0.05
+```
+
 ## [1.0.20] — 2026-05-03
 
 Lark card polish — actionable cards now have a TG-bot deep-link button,

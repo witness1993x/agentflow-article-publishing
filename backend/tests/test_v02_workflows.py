@@ -2828,6 +2828,196 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class TopicSpineLintTests(AgentflowHomeTestCase):
+    """v1.0.21 — catches drafts where the LLM forced-grafts publisher
+    tokens onto an off-topic hotspot (e.g. TCG customs article spun
+    around an on-chain data infra publisher). Different signal from
+    specificity_lint: spine_lint compares SOURCE material vs publisher
+    DOMAIN, not draft body vs publisher BRAND."""
+
+    PUBLISHER = {
+        "brand": "ChainStream",
+        "default_description": "AI-native crypto infra real-time on-chain data",
+        "product_facts": [
+            "ChainStream uses Kafka Streams to ingest on-chain events",
+            "MCP execution layer for smart-money agents",
+            "Sub-second latency on Solana mainnet",
+        ],
+        "perspectives": [
+            "Most crypto data infra is batch — we are streaming-first",
+            "Agents need on-chain data as state machine input, not a chart",
+        ],
+    }
+
+    def test_aligned_topic_passes(self) -> None:
+        from agentflow.agent_d2.topic_spine_lint import detect_topic_spine_misalignment
+        meta = {
+            "topic_one_liner": "Solana 上 smart-money agent 实时套利",
+            "source_references": [
+                {"text_snippet": "Kafka-based on-chain data infra outage cascading into agent execution"},
+                {"text_snippet": "Sub-second on-chain event ingestion benchmark vs batch ETL"},
+            ],
+        }
+        warn = detect_topic_spine_misalignment(meta, self.PUBLISHER)
+        self.assertIsNone(warn)
+
+    def test_off_topic_TCG_customs_flagged(self) -> None:
+        """The exact failure mode autopost reported: customs article
+        with publisher tokens grafted in via D2 prompt anchoring."""
+        from agentflow.agent_d2.topic_spine_lint import detect_topic_spine_misalignment
+        meta = {
+            "topic_one_liner": "保税仓省税 20% 不稀奇,清关单证错一次全赔进去",
+            "source_references": [
+                {"text_snippet": "鹿特丹港海关锁柜 TCG 卡牌 滞港费 报关单证 HS 编码 原产地证 进口增值税"},
+                {"text_snippet": "荷兰 AEO 认证 跨境电商 保税仓 转口报关 滞纳金 销毁费用"},
+                {"text_snippet": "供应商发票 字段截断 ERP 导出 物流单 Bill of Lading 货代"},
+            ],
+        }
+        warn = detect_topic_spine_misalignment(meta, self.PUBLISHER)
+        self.assertIsNotNone(warn)
+        self.assertIn("topic-spine misalignment", warn)
+        self.assertIn("强行嫁接", warn)
+
+    def test_thin_spine_skipped(self) -> None:
+        from agentflow.agent_d2.topic_spine_lint import detect_topic_spine_misalignment
+        meta = {"topic_one_liner": "x", "source_references": []}
+        self.assertIsNone(detect_topic_spine_misalignment(meta, self.PUBLISHER))
+
+    def test_thin_publisher_skipped(self) -> None:
+        from agentflow.agent_d2.topic_spine_lint import detect_topic_spine_misalignment
+        meta = {
+            "topic_one_liner": "long topic line that has plenty of tokens",
+            "source_references": [
+                {"text_snippet": "fully fledged source snippet about something"},
+            ],
+        }
+        self.assertIsNone(detect_topic_spine_misalignment(
+            meta, {"brand": "x"},  # too thin to lint
+        ))
+
+
+class TopicFitHardGateTests(AgentflowHomeTestCase):
+    """v1.0.21 — `AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD` gates D1 hotspots
+    before D2 reads them, instead of just down-ranking via composite
+    score. Default 0 keeps v1.0.20 behavior; setting > 0 enables a hard
+    drop for prod brand discipline."""
+
+    def test_hard_threshold_drops_low_fit_hotspots(self) -> None:
+        from agentflow.agent_review import triggers
+        from agentflow.shared.bootstrap import agentflow_home
+        # Stub TG so post_gate_a doesn't try to send. We only care about
+        # the filter behavior + return value.
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD": "0.10",
+                    "AGENTFLOW_FIT_WEIGHT": "0.6",
+                    "TELEGRAM_BOT_TOKEN": "fake",
+                    "TELEGRAM_REVIEW_CHAT_ID": "456",
+                },
+                clear=False,
+            ),
+            patch(
+                "agentflow.agent_review.triggers.tg_client.send_message",
+                return_value={"message_id": 99},
+            ),
+            patch(
+                "agentflow.agent_review.triggers._daemon.get_review_chat_id",
+                return_value=456,
+            ),
+            patch(
+                "agentflow.agent_review.triggers._sid.find_active",
+                return_value=None,
+            ),
+        ):
+            # Two hotspots — one aligned, one off-domain.
+            aligned = {
+                "id": "h1",
+                "topic_one_liner": "Kafka Streams on-chain event ingestion",
+                "source_references": [{"text_snippet": "Solana smart money MCP"}],
+                "freshness_score": 0.5,
+            }
+            off_domain = {
+                "id": "h2",
+                "topic_one_liner": "TCG 卡牌 荷兰保税仓 报关单证错一位",
+                "source_references": [{"text_snippet": "鹿特丹港 滞港费 HS 编码"}],
+                "freshness_score": 0.9,
+            }
+            publisher = {
+                "brand": "ChainStream",
+                "product_facts": [
+                    "ChainStream uses Kafka Streams to ingest on-chain events",
+                    "MCP for smart-money agents",
+                    "Sub-second latency on Solana",
+                ],
+                "default_tags": ["onchain", "agent", "infra"],
+            }
+            # Resolve the "from agentflow.agent_d1.topic_fit import score_fit"
+            # naturally; no mock — we want the real score.
+            (agentflow_home() / "hotspots").mkdir(parents=True, exist_ok=True)
+            (agentflow_home() / "hotspots" / "today.json").write_text("{}", encoding="utf-8")
+            res = triggers.post_gate_a(
+                hotspots=[aligned, off_domain],
+                batch_path=str(agentflow_home() / "hotspots" / "today.json"),
+                publisher_brand="ChainStream",
+                top_k=3,
+                publisher_account=publisher,
+            )
+        self.assertIsNotNone(res)
+        # Off-domain hotspot should have been dropped pre-rank.
+        self.assertEqual(res.get("candidate_count"), 1)
+
+    def test_hard_threshold_zero_preserves_legacy_behavior(self) -> None:
+        from agentflow.agent_review import triggers
+        from agentflow.shared.bootstrap import agentflow_home
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD": "0",
+                    "TELEGRAM_BOT_TOKEN": "fake",
+                    "TELEGRAM_REVIEW_CHAT_ID": "456",
+                },
+                clear=False,
+            ),
+            patch(
+                "agentflow.agent_review.triggers.tg_client.send_message",
+                return_value={"message_id": 99},
+            ),
+            patch(
+                "agentflow.agent_review.triggers._daemon.get_review_chat_id",
+                return_value=456,
+            ),
+            patch(
+                "agentflow.agent_review.triggers._sid.find_active",
+                return_value=None,
+            ),
+        ):
+            (agentflow_home() / "hotspots").mkdir(parents=True, exist_ok=True)
+            batch = agentflow_home() / "hotspots" / "today.json"
+            batch.write_text("{}", encoding="utf-8")
+            off_domain = {
+                "id": "h2",
+                "topic_one_liner": "TCG 保税仓 报关",
+                "source_references": [{"text_snippet": "鹿特丹"}],
+                "freshness_score": 0.9,
+            }
+            publisher = {
+                "brand": "ChainStream",
+                "product_facts": ["Kafka", "MCP", "Solana"],
+            }
+            res = triggers.post_gate_a(
+                hotspots=[off_domain], batch_path=str(batch),
+                publisher_brand="ChainStream", top_k=3,
+                publisher_account=publisher,
+            )
+        self.assertIsNotNone(res)
+        # With hard threshold 0, off-domain hotspot still surfaces (just
+        # downranked via composite). Backward compat preserved.
+        self.assertEqual(res.get("candidate_count"), 1)
+
+
 class LarkWebhookTests(AgentflowHomeTestCase):
     """v1.0.19 path A — outbound Lark Custom Bot fan-out. HITL stays
     on Telegram; Lark gets digest / dispatch / publish-ready / spawn

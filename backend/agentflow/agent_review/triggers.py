@@ -144,6 +144,42 @@ def post_gate_a(
         for h in hotspots:
             fit_by_id[id(h)] = float(score_fit(h, pub))
 
+    # v1.0.21: HARD topic-fit gate. When AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD
+    # is set (>0), drop hotspots whose Jaccard fit score is below it BEFORE
+    # composite ranking. Stops the LLM from getting an off-topic hotspot
+    # as input and producing a forced-analogy article ("TCG customs
+    # failure ≈ ChainStream data infra design"). Default 0 = backward
+    # compatible soft re-rank only. Recommended for prod: 0.05 (any tiny
+    # token overlap survives; pure topic mismatches are gone).
+    try:
+        hard_threshold = max(
+            0.0,
+            float(os.environ.get("AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD", "0") or "0"),
+        )
+    except (TypeError, ValueError):
+        hard_threshold = 0.0
+    if hard_threshold > 0 and pub and fit_by_id:
+        before = len(hotspots)
+        hotspots = [
+            h for h in hotspots
+            if fit_by_id.get(id(h), 0.0) >= hard_threshold
+        ]
+        dropped = before - len(hotspots)
+        if dropped:
+            _log.warning(
+                "topic-fit hard gate dropped %d/%d hotspots below threshold %.3f",
+                dropped, before, hard_threshold,
+            )
+        if not hotspots:
+            _log.warning(
+                "topic-fit hard gate eliminated ALL hotspots — "
+                "either AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=%.3f is too strict, "
+                "or today's upstream signals genuinely don't match the "
+                "active publisher's domain. Skipping Gate A.",
+                hard_threshold,
+            )
+            return None
+
     # Composite weight: how much to lean into topic-publisher fit vs raw
     # freshness. Defaults to 0.6 (60% fit / 40% freshness). Tighter brand
     # discipline → bump toward 0.8; broader topic exploration → drop to 0.3.
@@ -443,6 +479,22 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             self_lines = list(self_lines) + [spec_warn]
     except Exception as err:  # pragma: no cover — best-effort
         _log.info("specificity lint skipped for %s: %s", article_id, err)
+
+    # v1.0.21: topic-spine alignment. Different from specificity_lint —
+    # asks "is the SOURCE the article was built from in our domain?"
+    # rather than "does the body MENTION publisher tokens?". A draft
+    # that namedrops `Kafka Streams` / `MCP` / `<brand>` but spins a
+    # cross-border-customs hotspot will pass specificity_lint and fail
+    # spine_lint.
+    try:
+        from agentflow.agent_d2.topic_spine_lint import (
+            detect_topic_spine_misalignment,
+        )
+        spine_warn = detect_topic_spine_misalignment(meta, publisher)
+        if spine_warn:
+            self_lines = list(self_lines) + [spine_warn]
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("topic-spine lint skipped for %s: %s", article_id, err)
 
     opening = (meta.get("opening") or "").strip()
     if not opening and sections:

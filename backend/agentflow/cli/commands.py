@@ -1799,6 +1799,18 @@ def write(
         "created_at": _now_iso(),
         "status": "skeleton_ready",
     }
+    # v1.0.21: snapshot the hotspot's topic spine into metadata so Gate B's
+    # topic_spine_lint can compare upstream source material against the
+    # publisher domain. Without these fields the lint silently no-ops and
+    # forced-analogy drafts ("TCG customs ≈ on-chain data infra") sail
+    # through every other check.
+    if isinstance(hotspot_record, dict):
+        topic_one_liner = hotspot_record.get("topic_one_liner")
+        source_refs = hotspot_record.get("source_references")
+        if topic_one_liner:
+            metadata["topic_one_liner"] = topic_one_liner
+        if source_refs:
+            metadata["source_references"] = source_refs
     if intent_profile:
         metadata["intent_profile"] = intent_profile
     if publisher_snapshot:
