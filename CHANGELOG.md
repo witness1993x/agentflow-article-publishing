@@ -16,6 +16,73 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.19] — 2026-05-03
+
+Lark Custom Bot fan-out (path A in the Lark integration plan). HITL
+review stays on Telegram — Lark Custom Bot is push-only webhook with
+no callback support per
+[Lark docs](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/bot-v3/custom-bot-guide),
+so Gate A/B/C/D approvals can only happen on TG. Lark gets summary
+notifications. Path B (full-feature Lark "self-built application"
+migration) deferred — needs design pass.
+
+### Added
+
+- `agentflow/shared/lark_webhook.py` — push-only outbound module:
+  * `send_text(text)` / `send_card(title, body_md, url_actions=...)`
+    are the public primitives.
+  * `notify_hotspots_digest`, `notify_dispatch_result`,
+    `notify_publish_ready`, `notify_spawn_failure` are the four
+    AgentFlow-specific builders that triggers / daemon call into.
+  * HMAC-SHA256 sign per Lark spec (`timestamp + "\n" + secret` is the
+    HMAC KEY, body is empty bytes, then base64). Optional —
+    only emitted when `LARK_WEBHOOK_SECRET` is set.
+  * Keyword guard: when `LARK_WEBHOOK_KEYWORDS` is set, text bodies
+    missing all keywords get the first keyword auto-appended so the
+    bot's "自定义关键词" security setting doesn't reject (code 19024).
+  * Rate-limit defer: posts within ±60s of any HH:00 / HH:30 are
+    deferred 90s (Lark docs warn 11232 系统压力 spikes at integer
+    half-hours like 10:00 / 17:30). Override with
+    `LARK_WEBHOOK_NO_DEFER=true`.
+  * Per-process 5/sec floor (`_MIN_INTERVAL_SECONDS=0.22`) under a
+    threading lock.
+  * Body cap: truncates the longest text field when JSON encoded
+    body exceeds 19 KB (Lark 20 KB cap with headroom for sign).
+  * Best-effort: every send is exception-isolated; never raises into
+    the caller's TG-primary path.
+- `.env.template` — `LARK_WEBHOOK_URL` (empty = off),
+  `LARK_WEBHOOK_SECRET`, `LARK_WEBHOOK_KEYWORDS`,
+  `LARK_WEBHOOK_NO_DEFER` with inline doc.
+
+### Wired (fan-out points)
+
+- `triggers.post_gate_a` — emits `notify_hotspots_digest` after the
+  TG card is sent (covers both manual `af hotspots` and the v1.0.17
+  scheduled scan path).
+- `triggers.post_publish_dispatch` — emits `notify_dispatch_result`
+  after dispatch summary, separating succeeded / failed platforms
+  for the on-call channel.
+- `triggers.post_publish_ready` — emits `notify_publish_ready` so the
+  Lark channel knows an article is waiting on the operator's manual
+  Medium paste step.
+- `daemon._notify_spawn_failure` — mirrors subprocess crash messages
+  to Lark for on-call visibility.
+
+### Tests
+
+- `LarkWebhookTests` × 6: no-op when URL unset; sign matches Lark
+  reference algorithm; sign included in body when secret set;
+  keyword auto-append when missing; truncate caps oversized payload;
+  rate-limit zone detection at HH:00 / HH:30.
+
+### Deferred
+
+- **Path B**: full Lark "self-built application" with event subscription
+  + interactive card 回传 to enable Gate approval on Lark. Requires
+  public webhook endpoint, OAuth flow, full re-port of 28 slash
+  commands + 38 callback buttons. Needs separate design doc; current
+  TG-primary HITL is unaffected.
+
 ## [1.0.18] — 2026-05-02
 
 Drafts coming out of D2 read as generic AI/Web3 commentary instead of

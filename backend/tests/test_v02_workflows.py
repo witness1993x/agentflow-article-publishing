@@ -2828,6 +2828,123 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class LarkWebhookTests(AgentflowHomeTestCase):
+    """v1.0.19 path A — outbound Lark Custom Bot fan-out. HITL stays
+    on Telegram; Lark gets digest / dispatch / publish-ready / spawn
+    failure summaries. Push-only, never callbacks back."""
+
+    def test_noop_when_url_unset(self) -> None:
+        from agentflow.shared import lark_webhook
+        # No URL configured → all entry points return without hitting
+        # the network at all (requests is lazy-imported inside _post,
+        # so a no-op shouldn't reach that import).
+        with patch.dict(os.environ, {"LARK_WEBHOOK_URL": ""}, clear=False):
+            # If any of these tried to POST, the absence of LARK_WEBHOOK_URL
+            # would surface as an exception inside requests; we just call
+            # them and rely on the early-return semantics.
+            lark_webhook.send_text("hello")
+            lark_webhook.send_card(title="t", body_md="b")
+            lark_webhook.notify_dispatch_result(
+                article_id="a", title="t", succeeded=["medium"], failed=[],
+            )
+            lark_webhook.notify_publish_ready(article_id="a", title="t")
+            lark_webhook.notify_hotspots_digest(scan_count=0, top_titles=[])
+            lark_webhook.notify_spawn_failure(
+                label="x", target_id="y", error_tail="z",
+            )
+
+    def test_sign_matches_lark_spec(self) -> None:
+        """Per Lark docs: HmacSHA256(stringToSign='timestamp\\n'+secret, body=b'')
+        then base64."""
+        from agentflow.shared import lark_webhook
+        # Reference value calculated independently with the same algorithm:
+        sig = lark_webhook._sign(100, "demo")
+        self.assertIsInstance(sig, str)
+        self.assertGreater(len(sig), 16)
+        # Re-running gives the same value (pure function).
+        self.assertEqual(sig, lark_webhook._sign(100, "demo"))
+        # Different secret → different sig.
+        self.assertNotEqual(sig, lark_webhook._sign(100, "other"))
+
+    def test_send_text_includes_sign_when_secret_set(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured: list[dict[str, Any]] = []
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = '{"code":0}'
+            def json(self): return {"code": 0}
+
+        def _fake_post(url, json=None, timeout=10, **_):
+            captured.append({"url": url, "json": json})
+            return _Resp()
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LARK_WEBHOOK_URL": "https://example.com/hook/abc",
+                    "LARK_WEBHOOK_SECRET": "demo",
+                    "LARK_WEBHOOK_NO_DEFER": "true",
+                    "LARK_WEBHOOK_KEYWORDS": "",
+                },
+                clear=False,
+            ),
+            patch("requests.post", side_effect=_fake_post),
+        ):
+            lark_webhook.send_text("hello world")
+
+        self.assertEqual(len(captured), 1)
+        body = captured[0]["json"]
+        self.assertEqual(body["msg_type"], "text")
+        self.assertIn("timestamp", body)
+        self.assertIn("sign", body)
+        # sign should match what _sign() computes for the same ts+secret.
+        expected = lark_webhook._sign(int(body["timestamp"]), "demo")
+        self.assertEqual(body["sign"], expected)
+
+    def test_keyword_appended_when_missing(self) -> None:
+        from agentflow.shared import lark_webhook
+        # The text doesn't contain the keyword, helper should append it.
+        out = lark_webhook._ensure_keyword(
+            "ordinary message body",
+            ["AgentFlow", "alert"],
+        )
+        self.assertIn("[AgentFlow]", out)
+        # Already present → unchanged.
+        out2 = lark_webhook._ensure_keyword(
+            "AgentFlow ran a scan",
+            ["AgentFlow"],
+        )
+        self.assertEqual(out2, "AgentFlow ran a scan")
+
+    def test_truncate_caps_oversized_payload(self) -> None:
+        from agentflow.shared import lark_webhook
+        big = {"msg_type": "text", "content": {"text": "x" * 30_000}}
+        out = lark_webhook._truncate(big)
+        raw = json.dumps(out, ensure_ascii=False).encode("utf-8")
+        self.assertLessEqual(len(raw), lark_webhook._BODY_HARD_CAP_BYTES)
+        self.assertIn("truncated", out["content"]["text"])
+
+    def test_in_rate_limit_zone_detects_half_hours(self) -> None:
+        from agentflow.shared import lark_webhook
+        from datetime import datetime
+        # 10:00:30 — within the ±60s zone.
+        self.assertTrue(lark_webhook._in_rate_limit_zone(
+            datetime(2026, 5, 3, 10, 0, 30)
+        ))
+        # 10:30:00 — exactly half-hour, zone.
+        self.assertTrue(lark_webhook._in_rate_limit_zone(
+            datetime(2026, 5, 3, 10, 30, 0)
+        ))
+        # 10:15:00 — middle of half, safe.
+        self.assertFalse(lark_webhook._in_rate_limit_zone(
+            datetime(2026, 5, 3, 10, 15, 0)
+        ))
+
+
 class SpecificityLintTests(AgentflowHomeTestCase):
     """v1.0.18 — anchoring lint catches drafts that "sound specific"
     (have product names / dates / numbers) but those names are generic

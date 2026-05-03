@@ -4374,6 +4374,14 @@ def _notify_spawn_failure(
         )
         # parse_mode=None avoids Markdown-escape headaches for arbitrary stderr.
         tg_client.send_message(chat_id, text, parse_mode=None)
+        # v1.0.19: mirror to Lark Custom Bot for the on-call channel.
+        try:
+            from agentflow.shared import lark_webhook
+            lark_webhook.notify_spawn_failure(
+                label=label, target_id=target_id, error_tail=tail,
+            )
+        except Exception:
+            pass
         _audit({
             "kind": "spawn_failure",
             "label": label,

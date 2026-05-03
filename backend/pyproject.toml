@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentflow"
-version = "1.0.18"
+version = "1.0.19"
 description = "AgentFlow Article Publishing - single-user writing/publishing automation"
 requires-python = ">=3.11"
 license = { text = "MIT" }

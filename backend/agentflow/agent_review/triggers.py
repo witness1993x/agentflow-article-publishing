@@ -236,6 +236,23 @@ def post_gate_a(
     )
     sent = tg_client.send_message(chat_id, text, reply_markup=kb)
     _sid.attach_message_id(sid, sent.get("message_id"))
+
+    # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).
+    # Push-only, not actionable — operators still review on TG. Wrapped
+    # in try/except so a Lark outage cannot break the TG path.
+    try:
+        from agentflow.shared import lark_webhook
+        top_titles = [
+            str(c.get("topic_one_liner") or c.get("title") or "(untitled)")
+            for c in (candidates or [])[:top_k]
+        ]
+        lark_webhook.notify_hotspots_digest(
+            scan_count=len(candidates or []),
+            top_titles=top_titles,
+        )
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("Lark hotspots digest fan-out skipped: %s", err)
+
     return {
         "gate": "A",
         "short_id": sid,
@@ -1070,6 +1087,17 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
     except _state.StateError:
         pass
 
+    # v1.0.19: Lark fan-out — operator's "ready to paste" nudge mirror.
+    try:
+        from agentflow.shared import lark_webhook
+        meta_for_title = _read_metadata(article_id)
+        lark_webhook.notify_publish_ready(
+            article_id=article_id,
+            title=str(meta_for_title.get("title") or "(no title)"),
+        )
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("Lark publish-ready fan-out skipped: %s", err)
+
     return {
         "gate": "*",
         "article_id": article_id,
@@ -1689,6 +1717,28 @@ def post_publish_dispatch(
 
     if retry_sid:
         results["retry_short_id"] = retry_sid
+
+    # v1.0.19: fan-out dispatch result to Lark Custom Bot.
+    try:
+        from agentflow.shared import lark_webhook
+        meta_for_title = _read_metadata(article_id)
+        succeeded_plats = [
+            r["platform"] for r in dispatch_results
+            if r.get("status") in {"published", "manual"}
+        ]
+        failed_plats = [
+            (r["platform"], str(r.get("reason") or r.get("status") or ""))
+            for r in dispatch_results
+            if r.get("status") not in {"published", "manual"}
+        ]
+        lark_webhook.notify_dispatch_result(
+            article_id=article_id,
+            title=str(meta_for_title.get("title") or "(no title)"),
+            succeeded=succeeded_plats,
+            failed=failed_plats,
+        )
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("Lark dispatch fan-out skipped: %s", err)
 
     if "medium" in platforms:
         try:
