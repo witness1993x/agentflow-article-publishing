@@ -25,6 +25,17 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("LARK_VERIFICATION_TOKEN", "verif_test")
     monkeypatch.delenv("LARK_ENCRYPT_KEY", raising=False)
     config.reset_settings_cache()
+    # Force the stub bridge path regardless of whether agentflow is
+    # installed in this venv. The adapter's stub is what the route
+    # tests assert against; the real handler is exercised by the
+    # backend-side test_lark_callback suite, not here. We reset the
+    # module's lazy-loader flag *and* zero its handler ref so any
+    # prior test that triggered the real import doesn't leak state.
+    from lark_adapter import callback_bridge
+
+    monkeypatch.setattr(callback_bridge, "_real_handler", None)
+    monkeypatch.setattr(callback_bridge, "_loaded", True)
+    monkeypatch.setattr(callback_bridge, "_load_error", "test stub forced")
     from lark_adapter.app import create_app
 
     return TestClient(create_app())
