@@ -2951,6 +2951,88 @@ class D1RecallFilterTests(AgentflowHomeTestCase):
             kept = d1_main._apply_signal_domain_filter(list(signals))
         self.assertEqual(len(kept), 1)
 
+    # v1.0.25 blocklist tests --------------------------------------
+
+    def test_blocklist_drops_signals_with_matching_term(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [
+            self._signal("twitter", "1", "OpenAI launches new pricing", "@sama"),
+            self._signal("twitter", "2", "smart money agent on Solana", "@balajis"),
+            self._signal("twitter", "3", "vintage Omega watches", "@paulg"),
+        ]
+        with patch.dict(
+            os.environ,
+            {"AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS": "OpenAI,Omega"},
+            clear=False,
+        ):
+            with patch.object(
+                d1_main, "_resolve_signal_blocklist",
+                return_value={"openai", "omega"},
+            ):
+                kept = d1_main._apply_signal_blocklist(list(signals))
+        ids = {s.source_item_id for s in kept}
+        self.assertEqual(ids, {"2"})
+
+    def test_blocklist_no_op_when_empty(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [self._signal("twitter", "1", "anything goes", "@whoever")]
+        with patch.object(
+            d1_main, "_resolve_signal_blocklist",
+            return_value=set(),
+        ):
+            kept = d1_main._apply_signal_blocklist(list(signals))
+        self.assertEqual(len(kept), 1)
+
+    def test_blocklist_case_insensitive_substring(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [
+            self._signal("twitter", "a", "OPENAI WINS Q3", "@journalist"),
+            self._signal("twitter", "b", "openai-compatible API", "@dev"),
+            self._signal("twitter", "c", "On-chain settlement live", "@vitalik"),
+        ]
+        with patch.object(
+            d1_main, "_resolve_signal_blocklist",
+            return_value={"openai"},
+        ):
+            kept = d1_main._apply_signal_blocklist(list(signals))
+        ids = {s.source_item_id for s in kept}
+        self.assertEqual(ids, {"c"})
+
+    def test_blocklist_resolution_merges_env_and_avoid_terms(self) -> None:
+        """The resolver pulls from both AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS env
+        and the active profile's avoid_terms field."""
+        from agentflow.agent_d1 import main as d1_main
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS": "OpenAI, ChatGPT",
+                    "AGENTFLOW_DEFAULT_TOPIC_PROFILE": "test_profile",
+                },
+                clear=False,
+            ),
+            patch(
+                "agentflow.shared.topic_profile_lifecycle.load_user_topic_profiles",
+                return_value={
+                    "profiles": {
+                        "test_profile": {
+                            "avoid_terms": ["macro politics", "celebrity"],
+                        },
+                    },
+                },
+            ),
+            patch(
+                "agentflow.cli.topic_profile_commands._read_active_profile_id",
+                return_value=None,
+            ),
+        ):
+            blocklist = d1_main._resolve_signal_blocklist()
+        # All four terms (env + avoid_terms) should be present, lowercased.
+        self.assertIn("openai", blocklist)
+        self.assertIn("chatgpt", blocklist)
+        self.assertIn("macro politics", blocklist)
+        self.assertIn("celebrity", blocklist)
+
 
 class TopicSpineLintTests(AgentflowHomeTestCase):
     """v1.0.21 — catches drafts where the LLM forced-grafts publisher

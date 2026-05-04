@@ -16,6 +16,64 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.25] — 2026-05-04
+
+Adds a signal-level blocklist as a separate control surface from the
+v1.0.23 coverage filter. Coverage answers "is enough of this signal in
+our domain?"; blocklist answers "does this signal mention something
+unambiguously off-domain?". Different cuts — both useful, neither
+sufficient alone.
+
+### Added
+
+- `agent_d1/main._apply_signal_blocklist` — drops signals whose text
+  or author contains any blocklist term (case-insensitive substring).
+  Wired into `_collect_all` BEFORE the coverage filter so blocked
+  signals never count toward token-coverage stats either.
+- `agent_d1/main._resolve_signal_blocklist` — merges:
+  * `AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS` env (comma-separated, e.g.
+    `"OpenAI,ChatGPT,Sam Altman"`)
+  * the active profile's `avoid_terms` field (already part of the
+    topic_profiles.yaml schema, previously unused by D1)
+  Uses the same v1.0.23 single-profile fallback chain so it works on
+  fresh installs without intent / pinned active id.
+- `.env.template` adds `AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS=`.
+
+### Why this is a separate filter
+
+Token coverage (v1.0.23) treats `agent` as a chainstream-domain word —
+so an "OpenAI launches new code agent product" tweet borrows that
+overlap and squeaks past at threshold 0.05. The blocklist is the
+exception lane: even if coverage looks OK, mentioning an explicitly
+off-domain entity (the OpenAI brand, ChatGPT, Sam Altman by name)
+drops the signal cleanly. Catches what coverage can't.
+
+### Filter chain order in `_collect_all`
+
+```
+collectors → mock-tag drop → blocklist → coverage → time window → cluster
+                              ^v1.0.25^   ^v1.0.23^
+```
+
+Blocklist runs first because it's substring-cheap and surfaces the most
+obvious offenders before the (more expensive) per-signal tokenization
+loop.
+
+### Tests
+
+- `D1RecallFilterTests` × 4 new: drops matching, no-op when empty,
+  case-insensitive substring, env+avoid_terms merger. 8 total in
+  the suite now (4 original + 4 blocklist).
+
+### Recommended config (chainstream-service overlay 1.0.3+)
+
+```env
+AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS=OpenAI,ChatGPT,Anthropic,Sam Altman,Greg Brockman,DeepSeek,Claude API,Vintage,Omega,Southwest,Stockholm
+```
+
+(Operator extends; the chainstream `avoid_terms` already covers
+`general AI hype / consumer chatbot / celebrity crypto / macro politics`.)
+
 ## [1.0.24] — 2026-05-04
 
 Fixes the actual root cause of the "every fresh install gets OpenAI

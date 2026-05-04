@@ -176,6 +176,15 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
                 dropped,
             )
 
+    # v1.0.25: blocklist filter — drop signals whose text mentions any
+    # term in the active profile's ``avoid_terms`` or the
+    # ``AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS`` env. Cheap pre-filter for
+    # cross-domain ambiguity that token coverage can't resolve (e.g.
+    # "agent" overlaps both crypto-infra and AI dev tooling — but a
+    # signal mentioning "OpenAI"/"ChatGPT" is unambiguously off-domain
+    # for a crypto publisher even if it also says "agent").
+    all_signals = _apply_signal_blocklist(all_signals)
+
     # v1.0.22: signal-level domain filter. The composite-rank fit gate
     # (v1.0.21 AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD) operates on already-
     # clustered hotspots; by then a flood of off-domain signals (e.g.
@@ -285,6 +294,92 @@ def _resolve_active_publisher_tokens() -> set[str] | None:
         pub["keyword_groups"] = profile["keyword_groups"]
     tokens = _publisher_domain_tokens(pub)
     return tokens if tokens else None
+
+
+def _resolve_signal_blocklist() -> set[str]:
+    """Build the blocklist token set from env + active profile avoid_terms.
+
+    Both sources are merged; env terms take effect even when no profile
+    is resolvable. Terms are stripped + lowercased for substring match.
+    """
+    out: set[str] = set()
+    raw = os.environ.get("AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS", "") or ""
+    for term in raw.split(","):
+        t = term.strip().lower()
+        if t:
+            out.add(t)
+    # Merge active profile's avoid_terms (works without intent / pinned
+    # active id thanks to the v1.0.23 single-profile fallback chain).
+    try:
+        from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+        data = load_user_topic_profiles() or {}
+        profiles = (
+            data.get("profiles") or {}
+            if isinstance(data, dict) else {}
+        )
+        candidate_pid: str | None = None
+        try:
+            from agentflow.cli.topic_profile_commands import _read_active_profile_id  # type: ignore
+            candidate_pid = _read_active_profile_id() or None
+        except Exception:
+            candidate_pid = None
+        if not candidate_pid:
+            env_pid = (os.environ.get("AGENTFLOW_DEFAULT_TOPIC_PROFILE") or "").strip()
+            if env_pid and env_pid in profiles:
+                candidate_pid = env_pid
+        if not candidate_pid and isinstance(profiles, dict) and len(profiles) == 1:
+            candidate_pid = next(iter(profiles.keys()))
+        if candidate_pid and candidate_pid in profiles:
+            avoid = (profiles[candidate_pid] or {}).get("avoid_terms") or []
+            if isinstance(avoid, list):
+                for t in avoid:
+                    if isinstance(t, str) and t.strip():
+                        out.add(t.strip().lower())
+    except Exception:
+        pass
+    return out
+
+
+def _signal_haystack(sig: RawSignal) -> str:
+    """Lowercased text + author for blocklist substring match."""
+    return (
+        (getattr(sig, "text", "") or "") + " " +
+        (getattr(sig, "author", "") or "")
+    ).lower()
+
+
+def _apply_signal_blocklist(signals: list[RawSignal]) -> list[RawSignal]:
+    """Drop signals whose text/author contains any blocklist term.
+    Case-insensitive substring match. No-op when blocklist is empty."""
+    blocklist = _resolve_signal_blocklist()
+    if not blocklist or not signals:
+        return signals
+    kept: list[RawSignal] = []
+    dropped_examples: list[str] = []
+    for sig in signals:
+        haystack = _signal_haystack(sig)
+        match: str | None = None
+        for term in blocklist:
+            if term in haystack:
+                match = term
+                break
+        if match is None:
+            kept.append(sig)
+            continue
+        if len(dropped_examples) < 3:
+            preview = (getattr(sig, "text", "") or "")[:60].replace("\n", " ")
+            dropped_examples.append(
+                f"{getattr(sig, 'source', '?')}/{getattr(sig, 'author', '?')} "
+                f"[hit={match!r}]: {preview!r}"
+            )
+    dropped = len(signals) - len(kept)
+    if dropped:
+        _log.warning(
+            "signal blocklist dropped %d/%d signals (%d terms). examples: %s",
+            dropped, len(signals), len(blocklist),
+            "; ".join(dropped_examples),
+        )
+    return kept
 
 
 def _apply_signal_domain_filter(signals: list[RawSignal]) -> list[RawSignal]:
