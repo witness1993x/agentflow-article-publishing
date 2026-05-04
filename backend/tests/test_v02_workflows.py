@@ -4227,5 +4227,318 @@ class HotspotsMockGuardTests(AgentflowHomeTestCase):
         self.assertEqual(len(collected), 2)
 
 
+class TwitterSearchCollectorTests(AgentflowHomeTestCase):
+    """v1.0.26 — twitter_search collector + agent_d1.main wiring.
+
+    The new collector runs Twitter v2 search_recent_tweets alongside the
+    existing curated-KOL collector. Same behaviour matrix as twitter.py
+    v1.0.8: explicit MOCK_LLM opt-in for fixtures, refuse to fabricate
+    when bearer token is missing.
+    """
+
+    def test_disabled_returns_empty(self) -> None:
+        from agentflow.agent_d1.collectors import twitter_search
+
+        queries = [
+            {"query": "MEV OR rollup", "max_results": 30, "weight": "medium"},
+        ]
+        # Default off: even with queries provided, collector emits nothing
+        # until AGENTFLOW_TWITTER_SEARCH_ENABLED=true.
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_TWITTER_SEARCH_ENABLED": "false",
+                "MOCK_LLM": "true",  # would normally activate fixtures
+            },
+            clear=False,
+        ):
+            out = asyncio.run(twitter_search.collect(queries))
+        self.assertEqual(out, [])
+
+    def test_mock_mode_returns_fixtures(self) -> None:
+        from agentflow.agent_d1.collectors import twitter_search
+
+        queries = [
+            {"query": "on-chain MEV", "max_results": 20, "weight": "high"},
+            {"query": "rollup data availability", "max_results": 20, "weight": "medium"},
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                "MOCK_LLM": "true",
+            },
+            clear=False,
+        ):
+            out = asyncio.run(twitter_search.collect(queries))
+
+        # 2-3 fixtures per query.
+        self.assertGreaterEqual(len(out), 4)
+        for sig in out:
+            self.assertEqual(sig.source, "twitter")
+            self.assertTrue(sig.source_item_id.startswith("search_"))
+            self.assertIsInstance(sig.raw_metadata, dict)
+            self.assertTrue(sig.raw_metadata.get("mock") is True)
+            self.assertEqual(sig.raw_metadata.get("via"), "search")
+            self.assertIn(
+                sig.raw_metadata.get("query"),
+                {"on-chain MEV", "rollup data availability"},
+            )
+
+    def test_real_mode_no_bearer_skips_with_warning(self) -> None:
+        from agentflow.agent_d1.collectors import twitter_search
+
+        queries = [{"query": "Solana", "weight": "high"}]
+        # Important: we patch tweepy.Client to detect any unintended
+        # network call. Real mode + no bearer token + MOCK_LLM not true
+        # MUST short-circuit before tweepy is touched.
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                    "MOCK_LLM": "false",
+                    "TWITTER_BEARER_TOKEN": "",
+                },
+                clear=False,
+            ),
+            patch("tweepy.Client") as mock_client,
+            patch.object(twitter_search._log, "warning") as mock_warn,
+        ):
+            out = asyncio.run(twitter_search.collect(queries))
+
+        self.assertEqual(out, [])
+        mock_client.assert_not_called()
+        # Verify the warning includes the "refusing to fabricate" guidance.
+        warned_messages = " ".join(
+            str(call.args[0]) for call in mock_warn.call_args_list
+            if call.args
+        )
+        self.assertIn("refusing to fabricate", warned_messages)
+
+    def test_real_mode_with_bearer_calls_search(self) -> None:
+        from agentflow.agent_d1.collectors import twitter_search
+
+        # Build fake tweet objects matching tweepy v2 response shape.
+        class _FakeTweet:
+            def __init__(self, tid: str, text: str) -> None:
+                self.id = tid
+                self.text = text
+                self.public_metrics = {
+                    "reply_count": 1,
+                    "retweet_count": 2,
+                    "like_count": 3,
+                    "quote_count": 4,
+                }
+                self.created_at = datetime.now(timezone.utc)
+                self.author_id = None
+
+        class _FakeResponse:
+            def __init__(self, tweets: list) -> None:
+                self.data = tweets
+                self.includes = {}
+
+        fake_tweets = [
+            _FakeTweet("111", "MEV recovery technique deep-dive thread"),
+            _FakeTweet("222", "Rollup DA layer comparison week-over-week"),
+        ]
+
+        class _FakeClient:
+            last_call_args: dict = {}
+
+            def __init__(self, bearer_token: str) -> None:
+                self.bearer_token = bearer_token
+
+            def search_recent_tweets(self, **kwargs):
+                _FakeClient.last_call_args = kwargs
+                return _FakeResponse(fake_tweets)
+
+        queries = [
+            {"query": "MEV OR rollup", "max_results": 30, "weight": "medium"},
+        ]
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                    "MOCK_LLM": "false",
+                    "TWITTER_BEARER_TOKEN": "fake-bearer",
+                },
+                clear=False,
+            ),
+            patch("tweepy.Client", _FakeClient),
+        ):
+            out = asyncio.run(twitter_search.collect(queries))
+
+        self.assertEqual(len(out), 2)
+        for sig in out:
+            self.assertEqual(sig.source, "twitter")
+            self.assertTrue(sig.source_item_id.startswith("search_"))
+            self.assertIsInstance(sig.raw_metadata, dict)
+            self.assertEqual(sig.raw_metadata.get("via"), "search")
+            self.assertEqual(sig.raw_metadata.get("query"), "MEV OR rollup")
+            self.assertEqual(sig.raw_metadata.get("weight"), "medium")
+            # No mock tag — real-mode signals must not carry mock=True.
+            self.assertNotEqual(sig.raw_metadata.get("mock"), True)
+        # Verify max_results was passed through to tweepy.
+        self.assertEqual(_FakeClient.last_call_args.get("query"), "MEV OR rollup")
+        self.assertEqual(_FakeClient.last_call_args.get("max_results"), 30)
+
+    def test_weighted_query_filters_with_kol_only_high(self) -> None:
+        from agentflow.agent_d1.main import _twitter_search_queries
+
+        sources = {
+            "twitter_search": [
+                {"query": "MEV", "weight": "high"},
+                {"query": "rollup", "weight": "medium"},
+                {"query": "ChatGPT", "weight": "blocked"},
+            ],
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                "AGENTFLOW_TWITTER_KOL_ONLY_HIGH": "true",
+            },
+            clear=False,
+        ):
+            queries = _twitter_search_queries(sources)
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0]["query"], "MEV")
+
+    def test_blocked_weight_skipped(self) -> None:
+        from agentflow.agent_d1.main import _twitter_search_queries
+
+        sources = {
+            "twitter_search": [
+                {"query": "MEV", "weight": "medium"},
+                {"query": "ChatGPT", "weight": "blocked"},
+                {"query": "rollup", "weight": "high"},
+            ],
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                "AGENTFLOW_TWITTER_KOL_ONLY_HIGH": "",
+            },
+            clear=False,
+        ):
+            queries = _twitter_search_queries(sources)
+        kept = {q["query"] for q in queries}
+        self.assertEqual(kept, {"MEV", "rollup"})
+
+    def test_search_queries_empty_when_disabled(self) -> None:
+        """v1.0.26 — _twitter_search_queries returns [] when env is off,
+        regardless of what's in sources.yaml. Belt-and-suspenders so the
+        third async task is never appended in _collect_all."""
+        from agentflow.agent_d1.main import _twitter_search_queries
+
+        sources = {
+            "twitter_search": [{"query": "MEV", "weight": "high"}],
+        }
+        with patch.dict(
+            os.environ,
+            {"AGENTFLOW_TWITTER_SEARCH_ENABLED": "false"},
+            clear=False,
+        ):
+            queries = _twitter_search_queries(sources)
+        self.assertEqual(queries, [])
+
+    def test_collect_all_runs_search_alongside_kol(self) -> None:
+        """When AGENTFLOW_TWITTER_SEARCH_ENABLED=true and sources.yaml
+        carries twitter_search entries, _collect_all fires both the KOL
+        collector AND the search collector. Both bucket as source=twitter
+        in the final provenance summary."""
+        from agentflow.agent_d1 import main as d1_main
+        from agentflow.shared.models import RawSignal
+
+        kol_signal = RawSignal(
+            source="twitter",
+            source_item_id="kol_1",
+            author="@balajis",
+            text="from KOL timeline",
+            url="https://twitter.com/balajis/status/1",
+            published_at=datetime.now(timezone.utc),
+            engagement={},
+            raw_metadata={"handle": "balajis"},
+        )
+        search_signal = RawSignal(
+            source="twitter",
+            source_item_id="search_2",
+            author="@search_abcd",
+            text="from search firehose",
+            url="https://twitter.com/i/web/status/2",
+            published_at=datetime.now(timezone.utc),
+            engagement={},
+            raw_metadata={"via": "search", "query": "MEV"},
+        )
+
+        twitter_calls: list[tuple] = []
+        search_calls: list[tuple] = []
+
+        async def _fake_twitter(*args, **kwargs):
+            twitter_calls.append((args, kwargs))
+            return [kol_signal]
+
+        async def _fake_search(*args, **kwargs):
+            search_calls.append((args, kwargs))
+            return [search_signal]
+
+        async def _fake_rss(*_a, **_kw):
+            return []
+
+        async def _fake_hn(*_a, **_kw):
+            return []
+
+        sources = {
+            "twitter_kols": [{"handle": "@balajis", "weight": "high"}],
+            "twitter_search": [{"query": "MEV", "weight": "high"}],
+            "rss_feeds": [],
+            "hackernews": {"enabled": True},
+        }
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_TWITTER_SEARCH_ENABLED": "true",
+                    "MOCK_LLM": "false",
+                    "AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD": "",
+                    "AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS": "",
+                },
+                clear=False,
+            ),
+            patch.object(
+                d1_main, "_resolve_signal_blocklist", return_value=set(),
+            ),
+            patch(
+                "agentflow.agent_d1.main.twitter_collector.collect",
+                side_effect=_fake_twitter,
+            ),
+            patch(
+                "agentflow.agent_d1.main.twitter_search_collector.collect",
+                side_effect=_fake_search,
+            ),
+            patch(
+                "agentflow.agent_d1.main.rss_collector.collect",
+                side_effect=_fake_rss,
+            ),
+            patch(
+                "agentflow.agent_d1.main.hn_collector.collect",
+                side_effect=_fake_hn,
+            ),
+        ):
+            collected = asyncio.run(d1_main._collect_all(sources))
+
+        self.assertEqual(len(twitter_calls), 1)
+        self.assertEqual(len(search_calls), 1)
+        ids = {s.source_item_id for s in collected}
+        self.assertEqual(ids, {"kol_1", "search_2"})
+        # Both collectors emit source="twitter"; provenance bucketing groups them.
+        provenance = d1_main._provenance_summary(collected)
+        self.assertEqual(provenance.get("twitter", {}).get("real"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

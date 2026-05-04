@@ -91,6 +91,35 @@ twitter_kols:
     note: "Rails / general dev"
 
 # ============================================================
+# Twitter / X keyword search (v1.0.26, optional second recall layer)
+# ============================================================
+# Runs Twitter v2 search_recent_tweets alongside the curated KOL
+# timeline pulls above. Useful when your vertical has fast-moving
+# topics that a fixed KOL list won't cover (e.g. a new protocol
+# launch, a breaking incident, a niche keyword).
+#
+# Schema (per entry):
+#   - query: <Twitter v2 search expression — supports OR / AND / -term>
+#     max_results: <10..100, omit to use AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS>
+#     weight: high | medium | blocked
+#
+# `weight` semantics match twitter_kols above: blocked is always
+# skipped; AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true restricts to high.
+#
+# Required envs to enable:
+#   AGENTFLOW_TWITTER_SEARCH_ENABLED=true
+#   TWITTER_BEARER_TOKEN=<your_v2_bearer_token>
+#
+# Brand-neutral examples — operator/overlay supplies real queries.
+# twitter_search:
+#   - query: "<your_topic_keywords>"
+#     max_results: 30
+#     weight: medium
+#   - query: "<another_query> OR <synonym>"
+#     max_results: 50
+#     weight: high
+
+# ============================================================
 # RSS Feeds
 # ============================================================
 rss_feeds:

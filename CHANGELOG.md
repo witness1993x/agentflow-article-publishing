@@ -16,6 +16,78 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.26] — 2026-05-04
+
+Adds Twitter v2 keyword search as a parallel D1 recall layer, alongside
+the curated-KOL timeline pulls. Brings Twitter to feature parity with
+HackerNews (which has had front-page filter + Algolia search since
+v1.0.0). KOL pull is "what these 5 trusted voices posted today";
+keyword search is "what the broader Twitter firehose is saying about
+our specific topics today".
+
+### Added
+
+- `agent_d1/collectors/twitter_search.py` (~280 LOC) — new collector.
+  Same behavior matrix as `twitter.py` v1.0.8:
+  * `MOCK_LLM=true` → deterministic per-query fixtures with
+    `raw_metadata={"mock": True, "via": "search", "query": q}`
+    so v1.0.10 mock-tag drop catches them in real-mode regressions.
+  * `AGENTFLOW_TWITTER_SEARCH_ENABLED!="true"` → empty (default off,
+    backward compat).
+  * Enabled but no `TWITTER_BEARER_TOKEN` AND `MOCK_LLM!="true"` →
+    empty + warning. Refuses to fabricate.
+  * Enabled + bearer present → tweepy v2
+    `search_recent_tweets(query, max_results, tweet_fields=…)`,
+    clamped to 10..100 per Twitter API spec.
+  * Each returned `RawSignal` has `source="twitter"` (same bucket as
+    KOL collector for downstream filters) but
+    `raw_metadata.via="search"` to discriminate provenance for audits.
+- `agent_d1/main.py::_twitter_search_enabled()` /
+  `_twitter_search_queries()` helpers + a third async task in
+  `_collect_all` that fires only when search is enabled and queries
+  are present. `weight: blocked` and `AGENTFLOW_TWITTER_KOL_ONLY_HIGH`
+  semantics mirror `twitter_kols`.
+- `.env.template` — `AGENTFLOW_TWITTER_SEARCH_ENABLED=false` +
+  `AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS=20`.
+- `config-examples/sources.example.yaml` — commented `twitter_search:`
+  schema between KOL and RSS sections (brand-neutral placeholders;
+  operator/overlay supplies real queries).
+
+### Tests
+
+- `TwitterSearchCollectorTests` × 8 (spec called for "~6-7"; agent
+  added one extra belt-and-suspenders): disabled returns empty;
+  mock-mode fixtures; real-mode no-bearer skip with warning;
+  real-mode with bearer calls tweepy.search; weight filters
+  KOL_ONLY_HIGH; weight=blocked skipped; queries empty when disabled;
+  `_collect_all` runs search alongside KOL when enabled.
+- 120/120 total (was 112).
+
+### Notes
+
+- tweepy v2 caps `max_results` at 10..100; the collector clamps via
+  `_clamp_max_results` so a `max_results: 200` in `sources.yaml`
+  doesn't 400 the API.
+- Real-mode does NOT do an `expansions=["author_id"]` users lookup —
+  author username falls back to `@search_<query_hash>` when the v2
+  response doesn't carry `includes.users`. Cheap to add later if
+  per-author analytics matter; doesn't affect downstream filtering
+  (which is text-content driven).
+- Pre-existing private-import flag (not addressed in this PR):
+  `agent_d1/main.py::_signal_text_tokens` imports
+  `agent_d2.topic_spine_lint._tokenize` (a private symbol). Cross-
+  package coupling worth flagging for any future agent_d2 refactor.
+
+### Recommended config (chainstream-service overlay 1.0.5+)
+
+```env
+AGENTFLOW_TWITTER_SEARCH_ENABLED=true
+AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS=30
+```
+
+Operator populates `sources.yaml::twitter_search` with vertical-
+specific queries (e.g. `"MEV OR \"smart wallet\" OR rollup"`).
+
 ## [1.0.25] — 2026-05-04
 
 Adds a signal-level blocklist as a separate control surface from the

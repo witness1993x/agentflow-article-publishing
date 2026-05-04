@@ -25,6 +25,7 @@ from agentflow.agent_d1 import clustering, scoring, viewpoint_miner
 from agentflow.agent_d1.collectors import hackernews as hn_collector
 from agentflow.agent_d1.collectors import rss as rss_collector
 from agentflow.agent_d1.collectors import twitter as twitter_collector
+from agentflow.agent_d1.collectors import twitter_search as twitter_search_collector
 from agentflow.config.sources_loader import load_sources
 from agentflow.config.style_loader import load_style_profile
 from agentflow.shared.bootstrap import agentflow_home, ensure_user_dirs
@@ -106,6 +107,59 @@ def _twitter_handles(sources: dict[str, Any]) -> list[str]:
     return out
 
 
+def _twitter_search_enabled() -> bool:
+    """v1.0.26 — read AGENTFLOW_TWITTER_SEARCH_ENABLED.
+
+    Default off. Operators opt into the second recall layer alongside the
+    curated KOL pulls when they've populated ``sources.yaml::twitter_search``
+    AND configured ``TWITTER_BEARER_TOKEN``.
+    """
+    return (
+        os.environ.get("AGENTFLOW_TWITTER_SEARCH_ENABLED", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+
+
+def _twitter_search_queries(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """v1.0.26 — extract twitter search queries from sources.yaml.
+
+    Mirrors ``_twitter_handles`` semantics:
+      * ``weight: blocked`` — skipped entirely (operator can keep the row
+        for posterity without the signal flooding the recall pool).
+      * ``AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true`` env restricts to entries
+        with ``weight: high`` (same flag as KOL list — one knob covers both
+        Twitter recall paths).
+
+    Returns an empty list when search recall is disabled, regardless of
+    what's in sources.yaml.
+    """
+    if not _twitter_search_enabled():
+        return []
+    queries = sources.get("twitter_search") or []
+    only_high = (
+        os.environ.get("AGENTFLOW_TWITTER_KOL_ONLY_HIGH", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+    out: list[dict[str, Any]] = []
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        query = (q.get("query") or "").strip()
+        if not query:
+            continue
+        weight = str(q.get("weight") or "").strip().lower()
+        if weight == "blocked":
+            continue
+        if only_high and weight != "high":
+            continue
+        out.append(q)
+    return out
+
+
 def _rss_feeds(sources: dict[str, Any]) -> list[dict[str, Any]]:
     feeds = sources.get("rss_feeds") or []
     return [f for f in feeds if f.get("url")]
@@ -139,6 +193,17 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
     handles = _twitter_handles(sources)
     feeds = _rss_feeds(sources)
     hn_enabled, hn_keywords, hn_min = _hn_config(sources)
+    search_queries = _twitter_search_queries(sources)
+
+    # v1.0.26: per-query default for the search collector — operators can
+    # override via AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS without editing every
+    # entry in sources.yaml.
+    try:
+        search_default_max = int(
+            os.environ.get("AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS", "20") or "20"
+        )
+    except (TypeError, ValueError):
+        search_default_max = 20
 
     tasks = [
         twitter_collector.collect(handles, max_results_per_kol=20),
@@ -146,6 +211,15 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
     ]
     if hn_enabled:
         tasks.append(hn_collector.collect(hn_keywords, min_score=hn_min))
+    if search_queries:
+        # Second Twitter recall path. Same source="twitter" as the KOL
+        # collector so _provenance_summary buckets them together; the
+        # raw_metadata.via field discriminates if anyone wants to look.
+        tasks.append(
+            twitter_search_collector.collect(
+                search_queries, default_max_results=search_default_max,
+            )
+        )
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
