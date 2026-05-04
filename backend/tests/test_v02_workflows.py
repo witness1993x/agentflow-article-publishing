@@ -2828,6 +2828,130 @@ class TgMenuV103Tests(AgentflowHomeTestCase):
         self.assertIn("Angle one", body)
 
 
+class D1RecallFilterTests(AgentflowHomeTestCase):
+    """v1.0.22 — signal-level domain filter + KOL weight allowlist
+    in agent_d1.main. Cuts off-domain signals BEFORE clustering so the
+    Gate A composite gate (v1.0.21) doesn't have to fight a flooded
+    recall pool."""
+
+    def _signal(self, source: str, item_id: str, text: str, author: str) -> object:
+        from agentflow.shared.models import RawSignal
+        return RawSignal(
+            source=source,
+            source_item_id=item_id,
+            author=author,
+            text=text,
+            url=f"https://example.com/{item_id}",
+            published_at=datetime.now(timezone.utc),
+            engagement={},
+            raw_metadata={},
+        )
+
+    def test_kol_handles_skip_blocked_weight(self) -> None:
+        from agentflow.agent_d1.main import _twitter_handles
+        sources = {
+            "twitter_kols": [
+                {"handle": "@vitalik",  "weight": "high"},
+                {"handle": "@balajis",  "weight": "high"},
+                {"handle": "@sama",     "weight": "blocked"},
+                {"handle": "@paulg",    "weight": "blocked"},
+            ],
+        }
+        with patch.dict(os.environ, {"AGENTFLOW_TWITTER_KOL_ONLY_HIGH": ""}, clear=False):
+            handles = _twitter_handles(sources)
+        self.assertEqual(set(handles), {"@vitalik", "@balajis"})
+
+    def test_kol_handles_only_high_mode(self) -> None:
+        from agentflow.agent_d1.main import _twitter_handles
+        sources = {
+            "twitter_kols": [
+                {"handle": "@vitalik",  "weight": "high"},
+                {"handle": "@karpathy", "weight": "high"},
+                {"handle": "@dwr_nt",   "weight": "medium"},
+                {"handle": "@dhh",      "weight": "medium"},
+                {"handle": "@nobody"},
+            ],
+        }
+        with patch.dict(os.environ, {"AGENTFLOW_TWITTER_KOL_ONLY_HIGH": "true"}, clear=False):
+            handles = _twitter_handles(sources)
+        self.assertEqual(set(handles), {"@vitalik", "@karpathy"})
+
+    def test_signal_domain_filter_drops_off_domain_when_enabled(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        crypto_pub = {
+            "brand": "ChainStream",
+            "default_description": "AI-native crypto infra real-time on-chain data",
+            "product_facts": [
+                "Kafka Streams ingests on-chain events",
+                "MCP execution layer for smart-money agents",
+                "Sub-second latency on Solana mainnet",
+            ],
+            "perspectives": [
+                "Most crypto data infra is batch — we are streaming-first",
+            ],
+            "keyword_groups": {
+                "core": ["on-chain", "smart money", "Solana"],
+                "agents": ["MCP", "agent execution"],
+            },
+        }
+        signals = [
+            # On-domain: should survive 0.03 threshold.
+            self._signal(
+                "twitter", "1", author="@balajis",
+                text="Solana on-chain MCP smart money agent",
+            ),
+            # Off-domain: should be dropped.
+            self._signal(
+                "twitter", "2", author="@paulg",
+                text="vintage Omega watches are surprisingly good value",
+            ),
+            self._signal(
+                "twitter", "3", author="@sama",
+                text="OpenAI launches new ChatGPT pricing tier today",
+            ),
+        ]
+
+        with (
+            patch.dict(os.environ, {
+                "AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD": "0.03",
+                "MOCK_LLM": "false",
+            }, clear=False),
+            patch.object(d1_main, "_resolve_active_publisher_tokens",
+                         return_value=set()),
+        ):
+            # When publisher tokens unresolvable → no-op.
+            kept_noop = d1_main._apply_signal_domain_filter(list(signals))
+        self.assertEqual(len(kept_noop), 3)
+
+        from agentflow.agent_d2.topic_spine_lint import _publisher_domain_tokens
+        with (
+            patch.dict(os.environ, {
+                "AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD": "0.03",
+                "MOCK_LLM": "false",
+            }, clear=False),
+            patch.object(
+                d1_main, "_resolve_active_publisher_tokens",
+                return_value=_publisher_domain_tokens(crypto_pub),
+            ),
+        ):
+            kept = d1_main._apply_signal_domain_filter(list(signals))
+        ids = {s.source_item_id for s in kept}
+        self.assertIn("1", ids)
+        self.assertNotIn("2", ids)
+        self.assertNotIn("3", ids)
+
+    def test_signal_domain_filter_disabled_by_default(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [
+            self._signal("twitter", "1", "irrelevant tweet", "@whoever"),
+        ]
+        with patch.dict(
+            os.environ, {"AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD": ""}, clear=False,
+        ):
+            kept = d1_main._apply_signal_domain_filter(list(signals))
+        self.assertEqual(len(kept), 1)
+
+
 class TopicSpineLintTests(AgentflowHomeTestCase):
     """v1.0.21 — catches drafts where the LLM forced-grafts publisher
     tokens onto an off-topic hotspot (e.g. TCG customs article spun

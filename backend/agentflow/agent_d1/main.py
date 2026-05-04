@@ -75,8 +75,35 @@ def _load_content_matrix(style_profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def _twitter_handles(sources: dict[str, Any]) -> list[str]:
+    """Extract twitter handles from sources.yaml ``twitter_kols``.
+
+    v1.0.22: respects per-handle ``weight`` field:
+      - ``weight: blocked`` — skipped entirely (operator can keep the row
+        for posterity without the signal flooding the recall pool).
+      - ``AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true`` env restricts to entries
+        with ``weight: high``. Recommended for tightly-scoped publishers
+        where general AI/tech KOLs (sama / paulg / karpathy) drown out
+        the vertical signal.
+    """
     kols = sources.get("twitter_kols") or []
-    return [k.get("handle") for k in kols if k.get("handle")]
+    only_high = (
+        os.environ.get("AGENTFLOW_TWITTER_KOL_ONLY_HIGH", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+    out: list[str] = []
+    for k in kols:
+        handle = k.get("handle")
+        if not handle:
+            continue
+        weight = str(k.get("weight") or "").strip().lower()
+        if weight == "blocked":
+            continue
+        if only_high and weight != "high":
+            continue
+        out.append(handle)
+    return out
 
 
 def _rss_feeds(sources: dict[str, Any]) -> list[dict[str, Any]]:
@@ -149,6 +176,17 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
                 dropped,
             )
 
+    # v1.0.22: signal-level domain filter. The composite-rank fit gate
+    # (v1.0.21 AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD) operates on already-
+    # clustered hotspots; by then a flood of off-domain signals (e.g.
+    # @sama / @paulg / @karpathy generic AI tweets for a crypto-infra
+    # publisher) has already shaped the clusters. This pass tokenizes
+    # each raw signal and drops the ones whose Jaccard overlap with the
+    # active publisher's domain tokens is below
+    # ``AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD`` (env, default 0 = disabled).
+    # Recommended for tightly-scoped publishers: 0.03.
+    all_signals = _apply_signal_domain_filter(all_signals)
+
     _log.info(
         "collectors produced %d signals (provenance=%s, mock_mode=%s)",
         len(all_signals),
@@ -156,6 +194,109 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
         explicit_mock,
     )
     return all_signals
+
+
+def _signal_text_tokens(sig: RawSignal) -> set[str]:
+    """Tokenize the user-visible content of a signal for the v1.0.22
+    domain filter. Uses topic_spine_lint's tokenizer to keep signals on
+    the same scale as the Gate B spine_lint."""
+    from agentflow.agent_d2.topic_spine_lint import _tokenize  # type: ignore
+    parts: list[str] = []
+    parts.append(getattr(sig, "text", "") or "")
+    parts.append(getattr(sig, "author", "") or "")
+    raw_meta = getattr(sig, "raw_metadata", None) or {}
+    if isinstance(raw_meta, dict):
+        for v in raw_meta.values():
+            if isinstance(v, str):
+                parts.append(v)
+    bag: set[str] = set()
+    for p in parts:
+        bag.update(_tokenize(p))
+    return bag
+
+
+def _resolve_active_publisher_tokens() -> set[str] | None:
+    """Best-effort resolution of the active publisher's domain tokens.
+    Returns None when no profile / intent / tokens (caller treats that
+    as "skip the filter"). Lazy-imports to avoid agent_d1 → agent_review
+    coupling on import."""
+    try:
+        from agentflow.shared.memory import load_current_intent
+        from agentflow.shared.topic_profiles import (
+            resolve_publisher_account_from_intent,
+        )
+        from agentflow.agent_d2.topic_spine_lint import _publisher_domain_tokens
+    except Exception:
+        return None
+    try:
+        intent = load_current_intent() or {}
+        pub = resolve_publisher_account_from_intent(intent)
+    except Exception:
+        pub = None
+    if not pub:
+        # Fall back to active topic profile when intent doesn't resolve.
+        try:
+            from agentflow.cli.topic_profile_commands import _read_active_profile_id  # type: ignore
+            from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+            pid = _read_active_profile_id()
+            if pid:
+                data = load_user_topic_profiles() or {}
+                profiles = (
+                    data.get("profiles") or {}
+                    if isinstance(data, dict) else {}
+                )
+                profile = profiles.get(pid) or {}
+                pub = profile.get("publisher_account") or {}
+                # Augment with profile-level keyword_groups so the
+                # tokenizer sees domain keywords too.
+                if isinstance(profile.get("keyword_groups"), (dict, list)):
+                    pub = dict(pub)
+                    pub["keyword_groups"] = profile["keyword_groups"]
+        except Exception:
+            pub = None
+    if not pub:
+        return None
+    tokens = _publisher_domain_tokens(pub)
+    return tokens if tokens else None
+
+
+def _apply_signal_domain_filter(signals: list[RawSignal]) -> list[RawSignal]:
+    raw = os.environ.get("AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD", "0").strip()
+    try:
+        threshold = max(0.0, float(raw or "0"))
+    except (TypeError, ValueError):
+        threshold = 0.0
+    if threshold <= 0 or not signals:
+        return signals
+    pub_tokens = _resolve_active_publisher_tokens()
+    if not pub_tokens or len(pub_tokens) < 5:
+        return signals
+    kept: list[RawSignal] = []
+    dropped_examples: list[str] = []
+    for sig in signals:
+        sig_tokens = _signal_text_tokens(sig)
+        if not sig_tokens:
+            continue
+        intersect = sig_tokens & pub_tokens
+        union = sig_tokens | pub_tokens
+        jaccard = len(intersect) / len(union) if union else 0.0
+        if jaccard >= threshold:
+            kept.append(sig)
+        else:
+            if len(dropped_examples) < 3:
+                preview = (getattr(sig, "text", "") or "")[:60].replace("\n", " ")
+                dropped_examples.append(
+                    f"{getattr(sig, 'source', '?')}/{getattr(sig, 'author', '?')}: {preview!r}"
+                )
+    dropped = len(signals) - len(kept)
+    if dropped:
+        _log.warning(
+            "signal-domain filter dropped %d/%d signals below threshold %.3f. "
+            "examples: %s",
+            dropped, len(signals), threshold,
+            "; ".join(dropped_examples),
+        )
+    return kept
 
 
 # ---------------------------------------------------------------------------

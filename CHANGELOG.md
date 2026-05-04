@@ -16,6 +16,60 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.22] — 2026-05-04
+
+Real-deploy report (chainstream-service): D1 recall pool was being
+dominated by general-tech KOLs (`@sama`, `@paulg`, `@karpathy`) and
+broad HN keywords (`AI` / `Claude` / `LLM`), so even after v1.0.21's
+hard topic-fit gate, every scheduled scan was returning OpenAI
+gossip / antique-watch tweets / startup commentary that got
+clean-rejected, leaving the operator with empty Gate A digests.
+v1.0.21 stops bad output; this one stops bad input.
+
+### Added — D1 KOL allowlist
+
+- `agent_d1/main.py::_twitter_handles` now respects the per-handle
+  `weight` field from sources.yaml:
+  - `weight: blocked` → skipped entirely (operator can keep the
+    historical row without the signal flooding the pool).
+  - `AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true` env restricts collection
+    to `weight: high` entries. Recommended for tightly-scoped
+    publishers where general-tech KOLs would otherwise drown out
+    the vertical signal.
+
+### Added — D1 signal-level domain filter
+
+- New helpers in `agent_d1/main.py`:
+  `_apply_signal_domain_filter` / `_resolve_active_publisher_tokens`
+  / `_signal_text_tokens`. Operates on raw signals BEFORE clustering:
+  per-signal Jaccard overlap with the active publisher's domain
+  tokens (drawn from `product_facts` + `perspectives` +
+  `default_description` + `keyword_groups`); below
+  `AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD` are dropped with a warning
+  log + first 3 examples for triage. Default 0 = disabled
+  (backward compat). Recommended 0.03.
+- Why one stage earlier than v1.0.21's hard fit gate: composite
+  ranking cluster-level scoring runs after clustering, so an
+  off-domain flood has already shaped the centroids by then.
+  Pre-cluster filter cuts the noise at intake.
+- Lazy-imports `topic_spine_lint._tokenize` and
+  `topic_spine_lint._publisher_domain_tokens` so D1 doesn't take a
+  load-time dep on D2.
+
+### Tests
+
+- `D1RecallFilterTests` × 4: KOL `weight: blocked` skipped;
+  `AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true` restricts to high; signal
+  filter drops off-domain when enabled and publisher resolves;
+  filter is no-op when disabled (default).
+
+### Recommended config (chainstream-service overlay 1.0.2+)
+
+```env
+AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD=0.03
+AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true
+```
+
 ## [1.0.21] — 2026-05-03
 
 Real-deploy report: drafts coming out look "anchored" (every paragraph
