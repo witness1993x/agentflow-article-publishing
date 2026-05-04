@@ -1943,6 +1943,29 @@ def write(
                 "defaults_source": defaults_source,
             },
         )
+        # v1.0.29 — structural audit between draft assembly and Gate B.
+        try:
+            from agentflow.agent_d2.main import run_structure_audit
+            draft, audit_outcome = asyncio.run(
+                run_structure_audit(
+                    draft=draft,
+                    skeleton=skeleton,
+                    hotspot_id=hotspot_id,
+                    style_profile=_load_style_profile_safe(),
+                )
+            )
+            draft_dict = draft.to_dict()
+            if not as_json and audit_outcome.verdict not in {"skipped", "pass"}:
+                click.echo(
+                    f"structure audit: verdict={audit_outcome.verdict} "
+                    f"score={audit_outcome.score:.2f} "
+                    f"patched={len(audit_outcome.patched_section_indices)} "
+                    f"rewrote={'yes' if audit_outcome.rewritten_draft else 'no'}",
+                    err=True,
+                )
+        except Exception as _err:  # pragma: no cover — audit must never block Gate B
+            click.echo(f"(structure audit skipped: {_err})", err=True)
+
         # Auto-pick path runs fill in-process (bypassing the `af fill` CLI),
         # so the Gate B post-trigger has to be wired here too.
         try:
@@ -2097,6 +2120,28 @@ def fill(
             "mode": "manual_refill",
         },
     )
+
+    # v1.0.29 — structural audit between draft assembly and Gate B.
+    try:
+        from agentflow.agent_d2.main import run_structure_audit
+        draft, audit_outcome = asyncio.run(
+            run_structure_audit(
+                draft=draft,
+                skeleton=skeleton,
+                hotspot_id=hotspot_id,
+                style_profile=_load_style_profile_safe(),
+            )
+        )
+        if not as_json and audit_outcome.verdict not in {"skipped", "pass"}:
+            click.echo(
+                f"structure audit: verdict={audit_outcome.verdict} "
+                f"score={audit_outcome.score:.2f} "
+                f"patched={len(audit_outcome.patched_section_indices)} "
+                f"rewrote={'yes' if audit_outcome.rewritten_draft else 'no'}",
+                err=True,
+            )
+    except Exception as _err:  # pragma: no cover — audit must never block Gate B
+        click.echo(f"(structure audit skipped: {_err})", err=True)
 
     # Auto-trigger Gate B card if TG is configured. Failures here must NOT
     # break the fill command — the draft is on disk regardless.
