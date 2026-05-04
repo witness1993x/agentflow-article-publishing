@@ -4570,5 +4570,107 @@ class TwitterSearchCollectorTests(AgentflowHomeTestCase):
         self.assertEqual(provenance.get("twitter", {}).get("real"), 2)
 
 
+class LarkBridgeCommandTests(AgentflowHomeTestCase):
+    """v1.1.0 — lark_* bridge commands dispatch in-process to lark_callback,
+    skip subprocess, and return the handler's reply payload."""
+
+    def _client(self):
+        return TestClient(create_app())
+
+    def test_lark_commands_listed_in_bridge_descriptor(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "REVIEW_DASHBOARD_TOKEN": "rt",
+                "AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt",
+            },
+            clear=False,
+        ):
+            client = self._client()
+            res = client.get("/api/bridge", headers={"Authorization": "Bearer rt"})
+            self.assertEqual(res.status_code, 200)
+            commands = res.json()["commands"]
+            for name in (
+                "lark_gate_b_approve",
+                "lark_gate_b_reject",
+                "lark_takeover",
+                "lark_view_audit",
+                "lark_view_meta",
+                "lark_refill",
+            ):
+                self.assertIn(name, commands)
+                self.assertFalse(commands[name]["dangerous"])
+
+    def test_lark_gate_b_approve_dispatches_in_process(self) -> None:
+        from agentflow.agent_review import lark_callback
+
+        captured: dict = {}
+
+        def fake_handle(*, event_kind, article_id, action, payload, operator):
+            captured["event_kind"] = event_kind
+            captured["article_id"] = article_id
+            captured["action"] = action
+            captured["operator"] = operator
+            return {
+                "ack": True,
+                "reply_card": {"header": {"title": {"content": "✅ approved"}}},
+                "reply_text": None,
+                "side_effects": [],
+            }
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt"}, clear=False
+        ), patch.object(lark_callback, "handle_event", new=fake_handle), patch(
+            "agentflow.agent_review.web.subprocess.run",
+        ) as run_mock:
+            client = self._client()
+            res = client.post(
+                "/api/commands",
+                headers={"Authorization": "Bearer wt"},
+                json={
+                    "command": "lark_gate_b_approve",
+                    "params": {
+                        "article_id": "aid_x",
+                        "operator_open_id": "ou_test",
+                        "operator_name": "Tester",
+                    },
+                },
+            )
+            self.assertEqual(res.status_code, 200, msg=res.text)
+            payload = res.json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "lark_gate_b_approve")
+            # subprocess was NOT called for the in-process command
+            run_mock.assert_not_called()
+            # The handler received the right action keyword
+            self.assertEqual(captured["event_kind"], "card_action")
+            self.assertEqual(captured["action"], "approve_b")
+            self.assertEqual(captured["article_id"], "aid_x")
+            self.assertEqual(captured["operator"]["open_id"], "ou_test")
+            # And the data field carries the handler's reply
+            self.assertIn("reply_card", payload["data"])
+
+    def test_lark_view_audit_passes_action_view_audit(self) -> None:
+        from agentflow.agent_review import lark_callback
+
+        seen_action: list[str] = []
+
+        def fake_handle(**kwargs):
+            seen_action.append(kwargs["action"])
+            return {"ack": True, "reply_card": None, "reply_text": "ok", "side_effects": []}
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt"}, clear=False
+        ), patch.object(lark_callback, "handle_event", new=fake_handle):
+            client = self._client()
+            res = client.post(
+                "/api/commands",
+                headers={"Authorization": "Bearer wt"},
+                json={"command": "lark_view_audit", "params": {"article_id": "a-1"}},
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(seen_action, ["view_audit"])
+
+
 if __name__ == "__main__":
     unittest.main()

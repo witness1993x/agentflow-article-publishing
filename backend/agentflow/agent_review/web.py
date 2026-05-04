@@ -223,6 +223,53 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "timeout_seconds": 600,
         "dangerous": True,
     },
+    # ----- v1.1.0 — Lark / OpenClaw plugin bridge commands -----
+    # These dispatch in-process (NOT subprocess) into agent_review.lark_callback
+    # so the OpenClaw Lark plugin can register them as native tools.
+    # Approve / reject mutate state via review_state.transition; idempotency
+    # comes from StateError catch in lark_callback.
+    "lark_gate_b_approve": {
+        "scope": "review",
+        "description": "Lark Gate B approve — transition draft to approved (idempotent).",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_b_reject": {
+        "scope": "review",
+        "description": "Lark Gate B reject — transition draft back to drafting.",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_takeover": {
+        "scope": "review",
+        "description": "Trigger manual takeover for an article (locked-takeover card).",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_view_audit": {
+        "scope": "read",
+        "description": "Render d2_structure_audit memory events for an article as a Lark card payload.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_view_meta": {
+        "scope": "read",
+        "description": "Render article metadata snapshot as a Lark card payload.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_refill": {
+        "scope": "review",
+        "description": "Phase 1 stub — returns a Lark card directing operator to TG; no state mutation.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
 }
 
 _BRIDGE_SPEC_VERSION = "1.0"
@@ -441,6 +488,47 @@ def _build_command_argv(req: CommandRequest) -> list[str]:
     raise HTTPException(status_code=400, detail=f"unsupported command: {cmd}")
 
 
+def _run_lark_command_in_process(
+    command: str, params: dict[str, Any], request_id: str, scope: str
+) -> dict[str, Any]:
+    """v1.1.0 — dispatch lark_* commands directly into agent_review.lark_callback
+    without spawning a subprocess. The OpenClaw Lark plugin posts here when an
+    operator clicks a card button or @-mentions the bot.
+    """
+    from agentflow.agent_review import lark_callback  # local import to keep test isolation
+
+    article_id = _str_param(params, "article_id")
+    operator = {
+        "open_id": _str_param(params, "operator_open_id") or "",
+        "name": _str_param(params, "operator_name"),
+    }
+    raw_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+
+    action_map = {
+        "lark_gate_b_approve": "approve_b",
+        "lark_gate_b_reject": "reject_b",
+        "lark_takeover": "takeover",
+        "lark_view_audit": "view_audit",
+        "lark_view_meta": "view_meta",
+        "lark_refill": "refill",
+    }
+    result = lark_callback.handle_event(
+        event_kind="card_action",
+        article_id=article_id,
+        action=action_map[command],
+        payload=raw_payload,
+        operator=operator,
+    )
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "command": command,
+        "scope": scope,
+        "data": result,
+        "stderr": None,
+    }
+
+
 def _run_command(req: CommandRequest) -> dict[str, Any]:
     spec = _COMMAND_SPECS.get(req.command)
     if spec is None:
@@ -469,6 +557,30 @@ def _run_command(req: CommandRequest) -> dict[str, Any]:
         },
         actor={"type": "agent_bridge"},
     )
+
+    # In-process path for lark_* commands (v1.1.0 OpenClaw plugin bridge).
+    if spec.get("in_process"):
+        try:
+            payload = _run_lark_command_in_process(
+                req.command, req.params or {}, request_id, spec["scope"]
+            )
+        except Exception as err:
+            emit_agent_event(
+                source="api",
+                event_type="agent.command.failed",
+                article_id=_str_param(req.params, "article_id"),
+                payload={"request_id": request_id, "command": req.command, "error": str(err)},
+                actor={"type": "agent_bridge"},
+            )
+            raise HTTPException(status_code=500, detail=f"in-process command failed: {err}") from err
+        emit_agent_event(
+            source="api",
+            event_type="agent.command.completed",
+            article_id=_str_param(req.params, "article_id"),
+            payload={"request_id": request_id, "command": req.command, "returncode": 0},
+            actor={"type": "agent_bridge"},
+        )
+        return payload
 
     argv = _af_argv(*_build_command_argv(req))
     env = os.environ.copy()
