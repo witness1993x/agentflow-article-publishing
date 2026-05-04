@@ -16,6 +16,45 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.24] — 2026-05-04
+
+Fixes the actual root cause of the "every fresh install gets OpenAI
+gossip / antique-watch tweets" recall problem: the example
+`config-examples/sources.example.yaml` shipped with `@paulg` /
+`@karpathy` / `@simonw` flagged `weight: high`, baking a generalist-
+AI bias into every install bootstrapped from this template. v1.0.22
+added the weight semantics; v1.0.24 makes the example honor them.
+
+### Changed
+
+- `config-examples/sources.example.yaml`:
+  * All twitter handles default to `weight: medium` (was a mix of
+    `high` and `medium` with implicit favoritism toward generalist-AI
+    accounts).
+  * Header comment block now documents the v1.0.22+ weight semantics
+    (`high` / `medium` / `blocked`) and the 3 companion env knobs
+    (`AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD`,
+    `AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD`,
+    `AGENTFLOW_TWITTER_KOL_ONLY_HIGH`).
+  * Per-handle `note:` field added to the 6 generalist accounts
+    (`@paulg` / `@sama` / `@karpathy` / `@simonw` / `@patrickc` /
+    `@dhh`) explaining why crypto-infra / B2B-SaaS / regulated-finance
+    publishers typically block them. Pointer to the
+    `chainstream-service` overlay as a worked example.
+- Framework remains brand-neutral: defaults are `medium` across the
+  board, no implicit favorites. Operators tune weights themselves
+  based on their vertical, or apply a brand-specific overlay.
+
+### Why this matters
+
+Without v1.0.24, a fresh `cp config-examples/sources.example.yaml
+~/.agentflow/sources.yaml` produces a recall pool dominated by 4
+high-weight generalist accounts. The v1.0.22 hard fit gate + the
+v1.0.23 signal-domain filter then have to do all the work of
+filtering them out — and even then, cross-domain words like
+`agent` / `data` / `infra` let some signals through. Removing the
+implicit bias at the source is cheaper than fighting it downstream.
+
 ## [1.0.23] — 2026-05-04
 
 Two same-day fixes from a real verification run of v1.0.22 against the

@@ -1,53 +1,53 @@
 # Sources Configuration Example
-# 复制到 ~/.agentflow/sources.yaml 后按需调整
+#
+# Copy to ~/.agentflow/sources.yaml after install. The framework is
+# brand-neutral; this example carries no built-in vertical bias. Adjust
+# the per-handle ``weight`` field for your own brand BEFORE running
+# scheduled scans, otherwise generalist accounts will dominate the
+# recall pool.
+#
+# `weight` semantics (v1.0.22+):
+#   high     — always collected
+#   medium   — collected unless AGENTFLOW_TWITTER_KOL_ONLY_HIGH=true
+#   blocked  — never collected (slot kept for posterity / re-enabling)
+#
+# Companion env knobs (in your .env):
+#   AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD=0.03   # per-signal coverage gate
+#   AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=0.05  # per-cluster Jaccard gate
+#   AGENTFLOW_TWITTER_KOL_ONLY_HIGH=false    # restrict to weight: high
+#
+# Tightly-scoped publishers (crypto-infra, B2B SaaS, regulated finance,
+# etc.) typically want to mark generalist AI / startup commentary
+# accounts as ``weight: blocked`` outright — see the
+# `chainstream-service` overlay for a worked example.
 
 version: "1.0"
-last_updated: "2026-04-22"
+last_updated: "2026-05-04"
 
 # ============================================================
-# Twitter/X KOL
+# Twitter / X KOL
 # ============================================================
+# Default everyone to `medium` so the example is genuinely neutral.
+# Operators promote a small set to `high` and `blocked` based on
+# their own brand vertical. Pre-v1.0.22 example shipped with
+# `@paulg` / `@karpathy` / `@simonw` at `weight: high`, which leaked
+# OpenAI / startup / vintage-watch tweets into every fresh install
+# regardless of the publisher's actual domain. v1.0.24 corrects this
+# bias — operators tune weights themselves.
 twitter_kols:
-  # AI × Web3 核心关注
+  # Web3 / crypto
   - handle: "@balajis"
-    weight: high
+    weight: medium
     relevance_to_series: ["B", "C"]
 
   - handle: "@VitalikButerin"
-    weight: high
+    weight: medium
     relevance_to_series: ["C"]
 
   - handle: "@dwr_nt"
-    weight: high
+    weight: medium
     relevance_to_series: ["B", "C"]
 
-  # AI 领域
-  - handle: "@paulg"
-    weight: high
-    relevance_to_series: ["A", "B"]
-
-  - handle: "@sama"
-    weight: medium
-    relevance_to_series: ["B"]
-
-  - handle: "@karpathy"
-    weight: high
-    relevance_to_series: ["B"]
-
-  - handle: "@simonw"
-    weight: high
-    relevance_to_series: ["B"]
-
-  # 产品与工程
-  - handle: "@patrickc"
-    weight: medium
-    relevance_to_series: ["A", "B"]
-
-  - handle: "@dhh"
-    weight: medium
-    relevance_to_series: ["A", "B"]
-
-  # Web3 specific
   - handle: "@rainandcoffee"
     weight: medium
     relevance_to_series: ["C"]
@@ -56,11 +56,45 @@ twitter_kols:
     weight: medium
     relevance_to_series: ["C"]
 
+  # AI / general tech — typically blocked for tightly-scoped
+  # publishers. Listed (not deleted) so operators see what they're
+  # opting in/out of when they tune the file. Flip to `medium` or
+  # `high` if your brand actually covers this beat.
+  - handle: "@paulg"
+    weight: medium
+    relevance_to_series: ["A", "B"]
+    note: "VC / startup commentary; blocked by chainstream overlay"
+
+  - handle: "@sama"
+    weight: medium
+    relevance_to_series: ["B"]
+    note: "OpenAI CEO; blocked by chainstream overlay"
+
+  - handle: "@karpathy"
+    weight: medium
+    relevance_to_series: ["B"]
+    note: "AI research; blocked by chainstream overlay"
+
+  - handle: "@simonw"
+    weight: medium
+    relevance_to_series: ["B"]
+    note: "Python / general AI tooling"
+
+  - handle: "@patrickc"
+    weight: medium
+    relevance_to_series: ["A", "B"]
+    note: "Stripe; payments-tangential"
+
+  - handle: "@dhh"
+    weight: medium
+    relevance_to_series: ["A", "B"]
+    note: "Rails / general dev"
+
 # ============================================================
 # RSS Feeds
 # ============================================================
 rss_feeds:
-  # 行业 Newsletter
+  # Industry / general tech
   - url: "https://stratechery.com/feed/"
     name: "Stratechery"
     relevance_to_series: ["C"]
@@ -73,7 +107,7 @@ rss_feeds:
     name: "Matt Blewitt (Blockworks)"
     relevance_to_series: ["C"]
 
-  # 技术博客
+  # AI / general tech
   - url: "https://simonwillison.net/atom/everything/"
     name: "Simon Willison"
     relevance_to_series: ["B"]
@@ -82,7 +116,7 @@ rss_feeds:
     name: "Anthropic Blog"
     relevance_to_series: ["B"]
 
-  # Web3 研究
+  # Web3 research
   - url: "https://decentralisedco.com/feed"
     name: "Decentralised.co"
     relevance_to_series: ["C"]
@@ -94,6 +128,12 @@ rss_feeds:
 # ============================================================
 # HackerNews
 # ============================================================
+# Default keywords are deliberately broad so this example matches
+# anything. Real installs SHOULD narrow these to their vertical —
+# `AI` / `Claude` / `LLM` match half of the HN front page on any
+# given day, drowning out narrower signals like `MEV` / `rollup` /
+# `indexer` for a crypto-infra publisher. The chainstream overlay
+# replaces these wholesale.
 hackernews:
   enabled: true
   filter_keywords:
@@ -109,7 +149,7 @@ hackernews:
   min_score: 50
 
 # ============================================================
-# Substack 竞品 (同领域其他作者)
+# Substack competitors (same domain, other authors)
 # ============================================================
 substack_competitors:
   - url: "https://decentralisedco.com/"
@@ -125,10 +165,9 @@ substack_competitors:
     relevance_to_series: ["B"]
 
 # ============================================================
-# Newsletter 邮件订阅 (通过 IMAP 读)
+# Newsletter via IMAP (v0.5+)
 # ============================================================
 newsletters:
-  # 暂时不启用 (需要配置 IMAP),v0.5 再说
   enabled: false
   imap_config:
     host: "imap.gmail.com"
@@ -141,17 +180,17 @@ newsletters:
       relevance_to_series: ["B"]
 
 # ============================================================
-# 发现参数
+# Discovery params
 # ============================================================
 discovery_config:
-  scan_frequency_hours: 6            # 每 6 小时扫一次
-  daily_candidates_target: 18        # 目标每日推送 ~18 条
-  min_discussion_volume: 50          # Twitter 回复数门槛
-  min_hn_score: 50                   # HN 分数门槛
-  time_decay_hours: 48               # 超过 48h 的不推
-  cross_source_bonus: 0.3            # 跨源热点加分
+  scan_frequency_hours: 6            # how often to scan
+  daily_candidates_target: 18        # candidates target per day
+  min_discussion_volume: 50          # Twitter reply threshold
+  min_hn_score: 50                   # HN score threshold
+  time_decay_hours: 48               # ignore signals older than this
+  cross_source_bonus: 0.3            # boost when same topic hits multiple sources
 
-  # 系列权重分配 (影响推送比例)
+  # Series weight allocation (affects pushed mix)
   series_weight:
     series_A: 0.25
     series_B: 0.45
