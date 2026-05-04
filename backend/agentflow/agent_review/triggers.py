@@ -523,6 +523,40 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     tg_client.send_long_text(chat_id, render.escape_md2(body_raw))
     tg_client.send_document(chat_id, body_doc, caption=None, parse_mode=None)
 
+    # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
+    # actionable — Gate B operations stay on TG. Gated by
+    # AGENTFLOW_LARK_DRAFT_FANOUT (default off). Best-effort.
+    try:
+        from agentflow.shared import lark_webhook
+        audit_summary: str | None = None
+        audit_meta = meta.get("structure_audit") or {}
+        if isinstance(audit_meta, dict):
+            verdict = audit_meta.get("verdict")
+            try:
+                score = float(audit_meta.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if verdict and verdict not in {"skipped", "pass", None}:
+                audit_summary = f"audit={verdict} ({score:.2f})"
+        mirror_template = os.environ.get(
+            "AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE", ""
+        ).strip()
+        mirror_url: str | None = None
+        if mirror_template:
+            try:
+                mirror_url = mirror_template.format(article_id=article_id)
+            except (KeyError, IndexError, ValueError):
+                mirror_url = None
+        lark_webhook.notify_draft_ready(
+            article_id=article_id,
+            title=title,
+            draft_md=body_raw,
+            mirror_url=mirror_url,
+            audit_summary=audit_summary,
+        )
+    except Exception as err:  # pragma: no cover — best-effort
+        _log.info("Lark draft fan-out skipped for %s: %s", article_id, err)
+
     try:
         _state.transition(
             article_id,

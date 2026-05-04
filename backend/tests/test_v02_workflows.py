@@ -4570,6 +4570,134 @@ class TwitterSearchCollectorTests(AgentflowHomeTestCase):
         self.assertEqual(provenance.get("twitter", {}).get("real"), 2)
 
 
+class LarkDraftFanoutTests(AgentflowHomeTestCase):
+    """v1.0.30 — `notify_draft_ready` Gate B fan-out into Lark."""
+
+    def _capture_post(self):
+        captured: list[dict] = []
+
+        def fake_post(payload):
+            captured.append(payload)
+
+        return captured, fake_post
+
+    def test_disabled_by_default_when_flag_unset(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        with patch.dict(
+            os.environ,
+            {"LARK_WEBHOOK_URL": "https://x", "AGENTFLOW_LARK_DRAFT_FANOUT": ""},
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_x", title="t", draft_md="hello"
+            )
+        self.assertEqual(captured, [])
+
+    def test_short_draft_emits_full_body_in_card(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        body = "## 第一节\n\n这是正文，我们做实时数据。\n"
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_short", title="标题 A", draft_md=body
+            )
+        self.assertEqual(len(captured), 1)
+        elements = captured[0]["card"]["elements"]
+        rendered = elements[0]["text"]["content"]
+        self.assertIn("aid_short", rendered)
+        self.assertIn("第一节", rendered)
+        self.assertIn("这是正文", rendered)
+        # Not truncated → no "截断" marker
+        self.assertNotIn("截断", rendered)
+
+    def test_long_draft_truncates_and_adds_mirror_button(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        # 25 KB of content — well over the 17 KB body budget
+        body = ("正文。" * 5000)
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_long",
+                title="长稿件",
+                draft_md=body,
+                mirror_url="https://intra.example.com/d/aid_long.md",
+            )
+        self.assertEqual(len(captured), 1)
+        rendered = captured[0]["card"]["elements"][0]["text"]["content"]
+        self.assertIn("截断", rendered)
+        self.assertIn("aid_long", rendered)
+        # Action row carries a "完整稿件" URL button pointing at mirror_url
+        action_row = captured[0]["card"]["elements"][1]
+        self.assertEqual(action_row["tag"], "action")
+        urls = [b["url"] for b in action_row["actions"]]
+        self.assertIn("https://intra.example.com/d/aid_long.md", urls)
+
+    def test_long_draft_no_mirror_omits_mirror_button(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        body = ("x" * 25_000)
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_lnm", title="t", draft_md=body, mirror_url=None
+            )
+        self.assertEqual(len(captured), 1)
+        action_row = captured[0]["card"]["elements"][1]
+        labels = [b["text"]["content"] for b in action_row["actions"]]
+        self.assertNotIn("📄 完整稿件", labels)
+        self.assertIn("📌 去 TG 审稿", labels)
+
+    def test_audit_summary_surfaces_in_card(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_a",
+                title="t",
+                draft_md="short",
+                audit_summary="audit=patch (0.62)",
+            )
+        rendered = captured[0]["card"]["elements"][0]["text"]["content"]
+        self.assertIn("audit=patch", rendered)
+
+
 class D2StructureAuditTests(AgentflowHomeTestCase):
     """v1.0.29 — whole-article structure audit between fill and Gate B."""
 
