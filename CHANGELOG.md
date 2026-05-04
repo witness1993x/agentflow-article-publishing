@@ -16,6 +16,105 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.30] — 2026-04-30
+
+**Lark draft fan-out at Gate B.**
+
+When Gate B fires on Telegram, also push the assembled draft body to the
+Lark group (push-only — Gate B operations remain on TG since Lark
+Custom Bot has no callback channel). Pre-1.0.30, Lark only saw
+`notify_hotspots_digest` / `notify_publish_ready` /
+`notify_dispatch_result` / `notify_spawn_failure`; the actual draft
+content was invisible to anyone watching the Lark group.
+
+New `lark_webhook.notify_draft_ready(article_id, title, draft_md=...,
+mirror_url=None, audit_summary=None)`:
+
+* If the draft body is < 17 KB (after card overhead): full markdown
+  rendered inside an interactive card.
+* Otherwise: truncated to ~1500 characters in the card with a
+  "📄 完整稿件" button pointing at the mirror URL.
+
+Audit verdict (v1.0.29) is surfaced in the card subtitle when present
+and not `pass`/`skipped` — operators see "audit=patch (0.62)" inline.
+
+New env keys (both optional, default off):
+
+```
+AGENTFLOW_LARK_DRAFT_FANOUT=true
+AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE=https://example.com/drafts/{article_id}.md
+```
+
+Wired into `agent_review.triggers.post_gate_b` immediately after the
+TG `send_long_text` + `send_document` calls, before the state
+transition. Lark failure (network, webhook 404, etc.) never blocks the
+TG path or state machine.
+
+Tests: 5 new in `tests.test_v02_workflows.LarkDraftFanoutTests`
+covering disabled-by-default / short-draft-full-body / long-draft-
+truncated-with-mirror / long-draft-truncated-no-mirror /
+audit-summary-surfaced.
+
+## [1.0.29] — 2026-04-30
+
+**D2 whole-article structure audit between fill and Gate B.**
+
+Existing D2 lints (`specificity_lint`, `topic_spine_lint`,
+`compliance_checker`, `language_lint`) are point checks — they catch
+single-paragraph or token-presence failures. None of them score the
+article as a whole. Real-world drafts were shipping with disjoint
+sections, anchor density front-loaded into the first third, and
+voice drift mid-piece — all individually below the existing lints'
+detection thresholds, but cumulatively a "structurally weak" article
+hitting Gate B.
+
+This release adds `agent_d2/structure_audit.py`, a single LLM call
+between `fill_all_sections` returning and `post_gate_b` firing, that
+scores the draft on four dimensions:
+
+* **cohesion** — does each section reference the prior section's
+  conclusion or premise?
+* **anchor_density** — are publisher product_facts / perspectives
+  evenly distributed front-to-back, not just front-loaded?
+* **thesis_callback** — does the closing restate / deepen / turn the
+  opening's central claim?
+* **voice_consistency** — pronoun and voice stable throughout
+  (catches "我们做的" → "行业应该" mid-drift)
+
+Three verdicts driven by two thresholds:
+
+| score | verdict | action |
+|---|---|---|
+| `>= patch_threshold` (default 0.75) | `pass` | draft unchanged, Gate B fires |
+| `>= rewrite_threshold` (default 0.50) | `patch` | flagged sections re-filled with audit issues appended to the per-section prompt; one round only by default |
+| `< rewrite_threshold` | `rewrite` | auditor itself writes a full replacement draft from the same hotspot + ctx |
+
+Patch is the default response (preserves D2's multi-prompt fill
+pipeline + its anchor density advantage); rewrite is the hard fallback
+when the draft is structurally beyond saving. Audit always passes
+through Gate B — we do NOT bypass operator review on a high audit
+score; Gate B remains the single decision point.
+
+New env keys (all optional):
+
+```
+AGENTFLOW_D2_AUDIT_ENABLED=true                 # default on
+AGENTFLOW_D2_AUDIT_PATCH_THRESHOLD=0.75
+AGENTFLOW_D2_AUDIT_REWRITE_THRESHOLD=0.50
+AGENTFLOW_D2_AUDIT_MAX_PATCH_ROUNDS=1
+```
+
+New files:
+* `agentflow/agent_d2/structure_audit.py` — module
+* `prompts/d2_structure_audit.md` — JSON-output audit prompt
+* `prompts/d2_full_rewrite.md` — text-output rewrite prompt
+* tests in `tests/test_v02_workflows.py::D2StructureAuditTests`
+
+Wired into both `af write --auto-pick` and `af fill` (CLI). Audit
+failure (LLM error, missing hotspot, parse failure on rewrite output)
+never blocks Gate B — a memory event with `verdict="error"` is logged
+and the original draft proceeds.
+
 ## [1.0.28] — 2026-05-04
 
 Real-data verification on chainstream produced one residual noise

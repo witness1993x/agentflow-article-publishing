@@ -4570,5 +4570,440 @@ class TwitterSearchCollectorTests(AgentflowHomeTestCase):
         self.assertEqual(provenance.get("twitter", {}).get("real"), 2)
 
 
+class LarkDraftFanoutTests(AgentflowHomeTestCase):
+    """v1.0.30 — `notify_draft_ready` Gate B fan-out into Lark."""
+
+    def _capture_post(self):
+        captured: list[dict] = []
+
+        def fake_post(payload):
+            captured.append(payload)
+
+        return captured, fake_post
+
+    def test_disabled_by_default_when_flag_unset(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        with patch.dict(
+            os.environ,
+            {"LARK_WEBHOOK_URL": "https://x", "AGENTFLOW_LARK_DRAFT_FANOUT": ""},
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_x", title="t", draft_md="hello"
+            )
+        self.assertEqual(captured, [])
+
+    def test_short_draft_emits_full_body_in_card(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        body = "## 第一节\n\n这是正文，我们做实时数据。\n"
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_short", title="标题 A", draft_md=body
+            )
+        self.assertEqual(len(captured), 1)
+        elements = captured[0]["card"]["elements"]
+        rendered = elements[0]["text"]["content"]
+        self.assertIn("aid_short", rendered)
+        self.assertIn("第一节", rendered)
+        self.assertIn("这是正文", rendered)
+        # Not truncated → no "截断" marker
+        self.assertNotIn("截断", rendered)
+
+    def test_long_draft_truncates_and_adds_mirror_button(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        # 25 KB of content — well over the 17 KB body budget
+        body = ("正文。" * 5000)
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_long",
+                title="长稿件",
+                draft_md=body,
+                mirror_url="https://intra.example.com/d/aid_long.md",
+            )
+        self.assertEqual(len(captured), 1)
+        rendered = captured[0]["card"]["elements"][0]["text"]["content"]
+        self.assertIn("截断", rendered)
+        self.assertIn("aid_long", rendered)
+        # Action row carries a "完整稿件" URL button pointing at mirror_url
+        action_row = captured[0]["card"]["elements"][1]
+        self.assertEqual(action_row["tag"], "action")
+        urls = [b["url"] for b in action_row["actions"]]
+        self.assertIn("https://intra.example.com/d/aid_long.md", urls)
+
+    def test_long_draft_no_mirror_omits_mirror_button(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        body = ("x" * 25_000)
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_lnm", title="t", draft_md=body, mirror_url=None
+            )
+        self.assertEqual(len(captured), 1)
+        action_row = captured[0]["card"]["elements"][1]
+        labels = [b["text"]["content"] for b in action_row["actions"]]
+        self.assertNotIn("📄 完整稿件", labels)
+        self.assertIn("📌 去 TG 审稿", labels)
+
+    def test_audit_summary_surfaces_in_card(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        captured, fake_post = self._capture_post()
+        with patch.dict(
+            os.environ,
+            {
+                "LARK_WEBHOOK_URL": "https://x",
+                "AGENTFLOW_LARK_DRAFT_FANOUT": "true",
+                "LARK_WEBHOOK_TG_BOT_URL": "https://t.me/test_bot",
+            },
+            clear=False,
+        ), patch.object(lark_webhook, "_post", new=fake_post):
+            lark_webhook.notify_draft_ready(
+                article_id="aid_a",
+                title="t",
+                draft_md="short",
+                audit_summary="audit=patch (0.62)",
+            )
+        rendered = captured[0]["card"]["elements"][0]["text"]["content"]
+        self.assertIn("audit=patch", rendered)
+
+
+class D2StructureAuditTests(AgentflowHomeTestCase):
+    """v1.0.29 — whole-article structure audit between fill and Gate B."""
+
+    def _build_draft(self) -> DraftOutput:
+        return DraftOutput(
+            article_id="aid_test_audit",
+            title="streaming on-chain data 与 agent 执行层",
+            sections=[
+                FilledSection(
+                    heading="为什么 batch 不够",
+                    content_markdown="第 1 节正文。我们做实时摄取……",
+                    word_count=120,
+                    compliance_score=1.0,
+                ),
+                FilledSection(
+                    heading="streaming-first 的取舍",
+                    content_markdown="第 2 节正文。承接上一节……",
+                    word_count=140,
+                    compliance_score=1.0,
+                ),
+                FilledSection(
+                    heading="agent 的输入面",
+                    content_markdown="第 3 节正文，回扣开头主张……",
+                    word_count=130,
+                    compliance_score=1.0,
+                ),
+            ],
+            total_word_count=390,
+        )
+
+    def _build_hotspot(self):
+        from agentflow.shared.models import Hotspot
+
+        return Hotspot.from_dict({
+            "id": "hs_audit_test",
+            "topic_one_liner": "AI agent 直接订阅链上事件",
+            "source_references": [
+                {"source": "twitter", "author": "@x", "text_snippet": "MEV agent loop"}
+            ],
+            "suggested_angles": [{"angle": "agent-as-state-machine"}],
+        })
+
+    def test_pass_verdict_does_not_modify_draft(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        draft = self._build_draft()
+        hotspot = self._build_hotspot()
+
+        async def fake_audit(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            return {
+                "score": 0.85,
+                "dim_scores": {
+                    "cohesion": 0.9,
+                    "anchor_density": 0.8,
+                    "thesis_callback": 0.85,
+                    "voice_consistency": 0.85,
+                },
+                "issues": [],
+                "summary": "pass",
+            }
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_D2_AUDIT_ENABLED": "true"}, clear=False
+        ), patch.object(LLMClient, "chat_json", new=fake_audit):
+            outcome = asyncio.run(
+                structure_audit.audit_draft(
+                    draft, hotspot=hotspot, style_profile={}
+                )
+            )
+
+        self.assertEqual(outcome.verdict, "pass")
+        self.assertGreaterEqual(outcome.score, 0.75)
+        self.assertEqual(outcome.issues, [])
+
+    def test_patch_verdict_refills_flagged_section(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+        from agentflow.shared.models import Section
+
+        draft = self._build_draft()
+        hotspot = self._build_hotspot()
+        skeleton_sections = [
+            Section(
+                heading=s.heading,
+                key_arguments=["论点 A", "论点 B"],
+                section_purpose="承上启下",
+                estimated_words=s.word_count,
+            )
+            for s in draft.sections
+        ]
+
+        async def fake_audit(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            return {
+                "score": 0.6,
+                "dim_scores": {
+                    "cohesion": 0.5,
+                    "anchor_density": 0.6,
+                    "thesis_callback": 0.7,
+                    "voice_consistency": 0.6,
+                },
+                "issues": [
+                    "[Section 1] 没有承接前一节结论",
+                    "[Section 2] 论据没有锚到 product_facts",
+                ],
+                "summary": "patch",
+            }
+
+        async def fake_fill(section, context, style_profile):
+            assert "structure_audit_warnings" in context
+            return FilledSection(
+                heading=section.heading,
+                content_markdown="(rewritten by patch)",
+                word_count=200,
+                compliance_score=1.0,
+            )
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_D2_AUDIT_ENABLED": "true"}, clear=False
+        ), patch.object(LLMClient, "chat_json", new=fake_audit), patch(
+            "agentflow.agent_d2.section_filler.fill_section",
+            new=fake_fill,
+        ):
+            new_draft, outcome = asyncio.run(
+                structure_audit.audit_and_finalize(
+                    draft,
+                    hotspot=hotspot,
+                    style_profile={},
+                    skeleton_sections=skeleton_sections,
+                )
+            )
+
+        self.assertEqual(outcome.verdict, "patch")
+        self.assertEqual(sorted(outcome.patched_section_indices), [1, 2])
+        self.assertEqual(
+            new_draft.sections[1].content_markdown, "(rewritten by patch)"
+        )
+        self.assertEqual(
+            new_draft.sections[2].content_markdown, "(rewritten by patch)"
+        )
+        # Section 0 untouched
+        self.assertNotEqual(
+            new_draft.sections[0].content_markdown, "(rewritten by patch)"
+        )
+
+    def test_rewrite_verdict_replaces_draft_with_auditor_output(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        draft = self._build_draft()
+        hotspot = self._build_hotspot()
+
+        rewritten_md = (
+            "# streaming on-chain data 与 agent 执行层\n\n"
+            "## 为什么 batch 不够\n\n第 1 节重写正文，更紧凑……\n\n"
+            "## streaming-first 的取舍\n\n第 2 节重写，承接前节……\n\n"
+            "## agent 的输入面\n\n第 3 节重写，回扣开头……\n"
+        )
+
+        async def fake_audit(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            return {
+                "score": 0.3,
+                "dim_scores": {
+                    "cohesion": 0.2,
+                    "anchor_density": 0.3,
+                    "thesis_callback": 0.4,
+                    "voice_consistency": 0.3,
+                },
+                "issues": ["[Section all] 全篇结构塌方"],
+                "summary": "rewrite",
+            }
+
+        async def fake_text(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            return rewritten_md
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_D2_AUDIT_ENABLED": "true"}, clear=False
+        ), patch.object(LLMClient, "chat_json", new=fake_audit), patch.object(
+            LLMClient, "chat_text", new=fake_text
+        ):
+            new_draft, outcome = asyncio.run(
+                structure_audit.audit_and_finalize(
+                    draft,
+                    hotspot=hotspot,
+                    style_profile={},
+                    skeleton_sections=None,  # rewrite path doesn't need it
+                )
+            )
+
+        self.assertEqual(outcome.verdict, "rewrite")
+        self.assertIsNotNone(outcome.rewritten_draft)
+        self.assertEqual(len(new_draft.sections), 3)
+        self.assertIn("重写", new_draft.sections[0].content_markdown)
+        # article_id and section headings preserved
+        self.assertEqual(new_draft.article_id, draft.article_id)
+        self.assertEqual(
+            [s.heading for s in new_draft.sections],
+            [s.heading for s in draft.sections],
+        )
+
+    def test_disabled_returns_skipped_without_calling_llm(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        draft = self._build_draft()
+        hotspot = self._build_hotspot()
+
+        call_count = {"n": 0}
+
+        async def fake_audit(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            call_count["n"] += 1
+            return {"score": 1.0}
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_D2_AUDIT_ENABLED": "false"}, clear=False
+        ), patch.object(LLMClient, "chat_json", new=fake_audit):
+            outcome = asyncio.run(
+                structure_audit.audit_draft(
+                    draft, hotspot=hotspot, style_profile={}
+                )
+            )
+
+        self.assertEqual(outcome.verdict, "skipped")
+        self.assertEqual(call_count["n"], 0)
+
+    def test_rewrite_with_unparseable_output_keeps_original(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        draft = self._build_draft()
+        hotspot = self._build_hotspot()
+
+        async def fake_audit(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            return {
+                "score": 0.2,
+                "dim_scores": {d: 0.2 for d in structure_audit._AUDIT_DIMS},
+                "issues": [],
+            }
+
+        async def fake_text(
+            self_obj, *, prompt_family, prompt, max_tokens=2000, system=None
+        ):
+            # Wrong section count → parse fails → keep original
+            return "# t\n\n## only one heading\n\nbody\n"
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_D2_AUDIT_ENABLED": "true"}, clear=False
+        ), patch.object(LLMClient, "chat_json", new=fake_audit), patch.object(
+            LLMClient, "chat_text", new=fake_text
+        ):
+            new_draft, outcome = asyncio.run(
+                structure_audit.audit_and_finalize(
+                    draft,
+                    hotspot=hotspot,
+                    style_profile={},
+                    skeleton_sections=None,
+                )
+            )
+
+        self.assertEqual(outcome.verdict, "rewrite")
+        # rewrite returned the original draft unchanged (parse failed silently)
+        self.assertEqual(
+            [s.content_markdown for s in new_draft.sections],
+            [s.content_markdown for s in draft.sections],
+        )
+
+    def test_threshold_classification_boundaries(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        # Default thresholds: patch=0.75, rewrite=0.50
+        self.assertEqual(
+            structure_audit._classify_verdict(0.76, 0.75, 0.50), "pass"
+        )
+        self.assertEqual(
+            structure_audit._classify_verdict(0.75, 0.75, 0.50), "pass"
+        )
+        self.assertEqual(
+            structure_audit._classify_verdict(0.74, 0.75, 0.50), "patch"
+        )
+        self.assertEqual(
+            structure_audit._classify_verdict(0.50, 0.75, 0.50), "patch"
+        )
+        self.assertEqual(
+            structure_audit._classify_verdict(0.49, 0.75, 0.50), "rewrite"
+        )
+
+    def test_section_index_extraction_from_issues(self) -> None:
+        from agentflow.agent_d2 import structure_audit
+
+        issues = [
+            "[Section 0] foo",
+            "[Section 2] bar",
+            "[Section 99] out-of-range, ignored",
+            "[Section all] global, no index extracted",
+            "no prefix, ignored",
+        ]
+        idx = structure_audit._section_indices_from_issues(issues, section_count=3)
+        self.assertEqual(idx, [0, 2])
+
+
 if __name__ == "__main__":
     unittest.main()
