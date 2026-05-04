@@ -168,9 +168,9 @@ def fire_due(spawn: Callable[[int], None], *, top_k: int | None = None) -> list[
     """
     if top_k is None:
         try:
-            top_k = int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "3"))
+            top_k = int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "5"))
         except (TypeError, ValueError):
-            top_k = 3
+            top_k = 5
     fired: list[str] = []
     for slot in due_slots():
         try:
@@ -209,7 +209,7 @@ def status() -> dict[str, Any]:
     return {
         "enabled": bool(schedule),
         "raw": raw,
-        "top_k": int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "3") or 3),
+        "top_k": int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "5") or 3),
         "slots": rows,
         "now": now.isoformat(),
     }

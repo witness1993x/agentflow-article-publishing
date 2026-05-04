@@ -1148,7 +1148,7 @@ def _derive_style_signature(
     "--gate-a-top-k",
     "gate_a_top_k",
     type=int,
-    default=3,
+    default=5,
     show_default=True,
     help="How many candidates to surface in the Gate A TG card (1–10). "
     "Useful for tightening or loosening cron's daily review surface.",
@@ -1197,7 +1197,7 @@ def hotspots(
             filter_pattern = str(overrides["filter_pattern"])
         if topic_profile_id is None and overrides.get("topic_profile_id"):
             topic_profile_id = str(overrides["topic_profile_id"])
-        if gate_a_top_k == 3 and overrides.get("gate_a_top_k") is not None:
+        if gate_a_top_k == 5 and overrides.get("gate_a_top_k") is not None:
             gate_a_top_k = int(overrides["gate_a_top_k"])
         # Sources YAML may carry twitter_handles / rss_feeds / hn_topic_filters —
         # surface them via env so D1 collectors can pick them up at scan time.
@@ -1403,7 +1403,7 @@ def hotspots(
 
             today = (output.generated_at or datetime.now()).strftime("%Y-%m-%d")
             batch_path = str(_home() / "hotspots" / f"{today}.json")
-            top_k_val = max(1, min(int(gate_a_top_k or 3), 10))
+            top_k_val = max(1, min(int(gate_a_top_k or 5), 10))
             _triggers.post_gate_a(
                 hotspots=[h.to_dict() for h in output.hotspots],
                 batch_path=batch_path,

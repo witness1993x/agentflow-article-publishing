@@ -1260,7 +1260,7 @@ def _handle_doctor(
 def _handle_scan(
     chat_id: int | None, uid: int | None, args: list[str], raw_text: str,
 ) -> None:
-    top_k = 3
+    top_k = 5
     if args:
         try:
             top_k = max(1, min(10, int(args[0])))
@@ -2547,7 +2547,7 @@ def _handle_message(update: dict[str, Any]) -> None:
 
     if text.startswith("/scan"):
         parts = text.split(maxsplit=1)
-        top_k = 3
+        top_k = 5
         if len(parts) > 1:
             try:
                 top_k = max(1, min(10, int(parts[1].strip())))
@@ -4542,7 +4542,7 @@ def _spawn_publish_ready(article_id: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _spawn_hotspots(top_k: int = 3) -> None:
+def _spawn_hotspots(top_k: int = 5) -> None:
     """Run `af hotspots` in a background thread.
 
     The CLI auto-triggers `post_gate_a` on completion (existing behaviour),

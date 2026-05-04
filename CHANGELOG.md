@@ -16,6 +16,26 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.27] — 2026-05-04
+
+Bumps `top_k` default from 3 → 5 across the board. With v1.0.21–v1.0.26
+filter chain trimming aggressive, top-3 left the operator with a thin
+review surface; top-5 keeps the daily Gate A card density at the
+"actually pick 1–2 to write" level the cron flow was designed for.
+
+### Changed
+
+- `cli/commands.py::hotspots --gate-a-top-k` default 3 → 5.
+- `agent_review/schedule.py::fire_due` default top_k 3 → 5
+  (`AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K` env default).
+- `agent_review/daemon.py` `/scan` slash command default top_k 3 → 5.
+- `agent_review/daemon.py::_spawn_hotspots` signature default 5.
+- `.env.template` `AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K=5`.
+
+No behavioral change for installs that explicitly pin
+`AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K=3` — only the unset default moves.
+120/120 regression pass.
+
 ## [1.0.26] — 2026-05-04
 
 Adds Twitter v2 keyword search as a parallel D1 recall layer, alongside
