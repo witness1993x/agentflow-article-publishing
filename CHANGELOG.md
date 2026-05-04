@@ -16,6 +16,39 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.28] — 2026-05-04
+
+Real-data verification on chainstream produced one residual noise
+hotspot: a Hindi-mixed Twitter @-reply ("@DarkDr3am3r Ghar wapsi
+kar li kya?. Crypto nahi naam me hi Joseph hai") that survived the
+v1.0.23 coverage filter because "crypto" is on-domain and the tweet
+is short enough that 1 hit / 12 tokens = 8% coverage > 0.03 threshold.
+Conversational reply chatter has no business in a recall pool
+regardless of token overlap.
+
+### Added
+
+- `agent_d1/main._apply_signal_quality_filter` — drops Twitter signals
+  whose text starts with `@` (=mentions another user, conversational
+  reply) AND total body length is below `AGENTFLOW_MIN_REPLY_LEN`
+  chars (default 60). Wired into `_collect_all` BEFORE the blocklist
+  + coverage filters. Default off
+  (`AGENTFLOW_DROP_SHORT_REPLIES=true` to enable; chainstream-service
+  overlay 1.0.8+ enables by default).
+- HN signals are exempt — short HN titles are valid signals (e.g.
+  `Show HN: Sequencer benchmarks`); only Twitter shape is filtered.
+
+### `.env.template`
+
+- `AGENTFLOW_DROP_SHORT_REPLIES=` (default off)
+- `AGENTFLOW_MIN_REPLY_LEN=60`
+
+### Tests
+
+- `D1RecallFilterTests` × 2 new: drops short @-reply Twitter signals
+  while preserving long substantive tweets and HN entries; no-op when
+  flag disabled. 122/122 total regression pass.
+
 ## [1.0.27] — 2026-05-04
 
 Bumps `top_k` default from 3 → 5 across the board. With v1.0.21–v1.0.26

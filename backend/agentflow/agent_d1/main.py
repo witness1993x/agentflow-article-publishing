@@ -250,6 +250,14 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
                 dropped,
             )
 
+    # v1.0.28: drop short Twitter replies — tweets that start with @ AND
+    # are under N chars are almost always conversational reply chatter,
+    # not substantive signal. The chainstream verification run produced
+    # a "Joseph 回归家庭" Hindi-mixed @-reply hotspot at 0.03 coverage
+    # because "crypto" appeared in a tiny 12-token tweet. Reply chatter
+    # has no business in a recall pool. Default off (env opt-in).
+    all_signals = _apply_signal_quality_filter(all_signals)
+
     # v1.0.25: blocklist filter — drop signals whose text mentions any
     # term in the active profile's ``avoid_terms`` or the
     # ``AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS`` env. Cheap pre-filter for
@@ -420,6 +428,58 @@ def _signal_haystack(sig: RawSignal) -> str:
         (getattr(sig, "text", "") or "") + " " +
         (getattr(sig, "author", "") or "")
     ).lower()
+
+
+def _apply_signal_quality_filter(signals: list[RawSignal]) -> list[RawSignal]:
+    """v1.0.28 — drop low-quality conversational chatter signals.
+
+    Specifically: short @-reply tweets where the text starts with `@`
+    (mentioning another user) AND total body is under
+    ``AGENTFLOW_MIN_REPLY_LEN`` chars (default 60). These are almost
+    always reply chatter (e.g. "@DarkDr3am3r Ghar wapsi kar li kya?"),
+    not substantive content. They survive token coverage filters by
+    accident when one of their few tokens happens to be on-domain.
+
+    Default: off. Set ``AGENTFLOW_DROP_SHORT_REPLIES=true`` to enable;
+    chainstream-service overlay 1.0.8+ enables it by default.
+    """
+    enabled = (
+        os.environ.get("AGENTFLOW_DROP_SHORT_REPLIES", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+    if not enabled or not signals:
+        return signals
+    try:
+        min_len = int(os.environ.get("AGENTFLOW_MIN_REPLY_LEN", "60") or "60")
+    except (TypeError, ValueError):
+        min_len = 60
+    kept: list[RawSignal] = []
+    dropped_examples: list[str] = []
+    for sig in signals:
+        text = (getattr(sig, "text", "") or "").strip()
+        # Only filter Twitter-shape signals; don't penalise short HN titles.
+        is_twitter = (getattr(sig, "source", "") or "") == "twitter"
+        if (
+            is_twitter
+            and text.startswith("@")
+            and len(text) < min_len
+        ):
+            if len(dropped_examples) < 3:
+                dropped_examples.append(
+                    f"{getattr(sig, 'author', '?')}: {text[:60]!r}"
+                )
+            continue
+        kept.append(sig)
+    dropped = len(signals) - len(kept)
+    if dropped:
+        _log.info(
+            "signal-quality filter dropped %d/%d short Twitter replies (<%d chars). examples: %s",
+            dropped, len(signals), min_len,
+            "; ".join(dropped_examples),
+        )
+    return kept
 
 
 def _apply_signal_blocklist(signals: list[RawSignal]) -> list[RawSignal]:

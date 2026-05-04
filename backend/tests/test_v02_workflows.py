@@ -2998,6 +2998,36 @@ class D1RecallFilterTests(AgentflowHomeTestCase):
         ids = {s.source_item_id for s in kept}
         self.assertEqual(ids, {"c"})
 
+    # v1.0.28 quality filter tests ----------------------------------
+
+    def test_quality_filter_drops_short_at_replies(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [
+            self._signal("twitter", "1", "@DarkDr3am3r Ghar wapsi kar li kya? crypto", "@spammer"),
+            self._signal("twitter", "2", "Real signal: Solana mempool is now permissionless via @anza_xyz proposal SIMD-0123", "@kelvinfichter"),
+            self._signal("twitter", "3", "@user nice", "@reply"),
+            self._signal("hackernews", "4", "@something even though HN never starts with @", "hn"),
+        ]
+        with patch.dict(
+            os.environ,
+            {"AGENTFLOW_DROP_SHORT_REPLIES": "true", "AGENTFLOW_MIN_REPLY_LEN": "60"},
+            clear=False,
+        ):
+            kept = d1_main._apply_signal_quality_filter(list(signals))
+        ids = {s.source_item_id for s in kept}
+        # Tweet 2 (long substantive) survives; Tweet 4 (HN, not Twitter) survives.
+        # Tweets 1 and 3 dropped (short @-replies on Twitter).
+        self.assertEqual(ids, {"2", "4"})
+
+    def test_quality_filter_disabled_by_default(self) -> None:
+        from agentflow.agent_d1 import main as d1_main
+        signals = [
+            self._signal("twitter", "1", "@user short reply", "@x"),
+        ]
+        with patch.dict(os.environ, {"AGENTFLOW_DROP_SHORT_REPLIES": ""}, clear=False):
+            kept = d1_main._apply_signal_quality_filter(list(signals))
+        self.assertEqual(len(kept), 1)
+
     def test_blocklist_resolution_merges_env_and_avoid_terms(self) -> None:
         """The resolver pulls from both AGENTFLOW_SIGNAL_BLOCKLIST_TOKENS env
         and the active profile's avoid_terms field."""
