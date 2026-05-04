@@ -219,7 +219,14 @@ def _resolve_active_publisher_tokens() -> set[str] | None:
     """Best-effort resolution of the active publisher's domain tokens.
     Returns None when no profile / intent / tokens (caller treats that
     as "skip the filter"). Lazy-imports to avoid agent_d1 → agent_review
-    coupling on import."""
+    coupling on import.
+
+    Resolution order (first non-empty wins):
+      1. ``load_current_intent()`` → publisher_account
+      2. ``_read_active_profile_id()`` → profile.publisher_account
+      3. ``AGENTFLOW_DEFAULT_TOPIC_PROFILE`` env → profile.publisher_account
+      4. If ``topic_profiles.yaml`` has exactly one profile, use it.
+    """
     try:
         from agentflow.shared.memory import load_current_intent
         from agentflow.shared.topic_profiles import (
@@ -228,34 +235,54 @@ def _resolve_active_publisher_tokens() -> set[str] | None:
         from agentflow.agent_d2.topic_spine_lint import _publisher_domain_tokens
     except Exception:
         return None
+
+    pub: dict | None = None
+    profile: dict | None = None
+
     try:
         intent = load_current_intent() or {}
         pub = resolve_publisher_account_from_intent(intent)
     except Exception:
         pub = None
+
     if not pub:
-        # Fall back to active topic profile when intent doesn't resolve.
+        try:
+            from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
+            data = load_user_topic_profiles() or {}
+            profiles = (
+                data.get("profiles") or {}
+                if isinstance(data, dict) else {}
+            )
+        except Exception:
+            profiles = {}
+
+        candidate_pid: str | None = None
+        # 2. active profile id (if state file says so)
         try:
             from agentflow.cli.topic_profile_commands import _read_active_profile_id  # type: ignore
-            from agentflow.shared.topic_profile_lifecycle import load_user_topic_profiles
-            pid = _read_active_profile_id()
-            if pid:
-                data = load_user_topic_profiles() or {}
-                profiles = (
-                    data.get("profiles") or {}
-                    if isinstance(data, dict) else {}
-                )
-                profile = profiles.get(pid) or {}
-                pub = profile.get("publisher_account") or {}
-                # Augment with profile-level keyword_groups so the
-                # tokenizer sees domain keywords too.
-                if isinstance(profile.get("keyword_groups"), (dict, list)):
-                    pub = dict(pub)
-                    pub["keyword_groups"] = profile["keyword_groups"]
+            candidate_pid = _read_active_profile_id() or None
         except Exception:
-            pub = None
+            candidate_pid = None
+        # 3. env-pinned default
+        if not candidate_pid:
+            env_pid = (os.environ.get("AGENTFLOW_DEFAULT_TOPIC_PROFILE") or "").strip()
+            if env_pid and env_pid in profiles:
+                candidate_pid = env_pid
+        # 4. single-profile inference
+        if not candidate_pid and isinstance(profiles, dict) and len(profiles) == 1:
+            candidate_pid = next(iter(profiles.keys()))
+
+        if candidate_pid and candidate_pid in profiles:
+            profile = profiles.get(candidate_pid) or {}
+            pub = profile.get("publisher_account") or {}
+
     if not pub:
         return None
+    # Augment publisher with profile-level keyword_groups so the
+    # tokenizer sees domain keywords too (when fallback path resolved).
+    if profile is not None and isinstance(profile.get("keyword_groups"), (dict, list)):
+        pub = dict(pub)
+        pub["keyword_groups"] = profile["keyword_groups"]
     tokens = _publisher_domain_tokens(pub)
     return tokens if tokens else None
 
@@ -278,9 +305,16 @@ def _apply_signal_domain_filter(signals: list[RawSignal]) -> list[RawSignal]:
         if not sig_tokens:
             continue
         intersect = sig_tokens & pub_tokens
-        union = sig_tokens | pub_tokens
-        jaccard = len(intersect) / len(union) if union else 0.0
-        if jaccard >= threshold:
+        # v1.0.22.1: use signal-anchored coverage (fraction of the
+        # signal's own tokens that map to publisher domain), NOT
+        # Jaccard. Jaccard's denominator is dominated by the publisher
+        # token set (often 100+ entries), so even on-topic signals
+        # score < 0.05 and the threshold rejects everything. Coverage
+        # is publisher-set-size-invariant: "1 out of every N signal
+        # tokens is on-domain" is a stable signal at any pub_tokens size.
+        denom = len(sig_tokens)
+        coverage = len(intersect) / denom if denom else 0.0
+        if coverage >= threshold:
             kept.append(sig)
         else:
             if len(dropped_examples) < 3:

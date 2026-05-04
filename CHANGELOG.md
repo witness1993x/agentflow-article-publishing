@@ -16,6 +16,46 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.23] — 2026-05-04
+
+Two same-day fixes from a real verification run of v1.0.22 against the
+local chainstream profile.
+
+### Fixed
+
+- `agent_d1/main._resolve_active_publisher_tokens` — broadened the
+  resolution chain so the filter actually finds a publisher in the
+  common case. Previously it only checked `load_current_intent()` then
+  `_read_active_profile_id()`; both return `None` on a fresh install,
+  so `_apply_signal_domain_filter` no-op'd silently and ALL signals
+  passed. New chain:
+    1. current intent's publisher_account
+    2. `_read_active_profile_id()`
+    3. `AGENTFLOW_DEFAULT_TOPIC_PROFILE` env (already set by the
+       chainstream-service overlay)
+    4. The single profile in `topic_profiles.yaml` when there's
+       exactly one (handles the "I just ran `af topic-profile init`
+       and didn't pin it active" case)
+- `agent_d1/main._apply_signal_domain_filter` — switched the
+  per-signal scoring formula from Jaccard to **signal-anchored
+  coverage**: `|sig_tokens ∩ pub_tokens| / len(sig_tokens)`. Jaccard's
+  denominator is dominated by the publisher token set (typically 100+
+  entries), which forces every threshold below ~0.03 to either accept
+  everything or reject everything regardless of actual signal quality.
+  Coverage is publisher-set-size-invariant: "1 in every 20 tokens of
+  this signal is on-domain" reads the same at any pub_tokens size.
+- Net effect after both fixes: a real chainstream scan goes from
+  245 raw signals → 52 retained at threshold 0.03, dropping
+  off-topic tweets like `@balajis: RT @MTSlive: BALAJI AND LORENZ |
+  NSA TESTS MYTHOS` and `seasteading is already here` cleanly.
+
+### Notes
+
+- v1.0.22 functionally never worked against a freshly-init'd profile;
+  v1.0.23 is the first release where the signal-domain filter has
+  observable effect end-to-end. The chainstream-service overlay 1.0.2
+  pin should be bumped to require v1.0.23+.
+
 ## [1.0.22] — 2026-05-04
 
 Real-deploy report (chainstream-service): D1 recall pool was being
