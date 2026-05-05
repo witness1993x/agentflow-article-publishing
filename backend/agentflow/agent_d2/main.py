@@ -22,6 +22,10 @@ import yaml
 from agentflow.agent_d2.interactive_editor import apply_edit as _apply_edit
 from agentflow.agent_d2.section_filler import fill_section
 from agentflow.agent_d2.skeleton_generator import generate_skeleton
+from agentflow.agent_d2.structure_audit import (
+    AuditOutcome,
+    audit_and_finalize,
+)
 from agentflow.config.style_loader import load_style_profile
 from agentflow.shared.bootstrap import agentflow_home, ensure_user_dirs
 from agentflow.shared.hotspot_store import find_hotspot_record
@@ -222,6 +226,58 @@ async def fill_all_sections(
         len(image_placeholders),
     )
     return draft
+
+
+# ---------------------------------------------------------------------------
+# Public: structure audit (v1.0.29)
+# ---------------------------------------------------------------------------
+
+
+async def run_structure_audit(
+    draft: DraftOutput,
+    *,
+    skeleton: SkeletonOutput,
+    hotspot_id: str,
+    style_profile: dict[str, Any],
+) -> tuple[DraftOutput, AuditOutcome]:
+    """Audit a freshly assembled draft, apply patch/rewrite if needed, persist.
+
+    Wraps ``structure_audit.audit_and_finalize`` with the hotspot load +
+    save_draft glue. CLI ``af write --auto-pick`` and ``af fill`` both
+    call this immediately before ``post_gate_b``. Audit failure (LLM
+    error, etc.) returns the original draft + an outcome with
+    ``verdict="error"`` so the Gate B path is never blocked.
+    """
+    try:
+        hotspot = _load_hotspot(hotspot_id) if hotspot_id else None
+    except KeyError:
+        hotspot = None
+
+    if hotspot is None:
+        # No hotspot context = audit can't score anchor density meaningfully.
+        # Return skipped so Gate B fires unchanged.
+        outcome = AuditOutcome(
+            verdict="skipped",
+            score=1.0,
+            error="hotspot not found; audit requires hotspot context",
+        )
+        try:
+            append_memory_event(
+                "d2_structure_audit",
+                article_id=draft.article_id,
+                payload=outcome.to_dict(),
+            )
+        except Exception:  # pragma: no cover
+            pass
+        return draft, outcome
+
+    return await audit_and_finalize(
+        draft,
+        hotspot=hotspot,
+        style_profile=style_profile,
+        skeleton_sections=list(skeleton.section_outline),
+        save_fn=save_draft,
+    )
 
 
 # ---------------------------------------------------------------------------
