@@ -16,6 +16,45 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.0.30] — 2026-04-30
+
+**Lark draft fan-out at Gate B.**
+
+When Gate B fires on Telegram, also push the assembled draft body to the
+Lark group (push-only — Gate B operations remain on TG since Lark
+Custom Bot has no callback channel). Pre-1.0.30, Lark only saw
+`notify_hotspots_digest` / `notify_publish_ready` /
+`notify_dispatch_result` / `notify_spawn_failure`; the actual draft
+content was invisible to anyone watching the Lark group.
+
+New `lark_webhook.notify_draft_ready(article_id, title, draft_md=...,
+mirror_url=None, audit_summary=None)`:
+
+* If the draft body is < 17 KB (after card overhead): full markdown
+  rendered inside an interactive card.
+* Otherwise: truncated to ~1500 characters in the card with a
+  "📄 完整稿件" button pointing at the mirror URL.
+
+Audit verdict (v1.0.29) is surfaced in the card subtitle when present
+and not `pass`/`skipped` — operators see "audit=patch (0.62)" inline.
+
+New env keys (both optional, default off):
+
+```
+AGENTFLOW_LARK_DRAFT_FANOUT=true
+AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE=https://example.com/drafts/{article_id}.md
+```
+
+Wired into `agent_review.triggers.post_gate_b` immediately after the
+TG `send_long_text` + `send_document` calls, before the state
+transition. Lark failure (network, webhook 404, etc.) never blocks the
+TG path or state machine.
+
+Tests: 5 new in `tests.test_v02_workflows.LarkDraftFanoutTests`
+covering disabled-by-default / short-draft-full-body / long-draft-
+truncated-with-mirror / long-draft-truncated-no-mirror /
+audit-summary-surfaced.
+
 ## [1.0.29] — 2026-04-30
 
 **D2 whole-article structure audit between fill and Gate B.**

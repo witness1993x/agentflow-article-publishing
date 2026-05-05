@@ -408,6 +408,97 @@ def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
     )
 
 
+def notify_draft_ready(
+    *,
+    article_id: str,
+    title: str,
+    draft_md_path: str | None = None,
+    draft_md: str | None = None,
+    mirror_url: str | None = None,
+    audit_summary: str | None = None,
+) -> None:
+    """v1.0.30 — Gate B fan-out: send the assembled draft body to Lark.
+
+    Lark Custom Bot has a 20 KB body cap. For drafts under
+    ``_BODY_HARD_CAP_BYTES`` we send the full markdown inside an
+    interactive card. For larger drafts we send a header card with the
+    first ~1500 characters and a "完整稿件" button pointing at
+    ``mirror_url`` (a read-only mirror — typically the dashboard's
+    draft preview, or the operator's intranet markdown server).
+
+    Audit (Gate B remains the action surface — Lark is read-only). When
+    ``mirror_url`` is empty, the mirror button is omitted.
+
+    Behavior is gated by ``AGENTFLOW_LARK_DRAFT_FANOUT`` (default off).
+    Gate B's TG card is the source of truth and always fires; this
+    function is a parallel fan-out, never a replacement.
+    """
+    if not _is_configured():
+        return
+    if not _draft_fanout_enabled():
+        return
+
+    md = draft_md
+    if md is None and draft_md_path:
+        try:
+            with open(draft_md_path, "r", encoding="utf-8") as fh:
+                md = fh.read()
+        except OSError as err:
+            _log.warning("notify_draft_ready: cannot read %s: %s", draft_md_path, err)
+            return
+    md = (md or "").strip()
+    if not md:
+        _log.info("notify_draft_ready: empty draft, nothing to fan out (id=%s)", article_id)
+        return
+
+    # Header is fixed-cost. The actual budget for the body is harder cap
+    # minus header / metadata / button overhead — be generous (~2 KB).
+    body_budget = _BODY_HARD_CAP_BYTES - 2_000
+    md_bytes = md.encode("utf-8")
+    truncated = len(md_bytes) > body_budget
+
+    if truncated:
+        # Slice on character boundary, not byte, so we don't cut mid-CJK.
+        approx_chars = max(800, body_budget // 3)
+        slice_text = md[:approx_chars]
+        body_md = (
+            f"**{title}**\n"
+            f"`{article_id}`"
+            + (f"  ·  {audit_summary}" if audit_summary else "")
+            + "\n\n"
+            f"{slice_text}\n\n"
+            f"…（截断 · 完整 {len(md):,} 字 / {len(md_bytes):,} bytes）"
+        )
+        accent = "blue"
+    else:
+        body_md = (
+            f"**{title}**\n"
+            f"`{article_id}`"
+            + (f"  ·  {audit_summary}" if audit_summary else "")
+            + "\n\n---\n\n"
+            f"{md}"
+        )
+        accent = "green"
+
+    actions: list[tuple[str, str]] = []
+    if mirror_url:
+        actions.append(("📄 完整稿件", mirror_url))
+    actions.append(("📌 去 TG 审稿", _tg_bot_url()))
+    actions.append(("📊 查看 draft", _dashboard_url(article_id)))
+
+    send_card(
+        title="📝 AgentFlow · 稿件就绪 (Gate B)",
+        body_md=body_md,
+        accent=accent,
+        url_actions=actions,
+    )
+
+
+def _draft_fanout_enabled() -> bool:
+    raw = os.environ.get("AGENTFLOW_LARK_DRAFT_FANOUT", "").strip().lower()
+    return raw in {"true", "1", "yes", "on"}
+
+
 def notify_spawn_failure(*, label: str, target_id: str, error_tail: str) -> None:
     """Mirror of daemon._notify_spawn_failure into Lark for the on-call
     channel. Operator sees both TG and Lark; whichever they monitor first
