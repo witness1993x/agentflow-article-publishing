@@ -14,34 +14,38 @@ The repo is past the v0.1 MVP skeleton. The review pipeline is now Lark-first th
 - S6 Medium manual mark loop: review complete
 - S7 `/list` extensions: partially implemented
 
-The Lark bridge exposes 30 `lark_*` commands through `/api/commands`; write / spawn commands require `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`. The TG fallback bot still exposes callback prefixes `A` / `B` / `C` / `D`, plus `PD`, `I`, `L`, `PR`, `P`, and `S`.
+The Lark bridge exposes 34 `lark_*` commands through the daemon-owned
+`/api/commands`; write / spawn commands require
+`AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`. In Lark-first mode,
+`blogflow review-daemon` embeds the bridge on `127.0.0.1:7860` by default.
+The TG fallback bot still exposes callback prefixes `A` / `B` / `C` / `D`,
+plus `PD`, `I`, `L`, `PR`, `P`, and `S`.
 
 Do not describe this repo as "early skeleton" or use the old 5-state model unless the current code regresses to that.
 
 ## 2. Canonical Workflow
 
 ```text
-cron `af hotspots`
+cron `blogflow article-hotspots`
   -> Gate A (Lark card + TG fallback)
   -> lark_gate_a_write / A:write
-  -> `af write` + `af fill`
+  -> `blogflow write` + `blogflow fill`
   -> Gate B (Lark input box / @bot edit follow-up supported)
   -> lark_gate_b_approve / B:approve
-  -> operator runs `af image-gate` or Lark triggers image regen
+  -> Lark image picker or CLI `blogflow image-gate`
   -> Gate C (image-review prompt can feed `--cover-description`)
   -> lark_gate_c_approve / C:approve or skip
   -> Gate D channel selection (Lark + TG fallback)
-  -> dispatch preview
-  -> PD:dispatch
+  -> Lark confirm runs full dispatch chain / TG fallback PD:dispatch
   -> ready_to_publish
-  -> PR:mark or `af review-publish-mark`
+  -> PR:mark or `blogflow review-publish-mark`
   -> published
 ```
 
 Legitimate fallback edges:
 
 - `D:cancel` or Gate D timeout returns the article to `image_approved`.
-- `C:skip`, `af image-gate --mode none`, and Gate C auto-skip route to `image_skipped`.
+- `C:skip`, `blogflow image-gate --mode none`, and Gate C auto-skip route to `image_skipped`.
 - `STATE_PUBLISHED -> STATE_CHANNEL_PENDING_REVIEW` is the incremental republish edge.
 
 ## 3. Runtime Artifacts
@@ -99,11 +103,11 @@ Current `STATE_*` set in `backend/agentflow/agent_review/state.py`:
 The current image path must preserve these edges:
 
 - `B:approve` sends an image picker prompt and leaves state at `draft_approved`.
-- `lark_gate_b_edit` can apply inline input (`comment` / `prompt` / `text`) immediately via `af edit --post-review`; without input it registers a pending Lark edit slot.
-- `lark_apply_pending_edit` consumes the latest pending Lark edit slot once, then runs `af edit --post-review`.
-- `af image-gate <aid> --mode cover-only|cover-plus-body` generates image assets and posts Gate C.
-- `lark_gate_c_regen` can pass review text into `af image-gate --cover-description`.
-- `af image-gate <aid> --mode none` transitions to `image_skipped` and immediately calls `triggers.post_gate_d(aid)`.
+- `lark_gate_b_edit` can apply inline input (`comment` / `prompt` / `text`) immediately via `blogflow edit --post-review`; without input it registers a pending Lark edit slot.
+- `lark_apply_pending_edit` consumes the latest pending Lark edit slot once, then runs `blogflow edit --post-review`.
+- `blogflow image-gate <aid> --mode cover-only|cover-plus-body` generates image assets and posts Gate C.
+- `lark_gate_c_regen` can pass review text into `blogflow image-gate --cover-description`.
+- `blogflow image-gate <aid> --mode none` transitions to `image_skipped` and immediately calls `triggers.post_gate_d(aid)`.
 - `C:approve` transitions to `image_approved` and spawns Gate D.
 - `C:skip` transitions to `image_skipped` and spawns Gate D.
 
@@ -131,7 +135,7 @@ Optional or on-demand:
 - `WEBHOOK_PUBLISH_URL` + `WEBHOOK_AUTH_HEADER` + `WEBHOOK_FORMAT`
 - `RESEND_API_KEY` + `NEWSLETTER_*`
 
-Medium is manual-mark only through `PR:mark` or `af review-publish-mark`.
+Medium is manual-mark only through `PR:mark` or `blogflow review-publish-mark`.
 
 ## 8. Verification Ladder
 
@@ -139,7 +143,7 @@ Use the lightest sufficient verification, but keep the loop closed.
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests/test_v02_workflows.py -q
-.venv/bin/af doctor
+.venv/bin/blogflow doctor
 ```
 
 Do not run frontend build as the default ladder; the frontend is legacy.

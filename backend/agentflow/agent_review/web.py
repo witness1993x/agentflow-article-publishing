@@ -169,9 +169,15 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "timeout_seconds": 15,
         "dangerous": False,
     },
+    "article_hotspots": {
+        "scope": "pipeline",
+        "description": "Run D1 article-hotspots scan.",
+        "timeout_seconds": 180,
+        "dangerous": False,
+    },
     "hotspots": {
         "scope": "pipeline",
-        "description": "Run D1 hotspots scan.",
+        "description": "Legacy alias for article_hotspots.",
         "timeout_seconds": 180,
         "dangerous": False,
     },
@@ -265,7 +271,7 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_refill": {
         "scope": "review",
-        "description": "Gate B → spawn `af fill <article_id> --skeleton-only --auto-pick` in background.",
+        "description": "Gate B → spawn `blogflow fill <article_id> --skeleton-only --auto-pick` in background.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
@@ -273,7 +279,7 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # ----- v1.1.1 — Gate A handlers -----
     "lark_gate_a_write": {
         "scope": "pipeline",
-        "description": "Gate A → spawn `af write <hotspot_id> --auto-pick` in background.",
+        "description": "Gate A → spawn `blogflow write <hotspot_id> --auto-pick` in background.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
@@ -295,14 +301,14 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     # ----- v1.1.1 — Gate B remaining handlers -----
     "lark_gate_b_rewrite": {
         "scope": "pipeline",
-        "description": "Gate B → spawn `af fill --rewrite` in background.",
+        "description": "Gate B → spawn `blogflow fill --rewrite` in background.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
     },
     "lark_gate_b_edit": {
         "scope": "review",
-        "description": "Gate B → register or apply an edit; inline text can spawn `af edit --post-review`.",
+        "description": "Gate B → register or apply an edit; inline text can spawn `blogflow edit --post-review`.",
         "timeout_seconds": 5,
         "dangerous": True,
         "in_process": True,
@@ -331,14 +337,14 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_gate_c_regen": {
         "scope": "pipeline",
-        "description": "Gate C → spawn `af image-gate --mode <mode>` in background.",
+        "description": "Gate C → spawn `blogflow image-gate --mode <mode>` in background.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
     },
     "lark_gate_c_relogo": {
         "scope": "pipeline",
-        "description": "Gate C → spawn `af image-gate --logo-only` in background.",
+        "description": "Gate C → spawn `blogflow image-gate --logo-only` in background.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
@@ -347,6 +353,27 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "scope": "read",
         "description": "Gate C → render full image-placeholder list.",
         "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_image_gate_cover_only": {
+        "scope": "pipeline",
+        "description": "Image picker → spawn `blogflow image-gate --mode cover-only`.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_image_gate_cover_plus_body": {
+        "scope": "pipeline",
+        "description": "Image picker → spawn `blogflow image-gate --mode cover-plus-body`.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_image_gate_skip": {
+        "scope": "review",
+        "description": "Image picker → skip image generation and post Gate D.",
+        "timeout_seconds": 10,
         "dangerous": False,
         "in_process": True,
     },
@@ -374,7 +401,7 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_gate_d_confirm": {
         "scope": "publish",
-        "description": "Gate D → spawn `af publish --platforms <selection>` in background.",
+        "description": "Gate D → run full dispatch chain (preview, publish, medium package, result notify).",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
@@ -402,7 +429,7 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_gate_d_retry": {
         "scope": "publish",
-        "description": "Gate D → spawn `af publish` retry for failed platforms.",
+        "description": "Gate D → spawn `blogflow publish` retry for failed platforms.",
         "timeout_seconds": 10,
         "dangerous": True,
         "in_process": True,
@@ -434,6 +461,19 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "description": "Apply a Lark @-bot follow-up message to the latest pending edit slot.",
         "timeout_seconds": 5,
         "dangerous": True,
+        "in_process": True,
+    },
+    # ----- v1.1.7 — free-text @-mention router -----
+    # OpenClaw posts here when an operator @-mentions the bot in chat.
+    # Daemon classifies the intent (approve / reject / refill / advance / ...)
+    # and routes to the corresponding card_action handler. Any unmatched
+    # intent returns a structured "I don't understand" card so the Lark
+    # client never has to fabricate a response.
+    "lark_message": {
+        "scope": "review",
+        "description": "Route a free-text @-bot message to the right Lark gate handler.",
+        "timeout_seconds": 10,
+        "dangerous": False,
         "in_process": True,
     },
     # ----- v1.1.1 — generic defer -----
@@ -515,7 +555,10 @@ def _bridge_schema() -> dict[str, Any]:
                 "event_id": {"type": "string"},
                 "occurred_at": {"type": "string"},
                 "ingested_at": {"type": "string"},
-                "source": {"type": "string", "enum": ["memory", "gate", "publish", "api"]},
+                "source": {
+                    "type": "string",
+                    "enum": ["memory", "gate", "publish", "api", "agentflow.review"],
+                },
                 "event_type": {"type": "string"},
                 "article_id": {"type": ["string", "null"]},
                 "hotspot_id": {"type": ["string", "null"]},
@@ -566,8 +609,8 @@ def _build_command_argv(req: CommandRequest) -> list[str]:
         return argv
     if cmd == "intent_show":
         return ["intent-show", "--json"]
-    if cmd == "hotspots":
-        argv = ["hotspots", "--json"]
+    if cmd in {"article_hotspots", "hotspots"}:
+        argv = ["article-hotspots", "--json"]
         if (scan_window_hours := _int_param(params, "scan_window_hours")) is not None:
             argv.extend(["--scan-window-hours", str(scan_window_hours)])
         if (target_candidates := _int_param(params, "target_candidates")) is not None:
@@ -687,6 +730,28 @@ def _run_lark_command_in_process(
     }
     raw_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
 
+    if command == "lark_message":
+        text = _str_param(params, "text") or ""
+        chat_id = _str_param(params, "chat_id")
+        message_payload = {**raw_payload, "text": text}
+        if chat_id:
+            message_payload.setdefault("chat_id", chat_id)
+        result = lark_callback.handle_event(
+            event_kind="message",
+            article_id=article_id,
+            action=None,
+            payload=message_payload,
+            operator=operator,
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "command": command,
+            "scope": scope,
+            "data": result,
+            "stderr": None,
+        }
+
     action_map = {
         # v1.1.0
         "lark_gate_b_approve": "approve_b",
@@ -709,6 +774,9 @@ def _run_lark_command_in_process(
         "lark_gate_c_regen": "gate_c_regen",
         "lark_gate_c_relogo": "gate_c_relogo",
         "lark_gate_c_full": "gate_c_full",
+        "lark_image_gate_cover_only": "image_gate_pick",
+        "lark_image_gate_cover_plus_body": "image_gate_pick",
+        "lark_image_gate_skip": "image_gate_pick",
         # v1.1.1 — Gate D
         "lark_gate_d_toggle": "gate_d_toggle",
         "lark_gate_d_select_all": "gate_d_select_all",
@@ -726,6 +794,13 @@ def _run_lark_command_in_process(
         # v1.1.1 — generic defer (operator carries gate label in payload.gate)
         "lark_defer": "defer",
     }
+    mode_defaults = {
+        "lark_image_gate_cover_only": "cover-only",
+        "lark_image_gate_cover_plus_body": "cover-plus-body",
+        "lark_image_gate_skip": "none",
+    }
+    if command in mode_defaults and "mode" not in raw_payload:
+        raw_payload = {**raw_payload, "mode": mode_defaults[command]}
     result = lark_callback.handle_event(
         event_kind="card_action",
         article_id=article_id,

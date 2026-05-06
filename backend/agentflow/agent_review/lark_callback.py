@@ -23,7 +23,7 @@ Design notes (Phase 1):
   Two operators clicking the same card produce one transition + one
   ``side_effects=["already_handled"]`` ack — never two transitions.
 * Write-side actions that may take a while return immediately and spawn the
-  corresponding ``af`` command in the background; completion is reported via
+  corresponding ``blogflow`` command in the background; completion is reported via
   the AgentFlow event webhook.
 """
 
@@ -33,16 +33,20 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
+from agentflow.agent_review import auth as review_auth
 from agentflow.agent_review import state as review_state
 from agentflow.agent_review import triggers as review_triggers
 from agentflow.agent_review.state import (
     STATE_CHANNEL_PENDING_REVIEW,
     STATE_DRAFT_APPROVED,
+    STATE_DRAFT_PENDING_REVIEW,
     STATE_DRAFT_REJECTED,
     STATE_DRAFTING,
+    STATE_DRAFTING_LOCKED_HUMAN,
     STATE_IMAGE_APPROVED,
     STATE_IMAGE_PENDING_REVIEW,
     STATE_IMAGE_SKIPPED,
@@ -110,6 +114,9 @@ def _telemetry(
         "operator_open_id": operator.get("open_id"),
         "outcome": outcome,
     }
+    chat_id = operator.get("chat_id")
+    if chat_id:
+        payload["chat_id"] = chat_id
     if extra:
         payload.update(extra)
     try:
@@ -219,7 +226,7 @@ def _handle_refill(
     operator: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Spawn ``af fill <article_id> --skeleton-only --auto-pick`` from Lark."""
+    """Spawn ``blogflow fill <article_id> --skeleton-only --auto-pick`` from Lark."""
     response = _empty_response()
     actor = _actor_for(operator)
     try:
@@ -315,9 +322,9 @@ def _handle_takeover(
     response["reply_card"] = _make_card(
         title="人工接管已触发" if fired else "人工接管未触发",
         body=(
-            f"Article `{article_id}` 已发送 Locked Takeover 卡片到 Telegram。"
+            f"Article `{article_id}` 已发送 Locked Takeover 卡片到可用审核通道。"
             if fired
-            else f"Article `{article_id}` 未发送 (Telegram 未配置或缺少 chat_id)。"
+            else f"Article `{article_id}` 未发送 (审核通道未配置或缺少目标会话)。"
         ),
         template="blue" if fired else "grey",
     )
@@ -464,14 +471,16 @@ def _handle_view_meta(
 
 
 def _af_executable() -> list[str]:
-    """Resolve the `af` CLI argv prefix the same way agent_review.web does.
+    """Resolve the media/blog CLI argv prefix the same way agent_review.web does.
 
-    Prefer the `af` shim on PATH; fall back to `python -m agentflow.cli.commands`
-    so the Lark bridge works in installs that haven't published `af` to a
-    public bin dir (CI, dev venvs, the lark-adapter container).
+    Prefer the distinct `blogflow` / `mediaflow` shims on PATH; keep `af` only
+    as a legacy fallback for old installs. If none exist, fall back to
+    `python -m agentflow.cli.commands` so the Lark bridge still works in CI.
     """
-    af = "af"
-    return [af] if _which(af) else [sys.executable, "-m", "agentflow.cli.commands"]
+    for cli_name in ("blogflow", "mediaflow", "af"):
+        if _which(cli_name):
+            return [cli_name]
+    return [sys.executable, "-m", "agentflow.cli.commands"]
 
 
 def _which(cmd: str) -> str | None:
@@ -526,6 +535,40 @@ def _write_meta(article_id: str, meta: dict[str, Any]) -> bool:
         return True
     except OSError as err:
         _log.warning("metadata write failed for %s: %s", article_id, err)
+        return False
+
+
+def _spawn_publish_dispatch(
+    article_id: str,
+    platforms: list[str],
+    *,
+    operator: dict[str, Any],
+) -> bool:
+    """Run the same Gate D dispatch chain used by Telegram's PD:dispatch."""
+    try:
+        append_memory_event(
+            "lark_gate_d_dispatch_requested",
+            article_id=article_id,
+            payload={
+                "platforms": list(platforms),
+                "operator_open_id": operator.get("open_id"),
+                "operator_name": operator.get("name"),
+            },
+        )
+    except Exception:
+        _log.warning("lark_gate_d_dispatch_requested memory append failed", exc_info=True)
+
+    def _run() -> None:
+        try:
+            review_triggers.post_publish_dispatch(article_id, list(platforms))
+        except Exception:
+            _log.warning("Lark Gate D dispatch failed for %s", article_id, exc_info=True)
+
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+    except Exception:
+        _log.warning("failed to start Lark Gate D dispatch thread", exc_info=True)
         return False
 
 
@@ -704,7 +747,7 @@ def _spawn_edit_from_payload(
 def _handle_gate_a_write(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Kick off ``af write <hotspot_id> --auto-pick`` in the background.
+    """Kick off ``blogflow write <hotspot_id> --auto-pick`` in the background.
 
     ``article_id`` here is actually the hotspot_id selected from the Gate A
     card (the OpenClaw plugin must use Gate A's card meta where the value
@@ -857,7 +900,7 @@ def _handle_defer(
 def _handle_gate_b_rewrite(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Spawn ``af d2 fill --rewrite`` in the background, transition state to drafting."""
+    """Spawn ``blogflow fill --rewrite`` in the background, transition state to drafting."""
     response = _empty_response()
     actor = _actor_for(operator)
     try:
@@ -1085,7 +1128,7 @@ def _handle_gate_c_skip(
 def _handle_gate_c_regen(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Spawn ``af image-gate <id> --mode regen``."""
+    """Spawn ``blogflow image-gate <id> --mode regen``."""
     response = _empty_response()
     mode = str(payload.get("mode") or "auto")
     argv = _af_executable() + ["image-gate", article_id, "--mode", mode, "--json"]
@@ -1118,7 +1161,7 @@ def _handle_gate_c_regen(
 def _handle_gate_c_relogo(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Spawn ``af image-gate <id> --logo-only``."""
+    """Spawn ``blogflow image-gate <id> --logo-only``."""
     response = _empty_response()
     argv = _af_executable() + ["image-gate", article_id, "--logo-only", "--json"]
     if _spawn_async(argv, article_id=article_id, action="gate_c_relogo"):
@@ -1176,6 +1219,68 @@ def _handle_gate_c_full(
         article_id=article_id,
         operator=operator,
         outcome="ok",
+    )
+    return response
+
+
+def _handle_image_gate_pick(
+    *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Handle the soft image-gate picker sent after Gate B approval."""
+    response = _empty_response()
+    mode = str(payload.get("mode") or "cover-only").strip()
+    prompt = _payload_text(payload)
+    if mode in {"none", "skip", "off"}:
+        actor = _actor_for(operator)
+        try:
+            review_state.transition(
+                article_id,
+                gate="C",
+                to_state=STATE_IMAGE_SKIPPED,
+                actor=actor,
+                decision="image_skip_via_lark",
+            )
+        except StateError:
+            response["side_effects"].append("already_handled")
+        try:
+            review_triggers.post_gate_d(article_id)
+        except Exception:
+            _log.warning(
+                "post_gate_d after image skip failed for %s", article_id, exc_info=True
+            )
+        response["side_effects"].append("image_gate_skipped")
+        response["reply_card"] = _make_card(
+            title="已跳过配图",
+            body=f"`{article_id}` 已进入 Gate D 渠道选择。",
+            template="grey",
+        )
+    else:
+        argv = _af_executable() + ["image-gate", article_id, "--mode", mode, "--json"]
+        if prompt:
+            argv.extend(["--cover-description", prompt])
+        if _spawn_async(argv, article_id=article_id, action="image_gate_pick"):
+            response["side_effects"].append("image_gate_pick_spawned")
+            response["reply_card"] = _kicked_off_card(
+                action=f"image_gate({mode})", article_id=article_id
+            )
+        else:
+            response["side_effects"].append("spawn_failed")
+            response["reply_card"] = _make_card(
+                title="图片流程启动失败",
+                body=f"image-gate 子进程无法启动 (`{article_id}`)",
+                template="red",
+            )
+    _telemetry(
+        event_kind="card_action",
+        action="image_gate_pick",
+        article_id=article_id,
+        operator=operator,
+        outcome=(
+            "spawned"
+            if "image_gate_pick_spawned" in response["side_effects"]
+            else "ok"
+        ),
+        extra={"mode": mode, "has_inline_prompt": bool(prompt)},
     )
     return response
 
@@ -1296,9 +1401,8 @@ def _handle_gate_d_save_default(
 def _handle_gate_d_confirm(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Spawn ``af publish <id> --platforms <selection>`` in the background."""
+    """Run the full Gate D dispatch chain for the selected platforms."""
     response = _empty_response()
-    actor = _actor_for(operator)
     meta = _read_meta(article_id)
     sel = list(meta.get(_GATE_D_KEY) or [])
     if not sel:
@@ -1309,35 +1413,16 @@ def _handle_gate_d_confirm(
             template="grey",
         )
         return response
-    try:
-        review_state.transition(
-            article_id,
-            gate="D",
-            to_state=STATE_READY_TO_PUBLISH,
-            actor=actor,
-            decision="confirm_via_lark",
-        )
-    except StateError as err:
-        response["side_effects"].append("already_handled")
-        response["reply_card"] = _state_error_card(action="gate_d_confirm", err=err)
-        return response
-    argv = _af_executable() + [
-        "publish",
-        article_id,
-        "--platforms",
-        ",".join(sel),
-        "--json",
-    ]
-    if _spawn_async(argv, article_id=article_id, action="gate_d_confirm"):
-        response["side_effects"].append("gate_d_publish_spawned")
+    if _spawn_publish_dispatch(article_id, sel, operator=operator):
+        response["side_effects"].append("gate_d_dispatch_spawned")
         response["reply_card"] = _kicked_off_card(
-            action=f"publish({', '.join(sel)})", article_id=article_id
+            action=f"dispatch({', '.join(sel)})", article_id=article_id
         )
     else:
         response["side_effects"].append("spawn_failed")
         response["reply_card"] = _make_card(
-            title="发布启动失败",
-            body=f"publish 子进程无法启动 (`{article_id}`)",
+            title="分发启动失败",
+            body=f"Gate D dispatch 无法启动 (`{article_id}`)",
             template="red",
         )
     _telemetry(
@@ -1345,7 +1430,7 @@ def _handle_gate_d_confirm(
         action="gate_d_confirm",
         article_id=article_id,
         operator=operator,
-        outcome="spawned" if "gate_d_publish_spawned" in response["side_effects"] else "spawn_failed",
+        outcome="spawned" if "gate_d_dispatch_spawned" in response["side_effects"] else "spawn_failed",
         extra={"platforms": sel},
     )
     return response
@@ -1405,7 +1490,7 @@ def _handle_gate_d_resume(
             response["side_effects"].append("gate_d_resumed")
             response["reply_card"] = _make_card(
                 title="Gate D 已重新发卡",
-                body=f"`{article_id}` 渠道选择卡已重新推送 (TG side)",
+                body=f"`{article_id}` 渠道选择卡已重新推送。",
                 template="green",
             )
     except Exception as err:
@@ -1691,6 +1776,388 @@ def _handle_apply_pending_edit(
     return response
 
 
+# ---------------------------------------------------------------------------
+# Per-action auth — Lark parity with daemon._ACTION_REQ.
+#
+# The (gate, action) → required-verb mapping is the same as TG's: clicking
+# "通过" on Gate B needs ``review``, "重写" needs ``edit``, Gate D ✅ confirm
+# needs ``publish``, etc. We keep a separate dict keyed by the lark_callback
+# *action* token (no gate prefix) so dispatch is one lookup. To re-use the
+# auth verbs, the action key alone is enough — Gate is determined by which
+# handler we land in.
+# ---------------------------------------------------------------------------
+_LARK_ACTION_REQ: dict[str, str] = {
+    # Gate B
+    "approve_b": "review",
+    "reject_b": "review",
+    "refill": "review",
+    "takeover": "review",
+    "view_audit": "review",
+    "view_meta": "review",
+    "gate_b_rewrite": "edit",
+    "gate_b_edit": "edit",
+    "gate_b_diff": "review",
+    # Gate A
+    "gate_a_write": "write",
+    "gate_a_reject_all": "review",
+    "gate_a_expand": "review",
+    # Gate C / image picker
+    "gate_c_approve": "review",
+    "gate_c_skip": "review",
+    "gate_c_regen": "image",
+    "gate_c_relogo": "image",
+    "gate_c_full": "review",
+    "image_gate_pick": "image",
+    # Gate D
+    "gate_d_toggle": "review",
+    "gate_d_select_all": "review",
+    "gate_d_save_default": "review",
+    "gate_d_confirm": "publish",
+    "gate_d_cancel": "review",
+    "gate_d_resume": "review",
+    "gate_d_extend": "review",
+    "gate_d_retry": "publish",
+    # Locked takeover
+    "locked_critique": "review",
+    "locked_edit": "edit",
+    "locked_give_up": "review",
+    # Misc
+    "apply_pending_edit": "edit",
+    "defer": "review",
+}
+
+
+def _deny_card(action: str, required: str, operator: dict[str, Any]) -> dict[str, Any]:
+    name = operator.get("name") or operator.get("open_id") or "(unknown)"
+    return _make_card(
+        title="❌ 未授权",
+        body=(
+            f"`{action}` 需要权限 `{required}`，当前操作者 `{name}` 没有该授权。\n\n"
+            f"管理员可在 `~/.agentflow/review/lark_auth.json` 添加，或运行 "
+            f"`af review-auth-add` 的 Lark 子命令。"
+        ),
+        template="red",
+    )
+
+
+def _authorize_or_deny(
+    *,
+    action: str,
+    operator: dict[str, Any],
+    article_id: str | None,
+    event_kind: str,
+) -> dict[str, Any] | None:
+    """Return a deny response if the operator lacks the required action verb,
+    or ``None`` to let the caller proceed. No-op when the action has no
+    auth requirement registered (e.g. card_action vocab outside the gate
+    matrix), keeping behaviour open-by-default for unmapped actions."""
+    required = _LARK_ACTION_REQ.get(action)
+    if required is None:
+        return None
+    open_id = operator.get("open_id")
+    if review_auth.is_lark_authorized(str(open_id) if open_id else None, action=required):
+        return None
+    response = _empty_response()
+    response["side_effects"].append("not_authorized")
+    response["reply_card"] = _deny_card(action, required, operator)
+    _telemetry(
+        event_kind=event_kind,
+        action=action,
+        article_id=article_id,
+        operator=operator,
+        outcome="not_authorized",
+        extra={"required": required},
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Free-text @-mention message routing.
+#
+# When an operator @-mentions the Lark bot with free text, OpenClaw posts a
+# ``lark_message`` command. We translate the message into one of the
+# existing card_action verbs so the LLM-side bot never has to fabricate a
+# response — it always gets a structured ack from the daemon.
+#
+# Intent classification is keyword-first and deterministic. Pending-edit
+# slots take priority: any free-text message becomes the body of the
+# operator's most recent ``lark_*_edit_pending`` event when present, mirroring
+# the TG bot's "next plain-text reply applies the edit" muscle memory.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_text(raw: str) -> str:
+    text = (raw or "").strip()
+    # Drop a leading @bot prefix that some Lark clients leave in the message
+    # body (e.g. "@CS OP Assistant 推进到下个 gate").
+    if text.startswith("@"):
+        parts = text.split(maxsplit=1)
+        text = parts[1] if len(parts) > 1 else ""
+    return text.strip()
+
+
+_PENDING_REVIEW_STATES = (
+    STATE_DRAFT_PENDING_REVIEW,
+    STATE_IMAGE_PENDING_REVIEW,
+    STATE_CHANNEL_PENDING_REVIEW,
+    STATE_DRAFTING_LOCKED_HUMAN,
+)
+
+
+def _resolve_active_article(hint_article_id: str | None) -> str | None:
+    """Pick the most recently transitioned article in any pending-review
+    state. Mirrors how TG's /suggestions surfaces "the article waiting for
+    you" without an explicit id."""
+    if hint_article_id:
+        return str(hint_article_id)
+    try:
+        ids = review_state.articles_in_state(_PENDING_REVIEW_STATES) or []
+    except Exception:
+        ids = []
+    if not ids:
+        return None
+
+    def _ts_for(aid: str) -> str:
+        try:
+            meta_path = agentflow_home() / "drafts" / aid / "metadata.json"
+            if not meta_path.exists():
+                return ""
+            meta = json.loads(meta_path.read_text(encoding="utf-8")) or {}
+            history = meta.get("gate_history") or []
+            return str(history[-1].get("timestamp")) if history else ""
+        except Exception:
+            return ""
+
+    ids_sorted = sorted(ids, key=_ts_for, reverse=True)
+    return ids_sorted[0]
+
+
+# Keyword → (action, gate-state guard). Order matters: longer / more specific
+# patterns first so "拒绝重写" doesn't trip "拒绝".
+_INTENT_TABLE: list[tuple[tuple[str, ...], str]] = [
+    # Gate D
+    (("确认发布", "确认 publish", "publish confirm", "go"), "gate_d_confirm"),
+    (("全选平台", "select all", "全选"), "gate_d_select_all"),
+    (("取消发布", "取消 d", "d cancel"), "gate_d_cancel"),
+    # Gate C
+    (("通过封面", "封面通过", "approve cover"), "gate_c_approve"),
+    (("跳过封面", "skip cover", "不用封面"), "gate_c_skip"),
+    (("重新生成封面", "重生成封面", "regen cover"), "gate_c_regen"),
+    # Gate B (default for "通过" / "拒绝" / "重写" / "编辑" / "refill")
+    (("approve", "通过", "✅", "ok 推进", "可以发"), "approve_b"),
+    (("reject", "驳回", "拒绝", "❌"), "reject_b"),
+    (("refill", "重新填充", "重填"), "refill"),
+    (("rewrite", "重写", "整篇重写"), "gate_b_rewrite"),
+    (("edit", "编辑", "改一下", "调一下"), "gate_b_edit"),
+    (("diff", "审计", "audit", "查 audit"), "gate_b_diff"),
+    # Gate A
+    (("写这条", "起稿", "推进到下个 gate", "推进到下一个 gate", "推进", "advance", "next gate"),
+     "_advance"),
+    (("全拒绝", "reject all"), "gate_a_reject_all"),
+    # Read-only
+    (("查看 meta", "view meta", "看 meta"), "view_meta"),
+    (("查看 audit", "view audit"), "view_audit"),
+]
+
+
+def _classify_intent(text: str) -> str | None:
+    """Return the matching action token (lark_callback vocab) or ``None`` for
+    no match. Matching is case-insensitive substring."""
+    if not text:
+        return None
+    needle = text.lower()
+    for keywords, action in _INTENT_TABLE:
+        for kw in keywords:
+            if kw.lower() in needle:
+                return action
+    return None
+
+
+def _help_card() -> dict[str, Any]:
+    body = (
+        "我没看懂这条指令。可识别的关键词：\n\n"
+        "- `通过` / `approve` — 通过当前 Gate\n"
+        "- `驳回` / `reject` — 驳回当前 Gate\n"
+        "- `重写` / `rewrite` — Gate B 整篇重写\n"
+        "- `编辑 ...` / `edit ...` — Gate B 编辑（@bot 后跟具体改动）\n"
+        "- `refill` — Gate B 重新填充骨架\n"
+        "- `推进到下个 gate` / `advance` — 把当前活跃稿件推进一格\n"
+        "- `状态` / `status` — 查看 pending 队列\n\n"
+        "你也可以直接在卡片上点按钮。"
+    )
+    return _make_card(title="🤖 Lark @bot 帮助", body=body, template="grey")
+
+
+def _no_active_article_card() -> dict[str, Any]:
+    return _make_card(
+        title="没有活跃稿件",
+        body=(
+            "当前没有在 review 状态的稿件，无法推进。可以先：\n\n"
+            "- 在 Gate A 卡片上点 `起稿 #N`，或\n"
+            "- 让上游 D1 跑一轮新热点扫描"
+        ),
+        template="grey",
+    )
+
+
+def _route_message_intent(
+    *,
+    text: str,
+    operator: dict[str, Any],
+    payload: dict[str, Any],
+    hint_article_id: str | None = None,
+) -> dict[str, Any]:
+    """Top-level free-text router. Always returns a structured response so
+    the Lark-side bot never has to invent one."""
+    cleaned = _normalize_text(text)
+
+    # Pending-edit takes precedence: any non-empty body becomes the edit text.
+    article_id = _resolve_active_article(hint_article_id)
+    if article_id and cleaned:
+        pending = _latest_pending_edit(article_id, operator)
+        if pending is not None:
+            edit_payload = {**(payload or {}), "text": cleaned}
+            return _handle_apply_pending_edit(
+                article_id=article_id, operator=operator, payload=edit_payload
+            )
+
+    if not cleaned:
+        response = _empty_response()
+        response["side_effects"].append("empty_message")
+        response["reply_card"] = _help_card()
+        _telemetry(
+            event_kind="message",
+            action=None,
+            article_id=article_id,
+            operator=operator,
+            outcome="empty",
+        )
+        return response
+
+    intent = _classify_intent(cleaned)
+    if intent is None:
+        response = _empty_response()
+        response["side_effects"].append("unknown_intent")
+        response["reply_card"] = _help_card()
+        _telemetry(
+            event_kind="message",
+            action=None,
+            article_id=article_id,
+            operator=operator,
+            outcome="unknown_intent",
+            extra={"text_head": cleaned[:80]},
+        )
+        return response
+
+    if intent == "_advance":
+        return _route_advance(article_id=article_id, operator=operator, payload=payload)
+
+    if article_id is None and intent != "view_meta":
+        response = _empty_response()
+        response["side_effects"].append("no_active_article")
+        response["reply_card"] = _no_active_article_card()
+        _telemetry(
+            event_kind="message",
+            action=intent,
+            article_id=None,
+            operator=operator,
+            outcome="no_active_article",
+        )
+        return response
+
+    deny = _authorize_or_deny(
+        action=intent,
+        operator=operator,
+        article_id=article_id,
+        event_kind="message",
+    )
+    if deny is not None:
+        return deny
+
+    handler = _ACTION_HANDLERS.get(intent)
+    if handler is None:
+        response = _empty_response()
+        response["side_effects"].append("unmapped_intent")
+        response["reply_card"] = _help_card()
+        return response
+
+    return handler(article_id=article_id, operator=operator, payload=payload or {})
+
+
+def _route_advance(
+    *,
+    article_id: str | None,
+    operator: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Map "推进到下个 gate" to the right handler given current state.
+
+    draft_pending_review  → approve_b
+    image_pending_review  → gate_c_approve
+    channel_pending_review → asks user to pick platforms (no auto-advance)
+    drafting_locked_human → locked_critique (surface the audit reason)
+    """
+    if article_id is None:
+        response = _empty_response()
+        response["side_effects"].append("no_active_article")
+        response["reply_card"] = _no_active_article_card()
+        return response
+
+    try:
+        cur = review_state.current_state(article_id)
+    except Exception:
+        cur = None
+
+    if cur == STATE_DRAFT_PENDING_REVIEW:
+        deny = _authorize_or_deny(
+            action="approve_b", operator=operator,
+            article_id=article_id, event_kind="message",
+        )
+        if deny is not None:
+            return deny
+        return _handle_approve_b(
+            article_id=article_id, operator=operator, payload=payload or {}
+        )
+    if cur == STATE_IMAGE_PENDING_REVIEW:
+        deny = _authorize_or_deny(
+            action="gate_c_approve", operator=operator,
+            article_id=article_id, event_kind="message",
+        )
+        if deny is not None:
+            return deny
+        return _handle_gate_c_approve(
+            article_id=article_id, operator=operator, payload=payload or {}
+        )
+    if cur == STATE_CHANNEL_PENDING_REVIEW:
+        return _make_advance_help(article_id, "Gate D 需要你先选择平台再 ✅ 确认发布")
+    if cur == STATE_DRAFTING_LOCKED_HUMAN:
+        deny = _authorize_or_deny(
+            action="locked_critique", operator=operator,
+            article_id=article_id, event_kind="message",
+        )
+        if deny is not None:
+            return deny
+        return _handle_locked_critique(
+            article_id=article_id, operator=operator, payload=payload or {}
+        )
+
+    return _make_advance_help(
+        article_id,
+        f"当前状态 `{cur or '?'}` 没有自动推进的下一步；可用 `通过` / `驳回` / `重写` 等指令。",
+    )
+
+
+def _make_advance_help(article_id: str, body: str) -> dict[str, Any]:
+    response = _empty_response()
+    response["side_effects"].append("advance_help")
+    response["reply_card"] = _make_card(
+        title="无法自动推进",
+        body=f"`{article_id}`\n\n{body}",
+        template="orange",
+    )
+    return response
+
+
 # Action vocabulary — must match the Adapter Service exactly.
 _ACTION_HANDLERS = {
     # v1.1.0
@@ -1714,6 +2181,7 @@ _ACTION_HANDLERS = {
     "gate_c_regen": _handle_gate_c_regen,
     "gate_c_relogo": _handle_gate_c_relogo,
     "gate_c_full": _handle_gate_c_full,
+    "image_gate_pick": _handle_image_gate_pick,
     # v1.1.1 — Gate D
     "gate_d_toggle": _handle_gate_d_toggle,
     "gate_d_select_all": _handle_gate_d_select_all,
@@ -1784,17 +2252,19 @@ def handle_event(
         return response
 
     if event_kind == "message":
-        # Phase 1: messages are not used as commands. Acknowledge and log.
-        response = _empty_response()
-        response["side_effects"].append("message_ignored")
-        _telemetry(
-            event_kind="message",
-            action=None,
-            article_id=article_id,
-            operator=operator,
-            outcome="ignored",
+        text = str(payload.get("text") or payload.get("body") or "")
+        # Plumb chat_id so downstream notify.* events can target the same
+        # Lark chat (parity with TG callback's chat_id capture).
+        chat_id = payload.get("chat_id")
+        operator_with_chat = (
+            {**operator, "chat_id": chat_id} if chat_id else operator
         )
-        return response
+        return _route_message_intent(
+            text=text,
+            operator=operator_with_chat,
+            payload=payload,
+            hint_article_id=article_id,
+        )
 
     if event_kind != "card_action":
         response = _empty_response()
@@ -1835,5 +2305,14 @@ def handle_event(
             outcome="missing_article_id",
         )
         return response
+
+    deny = _authorize_or_deny(
+        action=str(action),
+        operator=operator,
+        article_id=article_id,
+        event_kind="card_action",
+    )
+    if deny is not None:
+        return deny
 
     return handler(article_id=article_id, operator=operator, payload=payload)

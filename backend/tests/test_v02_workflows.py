@@ -9,6 +9,7 @@ import unittest
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -388,7 +389,7 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
             patch("agentflow.agent_d1.main.run_d1_scan", return_value=output),
             patch("agentflow.agent_d1.search.run_d1_search", side_effect=_fake_search),
         ):
-            result = runner.invoke(cli, ["hotspots", "--json"])
+            result = runner.invoke(cli, ["article-hotspots", "--json"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         payload = _parse_json_output(result.output)
@@ -447,6 +448,39 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
         self.assertTrue(second.get("duplicate"))
         self.assertEqual(second["short_id"], first["short_id"])
         send_mock.assert_called_once()
+
+    def test_lark_primary_posts_gate_d_card_without_telegram(self) -> None:
+        from agentflow.agent_review import triggers
+
+        article_id = "lark_only_gate_d"
+        draft_dir = self.home / "drafts" / article_id
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        (draft_dir / "metadata.json").write_text(
+            json.dumps({"title": "Lark-only publishing", "metadata_overrides": {}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                    "TELEGRAM_BOT_TOKEN": "",
+                },
+                clear=False,
+            ),
+            patch("agentflow.shared.agent_bridge.emit_agent_event") as emit_mock,
+            patch("agentflow.agent_review.tg_client.send_message") as send_mock,
+        ):
+            result = triggers.post_gate_d(article_id)
+
+        self.assertIsNotNone(result)
+        send_mock.assert_not_called()
+        emit_mock.assert_called()
+        self.assertEqual(emit_mock.call_args.kwargs["event_type"], "review.gate_d_card")
+        payload = emit_mock.call_args.kwargs["payload"]
+        self.assertEqual(payload["gate"], "D")
+        self.assertTrue(payload["actions"])
 
     def test_search_profile_runs_all_configured_queries(self) -> None:
         runner = CliRunner()
@@ -3135,8 +3169,8 @@ class TopicSpineLintTests(AgentflowHomeTestCase):
 class TopicFitHardGateTests(AgentflowHomeTestCase):
     """v1.0.21 — `AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD` gates D1 hotspots
     before D2 reads them, instead of just down-ranking via composite
-    score. Default 0 keeps v1.0.20 behavior; setting > 0 enables a hard
-    drop for prod brand discipline."""
+    score. Default 0.025 keeps a light prod guard; explicit 0 disables the
+    hard drop for legacy soft-rerank behavior."""
 
     def test_hard_threshold_drops_low_fit_hotspots(self) -> None:
         from agentflow.agent_review import triggers
@@ -3303,15 +3337,49 @@ class LarkWebhookTests(AgentflowHomeTestCase):
             lark_webhook.notify_spawn_failure(
                 label="fill", target_id="aid", error_tail="boom"
             )
+            lark_webhook.notify_hotspots_digest(
+                scan_count=2,
+                top_titles=["Topic A", "Topic B"],
+            )
 
         post_mock.assert_not_called()
         event_types = [c.kwargs["event_type"] for c in emit_mock.call_args_list]
-        self.assertEqual(event_types, ["notify.draft_ready", "notify.spawn_failure"])
+        self.assertEqual(
+            event_types,
+            ["notify.draft_ready", "notify.spawn_failure", "notify.hotspots_digest"],
+        )
         self.assertEqual(emit_mock.call_args_list[0].kwargs["article_id"], "aid")
         self.assertIn(
             "hello draft body",
             emit_mock.call_args_list[0].kwargs["payload"]["draft_excerpt"],
         )
+
+    def test_legacy_hotspots_digest_copy_is_not_review_card(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "false",
+                    "LARK_WEBHOOK_URL": "https://legacy-custom-bot",
+                    "LARK_WEBHOOK_TG_BOT_URL": "",
+                    "LARK_WEBHOOK_NO_DEFER": "true",
+                },
+                clear=False,
+            ),
+            patch.object(lark_webhook, "_post") as post_mock,
+        ):
+            lark_webhook.notify_hotspots_digest(
+                scan_count=1,
+                top_titles=["Prediction markets decide everything"],
+            )
+
+        payload = post_mock.call_args.args[0]
+        body = payload["card"]["elements"][0]["text"]["content"]
+        self.assertIn("legacy Custom Bot 扫描摘要", body)
+        self.assertIn("review.gate_a_card", body)
+        self.assertNotIn("Gate A 卡已推送到 Telegram 待审核", body)
 
     def test_sign_matches_lark_spec(self) -> None:
         """Per Lark docs: HmacSHA256(stringToSign='timestamp\\n'+secret, body=b'')
@@ -3325,6 +3393,241 @@ class LarkWebhookTests(AgentflowHomeTestCase):
         self.assertEqual(sig, lark_webhook._sign(100, "demo"))
         # Different secret → different sig.
         self.assertNotEqual(sig, lark_webhook._sign(100, "other"))
+
+
+class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
+    def test_template_covers_all_review_cards_buttons_and_inputs(self) -> None:
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "agentflow"
+            / "agent_review"
+            / "templates"
+            / "lark_review_cards.md"
+        ).read_text(encoding="utf-8")
+
+        required_events = [
+            "review.gate_a_card",
+            "review.profile_setup_card",
+            "review.gate_b_card",
+            "review.image_gate_picker_card",
+            "review.gate_c_card",
+            "review.gate_d_card",
+            "review.locked_takeover_card",
+        ]
+        for event_type in required_events:
+            self.assertIn(event_type, template)
+
+        required_commands = [
+            "lark_gate_a_write",
+            "lark_gate_a_expand",
+            "lark_gate_a_reject_all",
+            "lark_gate_b_approve",
+            "lark_gate_b_edit",
+            "lark_gate_b_rewrite",
+            "lark_refill",
+            "lark_gate_b_reject",
+            "lark_gate_b_diff",
+            "lark_view_meta",
+            "lark_image_gate_cover_only",
+            "lark_image_gate_cover_plus_body",
+            "lark_image_gate_skip",
+            "lark_gate_c_approve",
+            "lark_gate_c_skip",
+            "lark_gate_c_regen",
+            "lark_gate_c_relogo",
+            "lark_gate_c_full",
+            "lark_gate_d_toggle",
+            "lark_gate_d_select_all",
+            "lark_gate_d_save_default",
+            "lark_gate_d_confirm",
+            "lark_gate_d_cancel",
+            "lark_gate_d_extend",
+            "lark_locked_critique",
+            "lark_locked_edit",
+            "lark_locked_give_up",
+            "lark_apply_pending_edit",
+            "lark_defer",
+        ]
+        for command in required_commands:
+            self.assertIn(command, template)
+
+        for field in (
+            "payload.comment",
+            "payload.edit_text",
+            "payload.prompt",
+            "payload.cover_description",
+            "payload.feedback",
+            "payload.text",
+            "payload.answer",
+        ):
+            self.assertIn(field, template)
+        self.assertIn("full dispatch chain", template)
+        self.assertIn("notify.hotspots_digest", template)
+
+    def test_lark_first_flow_reference_documents_daemon_owned_bridge(self) -> None:
+        flow = Path("docs/flows/LARK_FIRST_REVIEW_FLOWS.md").read_text(
+            encoding="utf-8"
+        )
+        bridge = Path("docs/integrations/AGENT_BRIDGE.md").read_text(
+            encoding="utf-8"
+        )
+        openclaw = Path("docs/openclaw_plugin_integration.md").read_text(
+            encoding="utf-8"
+        )
+
+        for doc in (flow, bridge, openclaw):
+            self.assertIn("blogflow review-daemon", doc)
+            self.assertIn("/api/commands", doc)
+        self.assertIn("AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` is outbound", flow)
+        self.assertIn("127.0.0.1:7860", flow)
+        self.assertIn("not the primary Lark callback process", bridge)
+        self.assertIn("LARK_FIRST_REVIEW_FLOWS.md", openclaw)
+
+    def test_openclaw_skill_reference_points_to_lark_first_flow(self) -> None:
+        skill = Path(".cursor/skills/agentflow-open-claw-v2/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        reference = Path(
+            ".cursor/skills/agentflow-open-claw-v2/references/reference.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("AgentFlow Open Claw v2.8", skill)
+        self.assertIn("docs/flows/LARK_FIRST_REVIEW_FLOWS.md", skill)
+        self.assertIn("34 `lark_*` commands", reference)
+        self.assertIn("daemon-owned", reference)
+
+    def test_lark_primary_preflight_detects_legacy_path(self) -> None:
+        from agentflow.agent_review import preflight
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_LARK_APP_PRIMARY": "false",
+                "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL": "http://openclaw/events",
+            },
+            clear=False,
+        ):
+            result = preflight.check_lark_app_primary()
+
+        self.assertTrue(result.present)
+        self.assertIsNone(result.valid)
+        self.assertIn("legacy notification paths", result.message)
+
+    def test_lark_primary_preflight_fails_without_event_webhook(self) -> None:
+        from agentflow.agent_review import preflight
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL": "",
+            },
+            clear=False,
+        ):
+            result = preflight.check_lark_app_primary()
+
+        self.assertFalse(result.ok)
+        self.assertIn("review.*_card events cannot reach OpenClaw", result.message)
+
+    def test_review_daemon_embeds_bridge_for_lark_primary(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                "AGENTFLOW_REVIEW_DAEMON_BRIDGE_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            self.assertTrue(review_daemon._embedded_bridge_enabled())
+
+    def test_review_daemon_bridge_can_be_enabled_explicitly(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_LARK_APP_PRIMARY": "false",
+                "AGENTFLOW_REVIEW_DAEMON_BRIDGE_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            self.assertTrue(review_daemon._embedded_bridge_enabled())
+
+    def test_review_daemon_starts_embedded_bridge_thread(self) -> None:
+        started: list[dict[str, Any]] = []
+
+        class _FakeThread:
+            def __init__(self, *, target, daemon, name):
+                self.target = target
+                self.daemon = daemon
+                self.name = name
+
+            def start(self):
+                started.append({"daemon": self.daemon, "name": self.name})
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                    "AGENTFLOW_REVIEW_BRIDGE_HOST": "",
+                    "AGENTFLOW_REVIEW_BRIDGE_PORT": "",
+                },
+                clear=False,
+            ),
+            patch.object(review_daemon.threading, "Thread", _FakeThread),
+        ):
+            review_daemon._start_embedded_bridge_if_enabled()
+
+        self.assertEqual(started, [{"daemon": True, "name": "agentflow-bridge-api"}])
+
+    def test_review_daemon_lark_primary_runs_without_telegram_token(self) -> None:
+        class _StopAfterOneLoop:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def is_set(self) -> bool:
+                self.calls += 1
+                return self.calls > 1
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                    "TELEGRAM_BOT_TOKEN": "",
+                    "TELEGRAM_POLL_INTERVAL_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            patch.object(review_daemon, "_STOP", _StopAfterOneLoop()),
+            patch.object(review_daemon, "_acquire_singleton_lock", return_value=object()),
+            patch.object(review_daemon, "_start_embedded_bridge_if_enabled") as bridge,
+            patch.object(review_daemon.tg_client, "get_me") as get_me,
+            patch.object(review_daemon.tg_client, "get_updates") as get_updates,
+            patch.object(review_daemon.time, "sleep", return_value=None),
+        ):
+            review_daemon.run(skip_preflight=True, poll_interval=0)
+
+        bridge.assert_called_once()
+        get_me.assert_not_called()
+        get_updates.assert_not_called()
+
+    def test_review_daemon_requires_a_review_surface(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "false",
+                    "TELEGRAM_BOT_TOKEN": "",
+                },
+                clear=False,
+            ),
+            patch.object(review_daemon, "_acquire_singleton_lock", return_value=object()),
+            patch.object(review_daemon, "_start_embedded_bridge_if_enabled"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                review_daemon.run(skip_preflight=True, poll_interval=0)
+
+        self.assertIn("Set one review surface", str(ctx.exception))
 
     def test_send_text_includes_sign_when_secret_set(self) -> None:
         from agentflow.shared import lark_webhook
@@ -3667,8 +3970,8 @@ class ActiveProfileThinnessTests(AgentflowHomeTestCase):
 
 
 class HotspotsScheduleTests(AgentflowHomeTestCase):
-    """v1.0.17 — daemon-internal cross-OS hotspots scheduler. Replaces
-    the macOS-only `af review-cron-install` for Linux / Docker / sandbox
+    """v1.0.17 — daemon-internal cross-OS article-hotspots scheduler. Replaces
+    the macOS-only `blogflow review-cron-install` for Linux / Docker / sandbox
     deployments where launchctl was a no-op."""
 
     def test_parse_schedule_drops_bad_slots(self) -> None:
@@ -3721,8 +4024,8 @@ class HotspotsScheduleTests(AgentflowHomeTestCase):
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
-                "AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K": "5",
+                "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
+                "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE_TOP_K": "5",
             },
             clear=False,
         ):
@@ -3734,8 +4037,8 @@ class HotspotsScheduleTests(AgentflowHomeTestCase):
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
-                "AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K": "5",
+                "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE": f"{slot[0]:02d}:{slot[1]:02d}",
+                "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE_TOP_K": "5",
             },
             clear=False,
         ):
@@ -3745,7 +4048,14 @@ class HotspotsScheduleTests(AgentflowHomeTestCase):
 
     def test_status_disabled_when_env_empty(self) -> None:
         from agentflow.agent_review import schedule
-        with patch.dict(os.environ, {"AGENTFLOW_HOTSPOTS_SCHEDULE": ""}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE": "",
+                "AGENTFLOW_HOTSPOTS_SCHEDULE": "",
+            },
+            clear=False,
+        ):
             snap = schedule.status()
         self.assertFalse(snap["enabled"])
         self.assertEqual(snap["slots"], [])
@@ -3756,7 +4066,7 @@ class HotspotsScheduleTests(AgentflowHomeTestCase):
         with patch("platform.system", return_value="Linux"):
             res = CliRunner().invoke(cli, ["review-cron-install"])
         self.assertNotEqual(res.exit_code, 0)
-        self.assertIn("AGENTFLOW_HOTSPOTS_SCHEDULE", res.output)
+        self.assertIn("BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE", res.output)
 
 
 class V016BatchTests(AgentflowHomeTestCase):
@@ -5155,8 +5465,9 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         self.assertEqual(res.status_code, 200)
         commands = res.json()["commands"]
         lark = sorted(c for c in commands if c.startswith("lark_"))
-        # 29 v1.1.1 commands + v1.1.2 lark_apply_pending_edit = 30
-        self.assertEqual(len(lark), 30)
+        # 29 v1.1.1 commands + v1.1.2 pending edit + 3 image-picker actions
+        # + v1.1.7 lark_message free-text router = 34
+        self.assertEqual(len(lark), 34)
         # Spot-check coverage for each Gate
         for required in (
             "lark_gate_a_write",
@@ -5170,6 +5481,9 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
             "lark_gate_c_regen",
             "lark_gate_c_relogo",
             "lark_gate_c_full",
+            "lark_image_gate_cover_only",
+            "lark_image_gate_cover_plus_body",
+            "lark_image_gate_skip",
             "lark_gate_d_toggle",
             "lark_gate_d_select_all",
             "lark_gate_d_save_default",
@@ -5200,6 +5514,8 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
                 "lark_gate_b_edit",
             "lark_gate_c_regen",
             "lark_gate_c_relogo",
+            "lark_image_gate_cover_only",
+            "lark_image_gate_cover_plus_body",
             "lark_gate_d_confirm",
             "lark_gate_d_retry",
                 "lark_apply_pending_edit",
