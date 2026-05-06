@@ -16,6 +16,50 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.1.9] — 2026-05-07
+
+- **D1 third recall layer — Brave Web Search collector.** New
+  `backend/agentflow/agent_d1/collectors/brave_search.py` mirrors the
+  twitter_search.py contract: opt-in via `AGENTFLOW_BRAVE_SEARCH_ENABLED`,
+  requires `BRAVE_API_KEY`, refuses to fabricate when key is missing and
+  MOCK_LLM is not set. Self-paces at 1.1s/req to stay under the free
+  tier's 1qps cap. Surfaces vendor blogs / GitHub READMEs / Substack
+  drops that don't show up via KOL pulls or Twitter search. Tagged
+  `source="rss"` so D1 clustering already knows how to score it.
+  `sources.yaml::brave_search:` is the per-query config block.
+- **Web3-infra vendor RSS + Twitter seed.** `~/.agentflow/sources.yaml`
+  gains 9 peer/competitor RSS feeds (Dune, Glassnode, The Graph, Pyth,
+  Chainalysis, Goldsky, Subsquid, Solana, Multicoin) and 10 high-weight
+  Twitter accounts (`@nansen_ai`, `@MessariCrypto`, `@PythNetwork`,
+  `@chainalysis`, `@graphprotocol`, `@goldskyio`, `@subsquid`,
+  `@MulticoinCap`, `@_polynya`, `@hosseeb`). All marked `note: v1.1.9 —
+  unverified` so the operator probes them before the next scheduled
+  scan. Backup of pre-edit sources.yaml at `~/.agentflow/sources.yaml.bak.*`.
+- **D2 voice auto-adaptation by topic_fit_score.** New helper
+  `topic_profile_effective_voice(publisher, fit_score)` resolves the
+  effective writing voice based on Jaccard fit:
+  - `fit_score >= AGENTFLOW_VOICE_FIRST_PARTY_MIN_FIT` (default 0.20) →
+    keep configured voice (typically `first_party_brand`).
+  - Below that threshold but kept by D1's hard gate → force `observer`.
+  - `render_publisher_account_block(publisher, fit_score | hotspot)`
+    uses this signal to flip the prompt: pronoun swaps to "我（个人观察）",
+    the `**可引用的产品事实**` anchor list is dropped (it's the
+    temptation that produces forced-analogy articles), and an explicit
+    "禁止把当前话题硬转成 publisher 自家产品的一面来讲" rule is appended.
+  - Both D2 entry points (`skeleton_generator.generate_skeleton` and
+    `section_filler.fill_section` via `fill_all_sections`) plumb the
+    hotspot through so every prompt sees the right voice.
+- **D1 hard gate default bumped 0.025 → 0.10.** The old floor still let
+  in topics that triggered the v1.1.7 forced-analogy class (硬套预言机).
+  Below 0.10 → drop. [0.10, 0.20) → kept but written as observer.
+  >= 0.20 → first-party voice. All three thresholds are env-tunable.
+- Tests: 4 new for the Brave collector (disabled-default, mock fixtures,
+  enabled-without-key refuses fabrication, blocked-weight drops query),
+  4 for `topic_profile_effective_voice` (no-fit / high / low / env
+  override), 4 for `render_publisher_account_block` observer flips
+  (high keeps facts, low drops them + adds 禁止 rule, no-fit backward
+  compat, hotspot kwarg computes inline). 230/230 pytest green.
+
 ## [1.1.8] — 2026-05-07
 
 - **Lark @-mention parity with TG bot — kills the v1.1.7 hallucination class.**

@@ -5555,5 +5555,162 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         self.assertEqual(seen["payload"], {"platform": "ghost"})
 
 
+# ---------------------------------------------------------------------------
+# v1.1.9 — Brave Search collector + voice auto-adaptation
+# ---------------------------------------------------------------------------
+
+
+class BraveSearchCollectorTests(unittest.IsolatedAsyncioTestCase):
+    """v1.1.9 — third recall layer. Mirrors twitter_search.py's contract:
+    default off; mock fixtures only when MOCK_LLM=true; never fabricate
+    when enabled+missing-key+not-mock."""
+
+    async def test_disabled_by_default_returns_empty(self) -> None:
+        from agentflow.agent_d1.collectors import brave_search
+        with patch.dict(os.environ, {"AGENTFLOW_BRAVE_SEARCH_ENABLED": "false"}, clear=False):
+            out = await brave_search.collect([{"query": "test"}])
+        self.assertEqual(out, [])
+
+    async def test_mock_mode_returns_deterministic_signals(self) -> None:
+        from agentflow.agent_d1.collectors import brave_search
+        with patch.dict(
+            os.environ,
+            {"AGENTFLOW_BRAVE_SEARCH_ENABLED": "true", "MOCK_LLM": "true"},
+            clear=False,
+        ):
+            out = await brave_search.collect([{"query": "MEV", "count": 3}])
+        self.assertGreater(len(out), 0)
+        for sig in out:
+            self.assertEqual(sig.source, "rss")
+            self.assertEqual(sig.raw_metadata.get("via"), "brave_search")
+            self.assertTrue(sig.raw_metadata.get("mock"))
+
+    async def test_enabled_without_key_refuses_to_fabricate(self) -> None:
+        # No MOCK_LLM, no BRAVE_API_KEY → empty list, not synthetic data.
+        from agentflow.agent_d1.collectors import brave_search
+        env = {
+            "AGENTFLOW_BRAVE_SEARCH_ENABLED": "true",
+            "MOCK_LLM": "",
+            "BRAVE_API_KEY": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            out = await brave_search.collect([{"query": "test"}])
+        self.assertEqual(out, [])
+
+    async def test_blocked_weight_drops_query(self) -> None:
+        # Mirrors twitter_search semantics — weight=blocked stays in yaml
+        # for posterity but never runs.
+        from agentflow.agent_d1 import main as d1_main
+        sources = {
+            "brave_search": [
+                {"query": "live", "weight": "high"},
+                {"query": "off", "weight": "blocked"},
+            ]
+        }
+        with patch.dict(
+            os.environ, {"AGENTFLOW_BRAVE_SEARCH_ENABLED": "true"}, clear=False
+        ):
+            queries = d1_main._brave_search_queries(sources)
+        self.assertEqual([q["query"] for q in queries], ["live"])
+
+
+class TopicFitEffectiveVoiceTests(unittest.TestCase):
+    """v1.1.9 — voice auto-adaptation by fit score.
+
+    The threshold env (`AGENTFLOW_VOICE_FIRST_PARTY_MIN_FIT`, default 0.20)
+    decides whether the configured voice is honored or downgraded to
+    `observer`. None fit_score = backward compat (configured kept)."""
+
+    def test_no_fit_score_keeps_configured_voice(self) -> None:
+        from agentflow.shared.topic_profiles import topic_profile_effective_voice
+        voice, _ = topic_profile_effective_voice(
+            {"voice": "first_party_brand"}, None,
+        )
+        self.assertEqual(voice, "first_party_brand")
+
+    def test_high_fit_keeps_configured_voice(self) -> None:
+        from agentflow.shared.topic_profiles import topic_profile_effective_voice
+        voice, reason = topic_profile_effective_voice(
+            {"voice": "first_party_brand"}, 0.30,
+        )
+        self.assertEqual(voice, "first_party_brand")
+        self.assertIn("0.300", reason)
+
+    def test_low_fit_forces_observer(self) -> None:
+        from agentflow.shared.topic_profiles import topic_profile_effective_voice
+        voice, reason = topic_profile_effective_voice(
+            {"voice": "first_party_brand"}, 0.05,
+        )
+        self.assertEqual(voice, "observer")
+        self.assertIn("0.050", reason)
+
+    def test_threshold_env_override(self) -> None:
+        from agentflow.shared.topic_profiles import topic_profile_effective_voice
+        # Bump threshold to 0.50 — score 0.30 should now demote to observer.
+        with patch.dict(
+            os.environ, {"AGENTFLOW_VOICE_FIRST_PARTY_MIN_FIT": "0.50"}, clear=False
+        ):
+            voice, _ = topic_profile_effective_voice(
+                {"voice": "first_party_brand"}, 0.30,
+            )
+        self.assertEqual(voice, "observer")
+
+
+class PublisherBlockObserverModeTests(unittest.TestCase):
+    """v1.1.9 — render_publisher_account_block adapts the prompt block
+    when fit_score is low. The forced-analogy class (硬套预言机) is
+    blocked at the prompt level: pronoun swaps to "我", the
+    product_facts anchor list is dropped, and an explicit "禁止硬嫁接"
+    rule is appended."""
+
+    _publisher = {
+        "brand": "ChainStream",
+        "voice": "first_party_brand",
+        "pronoun": "我们",
+        "product_facts": [
+            "Kafka Streams 实时流",
+            "MCP 执行层",
+        ],
+        "do": ["用「我们」开口"],
+        "dont": ["不要写应然句"],
+    }
+
+    def test_high_fit_renders_first_party_block(self) -> None:
+        from agentflow.shared.topic_profiles import render_publisher_account_block
+        block = render_publisher_account_block(self._publisher, fit_score=0.30)
+        self.assertIn("我们", block)
+        self.assertIn("Kafka Streams", block)  # product_facts shown
+        self.assertNotIn("禁止把当前话题硬转", block)
+
+    def test_low_fit_flips_to_observer_block(self) -> None:
+        from agentflow.shared.topic_profiles import render_publisher_account_block
+        block = render_publisher_account_block(self._publisher, fit_score=0.05)
+        self.assertIn("observer", block)
+        self.assertIn("我（个人观察）", block)
+        # product_facts anchor MUST be dropped — its presence is the
+        # temptation that produces forced-analogy articles.
+        self.assertNotIn("Kafka Streams", block)
+        self.assertIn("禁止", block)
+        self.assertIn("强行嫁接", block)
+        self.assertIn("把当前话题硬转", block)
+
+    def test_no_fit_signal_falls_back_to_configured(self) -> None:
+        from agentflow.shared.topic_profiles import render_publisher_account_block
+        block = render_publisher_account_block(self._publisher, fit_score=None)
+        # Backward compat: no fit signal → keep configured voice + facts.
+        self.assertIn("Kafka Streams", block)
+        self.assertNotIn("observer", block)
+
+    def test_hotspot_kwarg_computes_fit_inline(self) -> None:
+        from agentflow.shared.topic_profiles import render_publisher_account_block
+        # An off-domain hotspot — should compute low fit and flip to observer.
+        hotspot = {
+            "topic_one_liner": "TCG 卡牌 荷兰保税仓 HS 编码",
+            "source_references": [{"text_snippet": "鹿特丹港 报关 滞港费"}],
+        }
+        block = render_publisher_account_block(self._publisher, hotspot=hotspot)
+        self.assertIn("observer", block)
+
+
 if __name__ == "__main__":
     unittest.main()

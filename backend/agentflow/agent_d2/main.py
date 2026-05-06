@@ -185,6 +185,24 @@ async def fill_all_sections(
             },
         )
 
+    # v1.1.9 — resolve hotspot once per fill so each section's publisher
+    # block can flip to observer mode on distant topics. We read metadata
+    # to find hotspot_id (saved when skeleton was generated), then load
+    # the hotspot from disk. Failures degrade silently: no hotspot → no
+    # fit signal → render falls back to configured voice (backward compat).
+    _fill_hotspot_dict: dict[str, Any] | None = None
+    try:
+        _fill_meta_path = (
+            agentflow_home() / "drafts" / article_id / "metadata.json"
+        )
+        if _fill_meta_path.exists():
+            _fill_meta = json.loads(_fill_meta_path.read_text(encoding="utf-8")) or {}
+            _fill_hsid = str(_fill_meta.get("hotspot_id") or "").strip()
+            if _fill_hsid:
+                _fill_hotspot_dict = _load_hotspot(_fill_hsid).to_dict()
+    except Exception:
+        _fill_hotspot_dict = None
+
     for section in skeleton.section_outline:
         context = {
             "title": title,
@@ -193,6 +211,7 @@ async def fill_all_sections(
             "full_outline": skeleton.section_outline,
             "previous_sections": [s.to_dict() for s in completed],
             "article_id": article_id,
+            "hotspot": _fill_hotspot_dict,
         }
         filled = await fill_section(section, context, style_profile)
         completed.append(filled)

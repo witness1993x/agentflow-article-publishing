@@ -108,8 +108,12 @@ async def generate_skeleton(
     intent = load_current_intent()
     intent_text = intent_query_text(intent)
     intent_block = render_topic_intent_block(intent)
+    # v1.1.9 — pass hotspot so the publisher block flips to observer mode
+    # when fit_score is low. Hotspot.to_dict() is the same shape topic_fit
+    # already understands.
     publisher_block = render_publisher_account_block(
-        resolve_publisher_account_from_intent(intent)
+        resolve_publisher_account_from_intent(intent),
+        hotspot=hotspot.to_dict() if hotspot else None,
     )
 
     substitutions = {

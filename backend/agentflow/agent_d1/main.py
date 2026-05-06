@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from agentflow.agent_d1 import clustering, scoring, viewpoint_miner
+from agentflow.agent_d1.collectors import brave_search as brave_search_collector
 from agentflow.agent_d1.collectors import hackernews as hn_collector
 from agentflow.agent_d1.collectors import rss as rss_collector
 from agentflow.agent_d1.collectors import twitter as twitter_collector
@@ -122,6 +123,47 @@ def _twitter_search_enabled() -> bool:
     )
 
 
+def _brave_search_enabled() -> bool:
+    return (
+        os.environ.get("AGENTFLOW_BRAVE_SEARCH_ENABLED", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+
+
+def _brave_search_queries(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """v1.1.9 — extract Brave Web Search queries from sources.yaml.
+
+    Mirrors ``_twitter_search_queries`` semantics: weight=blocked drops the
+    row, ``AGENTFLOW_BRAVE_SEARCH_ONLY_HIGH=true`` env restricts to
+    weight=high (separate from the Twitter KOL knob so operators can run
+    Brave wide-net while keeping Twitter narrow, or vice versa)."""
+    if not _brave_search_enabled():
+        return []
+    queries = sources.get("brave_search") or []
+    only_high = (
+        os.environ.get("AGENTFLOW_BRAVE_SEARCH_ONLY_HIGH", "")
+        .strip()
+        .lower()
+        == "true"
+    )
+    out: list[dict[str, Any]] = []
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        query = (q.get("query") or "").strip()
+        if not query:
+            continue
+        weight = str(q.get("weight") or "").strip().lower()
+        if weight == "blocked":
+            continue
+        if only_high and weight != "high":
+            continue
+        out.append(q)
+    return out
+
+
 def _twitter_search_queries(sources: dict[str, Any]) -> list[dict[str, Any]]:
     """v1.0.26 — extract twitter search queries from sources.yaml.
 
@@ -194,6 +236,7 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
     feeds = _rss_feeds(sources)
     hn_enabled, hn_keywords, hn_min = _hn_config(sources)
     search_queries = _twitter_search_queries(sources)
+    brave_queries = _brave_search_queries(sources)
 
     # v1.0.26: per-query default for the search collector — operators can
     # override via AGENTFLOW_TWITTER_SEARCH_MAX_RESULTS without editing every
@@ -204,6 +247,13 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
         )
     except (TypeError, ValueError):
         search_default_max = 20
+
+    try:
+        brave_default_count = int(
+            os.environ.get("AGENTFLOW_BRAVE_SEARCH_COUNT", "10") or "10"
+        )
+    except (TypeError, ValueError):
+        brave_default_count = 10
 
     tasks = [
         twitter_collector.collect(handles, max_results_per_kol=20),
@@ -218,6 +268,17 @@ async def _collect_all(sources: dict[str, Any]) -> list[RawSignal]:
         tasks.append(
             twitter_search_collector.collect(
                 search_queries, default_max_results=search_default_max,
+            )
+        )
+    if brave_queries:
+        # v1.1.9 — third recall path: independent web discovery via Brave
+        # Search. Vendor blogs / research posts / GitHub READMEs that don't
+        # show up in Twitter or HN. Tagged source="rss" because the result
+        # shape (title + snippet + URL + age) is identical to RSS entries
+        # and downstream clustering already handles that bucket.
+        tasks.append(
+            brave_search_collector.collect(
+                brave_queries, default_count=brave_default_count,
             )
         )
 
@@ -682,7 +743,7 @@ async def run_d1_scan(
 
 
 def run(scan_window_hours: int = 24, target_candidates: int = 20) -> D1Output:
-    """Sync convenience wrapper used by the ``af hotspots`` CLI."""
+    """Sync convenience wrapper used by the ``blogflow article-hotspots`` CLI."""
     return asyncio.run(
         run_d1_scan(
             scan_window_hours=scan_window_hours,
