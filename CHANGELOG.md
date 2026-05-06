@@ -9,12 +9,119 @@ The version number is the single value in
 [`backend/pyproject.toml::project.version`](backend/pyproject.toml); the
 sibling skill-distribution repo
 ([`agentflow-skills`](https://github.com/witness1993x/agentflow-skills))
-is versioned independently and tracks the **`af` CLI surface** rather than
-runtime code parity.
+is versioned independently and tracks the **`blogflow` / `mediaflow` CLI
+surface** rather than runtime code parity.
 
 ## [Unreleased]
 
 - _no changes yet_
+
+## [1.1.8] — 2026-05-07
+
+- **Lark @-mention parity with TG bot — kills the v1.1.7 hallucination class.**
+  `handle_event(event_kind="message")` previously returned `message_ignored`
+  on every free-text @-mention, leaving the Lark-side LLM client with
+  nothing to relay so it fabricated fake "Gate B 完成" cards. Replaced
+  with a deterministic intent classifier (keyword first, no LLM): 通过 /
+  approve → `approve_b`, 驳回 / reject → `reject_b`, 重写 → `gate_b_rewrite`,
+  refill → `refill`, 推进到下个 gate → state-aware advance, etc. Pending-edit
+  slots take priority. Unrecognized text returns a structured help card —
+  never silence.
+- New bridge command `lark_message` (in-process, scope=review). Brings the
+  total Lark vocab to 34 commands.
+- **Auto fan-out closure** — the Lark side now mirrors TG's spawn-next-gate
+  pattern: `lark_gate_b_approve` → image-gate picker, `lark_gate_c_approve`
+  / `lark_gate_c_skip` → Gate D card, all on a daemon thread. Previously
+  the Lark loop stalled at draft_approved with no follow-up, leaving the
+  operator stranded.
+- **Per-action auth on Lark** with parity to TG's `_ACTION_REQ`. Implicit
+  operator via env `LARK_OPERATOR_OPEN_ID` (mirrors `TELEGRAM_REVIEW_CHAT_ID`);
+  additional grants in `~/.agentflow/review/lark_auth.json`. Action verbs
+  reuse the existing vocabulary (`review` / `write` / `edit` / `image` /
+  `publish` / `system` / `*`).
+- `chat_id` plumbed through `lark_message` params → operator dict → telemetry
+  payloads so OpenClaw subscribers can target the originating Lark chat for
+  downstream Gate cards.
+- `lark_webhook` notifier no longer pushes "去 TG 审稿/重试/标记/看详情" CTAs
+  when `AGENTFLOW_LARK_APP_PRIMARY=true` — the OpenClaw-rendered card
+  already carries Lark-native action buttons.
+- Tests: 65 in `test_lark_callback.py` (up from 44), covering the intent
+  matrix, auth gate, fan-out closure, and the literal v1.1.7 hallucination
+  prompt as a regression case.
+- Docs: `LARK_FIRST_REVIEW_FLOWS.md` §4–§7 added (free-text path, auth model,
+  chat_id plumbing, auto fan-out); `AGENT_BRIDGE.md` Command-Sets section
+  documents `lark_message` + auth; `openclaw_plugin_integration.md` updated
+  with the intent matrix and auth gate; `lark_review_cards.md` notes the
+  new contract; cursor reference bumped to 34 commands.
+
+## [1.1.7] — 2026-05-06
+
+- Added `docs/flows/LARK_FIRST_REVIEW_FLOWS.md` as the canonical Lark-first
+  topology, gate flow, closure matrix, and OpenClaw callback reference.
+- Synced OpenClaw skill/reference docs and Claude skills to the `blogflow`
+  command surface and daemon-owned bridge model.
+- Added regression tests that assert the Lark-first flow docs, bridge docs, and
+  OpenClaw skill reference keep pointing at `blogflow review-daemon` and
+  `/api/commands`.
+
+## [1.1.6] — 2026-05-06
+
+- Embedded the agent bridge HTTP API inside `blogflow review-daemon` for
+  Lark-first deployments. When `AGENTFLOW_LARK_APP_PRIMARY=true`, the daemon now
+  owns `/api/commands` on `127.0.0.1:7860` by default, so OpenClaw callbacks no
+  longer require a separate `blogflow review-dashboard` process.
+- Allowed `blogflow review-daemon` to run without Telegram polling in
+  Lark-first mode while still writing heartbeat, running timeout sweeps, and
+  firing scheduled article-hotspots scans.
+
+## [1.1.5] — 2026-05-06
+
+- Added a dedicated Lark review-card rendering contract at
+  `backend/agentflow/agent_review/templates/lark_review_cards.md`, covering
+  every `review.*_card` event, required buttons, textarea payload fields, and
+  pending-edit fallbacks.
+- Added Lark-first preflight diagnostics so `blogflow doctor` can flag
+  deployments that still show legacy Custom Bot / "go to Telegram" digest cards
+  instead of OpenClaw-rendered review cards.
+- Reworded the legacy `notify_hotspots_digest` Custom Bot card so it is clearly
+  a scan summary, not a Gate A review card, and points operators to
+  `AGENTFLOW_LARK_APP_PRIMARY=true` + `review.gate_a_card`.
+
+## [1.1.4] — 2026-05-06
+
+- Added Lark-first review-card events for Gate A, profile setup, Gate B,
+  image-gate picker, Gate C, Gate D, and Locked Takeover. Telegram can still
+  receive the same cards, but Lark/OpenClaw no longer has to infer actionable
+  cards from digest notifications or state transitions.
+- Added Lark image-gate picker commands so operators can choose cover-only,
+  cover+body, or skip-image flow directly from Lark after Gate B approval.
+- Aligned Lark Gate D confirm with the Telegram dispatch path: Lark now runs
+  preview, non-Medium publish, Medium package generation, and dispatch result
+  notification instead of spawning a bare `blogflow publish`.
+
+## [1.1.3] — 2026-05-06
+
+- Renamed the installable distribution from `agentflow` to `agentflow-media`
+  so this article-publishing runtime is distinct from sibling AgentFlow
+  packages.
+- Replaced the generic `af` console entry point with `blogflow`, plus
+  `mediaflow` as an equivalent alias. Runtime subprocess helpers now prefer
+  `blogflow` / `mediaflow` and keep `af` only as a legacy fallback for older
+  installs.
+- Updated the current deployment service, launchd helper, install snippet, and
+  OpenClaw skill guidance to use `blogflow`.
+- Standardized this package's D1 terminology as article hotspots: added
+  `blogflow article-hotspots` / `blogflow article-hotspot-show` as the
+  recommended commands and kept `hotspots` / `hotspot-show` as legacy aliases.
+- Lowered the default article-hotspot topic-fit hard gate to `0.025` and
+  updated the local/template config from `0.05` to reduce false all-drop Gate A
+  skips on sparse but valid article-topic clusters.
+- Renamed deployment and scheduling surfaces to avoid sibling-package
+  collisions: systemd uses `blogflow-review`, deploy defaults to
+  `/opt/blogflow` + `blogflow` user, launchd uses
+  `com.blogflow.review.article-hotspots`, and new installs use
+  `BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE*` env vars. Legacy
+  `AGENTFLOW_HOTSPOTS_SCHEDULE*` vars remain as fallback only.
 
 ## [1.1.2] — 2026-05-06
 

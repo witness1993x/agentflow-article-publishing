@@ -965,6 +965,19 @@ class FreeTextIntentClassifierTests(unittest.TestCase):
         self.assertEqual(lark_callback._normalize_text("@_user_1 通过"), "通过")
         self.assertEqual(lark_callback._normalize_text("  @bot 推进  "), "推进")
 
+    def test_normalize_strips_inline_mentions_so_substrings_do_not_match(self) -> None:
+        # Regression: the literal hallucination from the v1.1.7 screenshot
+        # used to false-match ``audit`` inside ``@CSAuditContentPostBot``.
+        text = "完成！Gate B 卡片已发到 TG @CSAuditContentPostBot"
+        self.assertIsNone(lark_callback._classify_intent(
+            lark_callback._normalize_text(text)
+        ))
+
+    def test_ascii_keyword_matches_only_on_word_boundary(self) -> None:
+        # ``edit`` should match ``please edit`` but not ``editorial``.
+        self.assertEqual(lark_callback._classify_intent("please edit it"), "gate_b_edit")
+        self.assertIsNone(lark_callback._classify_intent("editorial board"))
+
 
 class FreeTextRouterTests(_FreeTextRoutingHelper):
 
@@ -1052,6 +1065,52 @@ class FreeTextRouterTests(_FreeTextRoutingHelper):
                 operator=_OPERATOR,
             )
         wrapped.assert_called_once()
+
+
+class FanOutClosureTests(_FreeTextRoutingHelper):
+    """v1.1.8 closure regression: every Gate-state transition that has a
+    natural follow-up card on the TG side must also fire that card on the
+    Lark side. Otherwise the operator approves Gate B and gets stranded
+    with no Gate C card waiting."""
+
+    def test_approve_b_spawns_image_gate_picker(self) -> None:
+        aid = "art_fan_b"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="approve_b", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="image_picker")
+        self.assertIn("image_picker_spawned", res["side_effects"])
+
+    def test_gate_c_approve_spawns_gate_d(self) -> None:
+        aid = "art_fan_c_approve"
+        self._create_article_in_state(aid, review_state.STATE_IMAGE_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="gate_c_approve", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="gate_d")
+        self.assertIn("gate_d_spawned", res["side_effects"])
+
+    def test_gate_c_skip_spawns_gate_d(self) -> None:
+        aid = "art_fan_c_skip"
+        self._create_article_in_state(aid, review_state.STATE_IMAGE_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="gate_c_skip", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="gate_d")
+        self.assertIn("gate_d_spawned", res["side_effects"])
 
 
 class LarkAuthGateTests(_FreeTextRoutingHelper):

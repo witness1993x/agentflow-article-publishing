@@ -728,6 +728,12 @@ def _run_lark_command_in_process(
         "open_id": _str_param(params, "operator_open_id") or "",
         "name": _str_param(params, "operator_name"),
     }
+    # v1.1.8: Lark callbacks (both card_action and message) carry the
+    # originating chat_id so downstream notify.* events can target the same
+    # chat. OpenClaw should always include this; we tolerate its absence.
+    chat_id = _str_param(params, "chat_id")
+    if chat_id:
+        operator["chat_id"] = chat_id
     raw_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
 
     if command == "lark_message":

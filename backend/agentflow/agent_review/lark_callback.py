@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -130,6 +131,38 @@ def _telemetry(
 
 
 # ---------------------------------------------------------------------------
+# Auto fan-out helpers — parity with daemon._route's TG-side spawn calls.
+#
+# After a successful Gate B/C transition, TG fires the next gate's card in a
+# background thread. The Lark handlers historically returned only a green
+# "通过" card and stopped — so the operator was stranded with no follow-up.
+# These helpers replicate TG's fan-out so the Lark loop closes too.
+# ---------------------------------------------------------------------------
+
+
+def _spawn_next_gate_card(article_id: str, *, kind: str) -> None:
+    """Post the next-gate card in a background thread. ``kind`` is one of
+    ``"image_picker"`` / ``"gate_d"`` — the trigger function chosen by
+    TG's daemon for the same state transition."""
+
+    def _run() -> None:
+        try:
+            if kind == "image_picker":
+                review_triggers.post_image_gate_picker(article_id)
+            elif kind == "gate_d":
+                review_triggers.post_gate_d(article_id)
+            else:  # pragma: no cover — guard against typos at the call site
+                _log.warning("_spawn_next_gate_card: unknown kind %r", kind)
+        except Exception as err:  # pragma: no cover — best-effort fan-out
+            _log.warning(
+                "Lark fan-out %s failed for %s: %s", kind, article_id, err,
+                exc_info=True,
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Per-action handlers
 # ---------------------------------------------------------------------------
 
@@ -161,10 +194,18 @@ def _handle_approve_b(
             outcome="already_handled",
         )
         return response
+    # Auto-fire the image-gate picker (Q3/Q4) so Gate C lands in Lark
+    # without operator polling — TG does the same at daemon._route line ~3414.
+    _spawn_next_gate_card(article_id, kind="image_picker")
     response["side_effects"].append("approve_b")
+    response["side_effects"].append("image_picker_spawned")
     response["reply_card"] = _make_card(
         title="Gate B 已通过",
-        body=f"Article `{article_id}` 已批准 (操作人 {operator.get('name') or operator.get('open_id')})",
+        body=(
+            f"Article `{article_id}` 已批准 "
+            f"(操作人 {operator.get('name') or operator.get('open_id')})。"
+            f"\n\n稍候 Gate C 配图选择卡会自动到达本群。"
+        ),
         template="green",
     )
     _telemetry(
@@ -1076,10 +1117,12 @@ def _handle_gate_c_approve(
             outcome="already_handled",
         )
         return response
+    _spawn_next_gate_card(article_id, kind="gate_d")
     response["side_effects"].append("gate_c_approve")
+    response["side_effects"].append("gate_d_spawned")
     response["reply_card"] = _make_card(
         title="Gate C 配图已通过",
-        body=f"`{article_id}` 配图通过，进入 Gate D 渠道挑选。",
+        body=f"`{article_id}` 配图通过，Gate D 渠道挑选卡稍后自动到达本群。",
         template="green",
     )
     _telemetry(
@@ -1109,10 +1152,12 @@ def _handle_gate_c_skip(
         response["side_effects"].append("already_handled")
         response["reply_card"] = _state_error_card(action="gate_c_skip", err=err)
         return response
+    _spawn_next_gate_card(article_id, kind="gate_d")
     response["side_effects"].append("gate_c_skip")
+    response["side_effects"].append("gate_d_spawned")
     response["reply_card"] = _make_card(
         title="Gate C 配图已跳过",
-        body=f"`{article_id}` 不配图直接进入 Gate D。",
+        body=f"`{article_id}` 不配图直接进入 Gate D，渠道挑选卡稍后到达本群。",
         template="grey",
     )
     _telemetry(
@@ -1886,14 +1931,21 @@ def _authorize_or_deny(
 # ---------------------------------------------------------------------------
 
 
+_AT_MENTION_RE = re.compile(r"@[\w-]+")
+_URL_RE = re.compile(r"https?://\S+")
+
+
 def _normalize_text(raw: str) -> str:
+    """Strip @-mentions and URLs before intent classification.
+
+    @-mentions matter because keyword `audit` inside `@CSAuditContentPostBot`
+    would otherwise match the `gate_b_diff` intent. We don't want substrings
+    of mention/URL tokens to ever drive routing — the operator's actual
+    instruction is what's left after these are stripped."""
     text = (raw or "").strip()
-    # Drop a leading @bot prefix that some Lark clients leave in the message
-    # body (e.g. "@CS OP Assistant 推进到下个 gate").
-    if text.startswith("@"):
-        parts = text.split(maxsplit=1)
-        text = parts[1] if len(parts) > 1 else ""
-    return text.strip()
+    text = _AT_MENTION_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return " ".join(text.split())
 
 
 _PENDING_REVIEW_STATES = (
@@ -1960,16 +2012,30 @@ _INTENT_TABLE: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
+def _is_ascii(s: str) -> bool:
+    return all(ord(c) < 128 for c in s)
+
+
 def _classify_intent(text: str) -> str | None:
-    """Return the matching action token (lark_callback vocab) or ``None`` for
-    no match. Matching is case-insensitive substring."""
+    """Return the matching action token (lark_callback vocab) or ``None``.
+
+    ASCII keywords match on word boundaries (so ``audit`` does NOT match
+    inside ``CSAuditContentPostBot``). CJK keywords match as substrings
+    since CJK has no whitespace word delimiters. Caller is expected to
+    have run :func:`_normalize_text` first to strip @-mentions / URLs."""
     if not text:
         return None
-    needle = text.lower()
+    lowered = text.lower()
     for keywords, action in _INTENT_TABLE:
         for kw in keywords:
-            if kw.lower() in needle:
-                return action
+            kw_l = kw.lower()
+            if _is_ascii(kw_l):
+                pattern = r"(?:^|\W)" + re.escape(kw_l) + r"(?:$|\W)"
+                if re.search(pattern, lowered):
+                    return action
+            else:
+                if kw_l in lowered:
+                    return action
     return None
 
 

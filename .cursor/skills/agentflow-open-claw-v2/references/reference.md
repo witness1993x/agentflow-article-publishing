@@ -21,6 +21,17 @@ The Lark bridge exposes 34 `lark_*` commands through the daemon-owned
 The TG fallback bot still exposes callback prefixes `A` / `B` / `C` / `D`,
 plus `PD`, `I`, `L`, `PR`, `P`, and `S`.
 
+**v1.1.8 — Lark @-mention parity with TG**: free-text @-bot messages now
+route through the daemon via `lark_message`. The router classifies intent
+deterministically (no LLM) and dispatches to the same handler the
+corresponding button would fire. Pending edit slots take priority. Lark
+gains per-action auth (env `LARK_OPERATOR_OPEN_ID` + allowlist file
+`~/.agentflow/review/lark_auth.json`) parallel to TG's `_ACTION_REQ`.
+Closure regressions fixed: `lark_gate_b_approve`, `lark_gate_c_approve`,
+`lark_gate_c_skip` now spawn the next-gate card on a daemon thread
+(parity with `daemon._route` lines 3414/3453/3473 — previously the Lark
+loop stalled at draft_approved with no follow-up).
+
 Do not describe this repo as "early skeleton" or use the old 5-state model unless the current code regresses to that.
 
 ## 2. Canonical Workflow

@@ -13,7 +13,7 @@ The bridge has two surfaces:
 1. outbound events: AgentFlow best-effort POSTs normalized envelopes to your
    webhook
 2. inbound commands: trusted agents call `POST /api/commands` to run a
-   whitelisted subset of `af` commands
+   whitelisted subset of `blogflow` commands
 
 This is not a standalone cloud control plane. The default deployment model is
 still single-user and localhost-bound.
@@ -37,10 +37,28 @@ Non-goals for v1:
 
 ## Start
 
+For Lark-first deployments, start the review daemon. It owns the bridge and
+the review housekeeping loop:
+
 ```bash
 cd backend
 source .venv/bin/activate
-af review-dashboard
+blogflow review-daemon
+```
+
+When `AGENTFLOW_LARK_APP_PRIMARY=true`, the daemon embeds the bridge API by
+default on `http://127.0.0.1:7860`. OpenClaw should send card callbacks to the
+daemon-owned `POST /api/commands` endpoint.
+
+`blogflow review-dashboard` remains available as a read/debug API runner, but
+it is not the primary Lark callback process.
+
+Optional standalone debug runner:
+
+```bash
+cd backend
+source .venv/bin/activate
+blogflow review-dashboard
 ```
 
 Default base URL:
@@ -59,13 +77,19 @@ AGENTFLOW_AGENT_BRIDGE_TOKEN=write-token
 AGENTFLOW_AGENT_EVENT_WEBHOOK_URL=https://your-agent.example.com/events
 AGENTFLOW_AGENT_EVENT_AUTH_HEADER=Bearer your-secret
 AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=false
+AGENTFLOW_LARK_APP_PRIMARY=true
+AGENTFLOW_REVIEW_BRIDGE_HOST=127.0.0.1
+AGENTFLOW_REVIEW_BRIDGE_PORT=7860
 ```
 
 Notes:
 
 - `REVIEW_DASHBOARD_TOKEN` protects read endpoints.
 - `AGENTFLOW_AGENT_BRIDGE_TOKEN` protects `POST /api/commands`.
-- if `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` is unset, outbound events are disabled.
+- `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` is outbound: AgentFlow posts
+  `review.*_card` / `notify.*` events to OpenClaw here.
+- OpenClaw card callbacks are inbound and should call
+  `http://127.0.0.1:7860/api/commands` by default.
 - dangerous commands remain blocked unless
   `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`.
 
@@ -166,6 +190,8 @@ events for:
 - gate transitions (`source=gate`)
 - publish records (`source=publish`)
 - command lifecycle events from the bridge (`source=api`)
+- Lark-first review cards (`source=agentflow.review`,
+  `event_type=review.*_card`)
 
 Envelope:
 
@@ -199,7 +225,7 @@ Important:
 
 ## Command Endpoint
 
-`POST /api/commands` runs a whitelisted subset of `af` commands.
+`POST /api/commands` runs a whitelisted subset of `blogflow` commands.
 
 Auth:
 
@@ -263,8 +289,48 @@ Capability matrix:
 |---|---|---|---|
 | `doctor` | `read` | none | enabled |
 | `review_status` / `review_list` / `draft_show` / `memory_tail` / `intent_show` | `read` | none | enabled |
-| `hotspots` / `write` / `fill` / `image_gate` / `preview` / `medium_package` / `review_post_d` | `pipeline` | local files, memory events, possible TG side effects | enabled |
+| `article_hotspots` (`hotspots` legacy alias) / `write` / `fill` / `image_gate` / `preview` / `medium_package` / `review_post_d` | `pipeline` | local files, memory events, possible TG side effects | enabled |
 | `publish` / `review_publish_mark` | `publish` | real external side effects possible | disabled by default |
+| `lark_*` (34 commands incl. `lark_message`) | varies (`review` / `edit` / `image` / `publish`) | in-process: state transition or background subprocess via `_spawn_async` | enabled (specific dangerous ones still gated by env) |
+
+### v1.1.8 — `lark_message` free-text intent router
+
+OpenClaw posts every @-bot text message to the daemon as `lark_message`:
+
+```json
+{
+  "command": "lark_message",
+  "params": {
+    "text": "推进到下个 gate",
+    "operator_open_id": "ou_xxx",
+    "operator_name": "Alice",
+    "chat_id": "oc_lark_chat_42"
+  }
+}
+```
+
+The daemon classifies the intent deterministically (keyword first; no LLM)
+and routes to the same handler the corresponding button would have fired.
+Unrecognized text returns a structured help card — never silence. Pending
+edit slots take priority: any non-empty body becomes the edit text when
+a `lark_*_edit_pending` event exists for the operator + active article.
+
+This kills the v1.1.7 hallucination class where the Lark-side LLM client
+fabricated fake "Gate B 完成" replies because the daemon silently ignored
+text events.
+
+### v1.1.8 — Lark per-action authorization
+
+Commands honour the same (gate, action) → required-verb map as TG
+(`daemon._ACTION_REQ`), but resolved against `open_id` rather than `uid`:
+
+- Implicit operator via env `LARK_OPERATOR_OPEN_ID` (mirrors
+  `TELEGRAM_REVIEW_CHAT_ID`). Implicitly granted `["*"]`.
+- Allowlist file `~/.agentflow/review/lark_auth.json` for additional
+  reviewers/editors, format
+  `{"authorized_open_ids":[{"open_id":"ou_xxx","name":"...","allowed_actions":["review","edit"]}]}`.
+- Unauthorized callers get a red deny card in the response envelope; no
+  state mutation occurs. Telemetry records `outcome=not_authorized`.
 
 Read scope:
 
@@ -277,7 +343,7 @@ Read scope:
 
 Pipeline scope:
 
-- `hotspots`
+- `article_hotspots` (`hotspots` legacy alias)
 - `write`
 - `fill`
 - `image_gate`
@@ -344,7 +410,7 @@ python docs/integrations/examples/bridge_event_listener.py
 
 ## Compatibility Notes
 
-- v1 assumes the project remains `skill-first + af CLI + local files`.
+- v1 assumes the project remains `skill-first + blogflow CLI + local files`.
 - v1 does **not** assume a database, async job runner, or multi-user host.
 - external agents should treat `event_id` as the idempotency key.
 - outbound events are best-effort; if you need guaranteed replay, read the local
