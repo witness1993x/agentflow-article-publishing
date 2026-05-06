@@ -118,6 +118,30 @@ def _is_configured() -> bool:
     return bool(os.environ.get("LARK_WEBHOOK_URL", "").strip())
 
 
+def _lark_app_primary() -> bool:
+    raw = (os.environ.get("AGENTFLOW_LARK_APP_PRIMARY") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _emit_notify_event(
+    event_type: str,
+    *,
+    article_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from agentflow.shared.agent_bridge import emit_agent_event
+
+        emit_agent_event(
+            source="agentflow.lark_notify",
+            event_type=f"notify.{event_type}",
+            article_id=article_id,
+            payload=payload or {},
+        )
+    except Exception:  # pragma: no cover — notification fan-out is best-effort
+        _log.warning("agent notify event emit failed: %s", event_type, exc_info=True)
+
+
 def _sign(timestamp: int, secret: str) -> str:
     """HmacSHA256(timestamp + "\\n" + secret) → b64. Per Lark Custom Bot
     spec: the body data passed to HMAC is empty; the secret used as KEY
@@ -321,6 +345,17 @@ def notify_dispatch_result(
     failed: list[tuple[str, str]],
 ) -> None:
     """Post-D4 fan-out: who got the article, who didn't."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "dispatch_result",
+            article_id=article_id,
+            payload={
+                "title": title,
+                "succeeded": list(succeeded),
+                "failed": [{"platform": p, "reason": r} for p, r in failed],
+            },
+        )
+        return
     if not _is_configured():
         return
     if failed:
@@ -364,6 +399,13 @@ def notify_publish_ready(*, article_id: str, title: str) -> None:
     """Medium-only branch: an article is ready for the operator's
     manual paste step. URL-only nudge, no actionable button (the
     real button lives on the TG side as PR:mark)."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "publish_ready",
+            article_id=article_id,
+            payload={"title": title},
+        )
+        return
     if not _is_configured():
         return
     body = (
@@ -384,6 +426,12 @@ def notify_publish_ready(*, article_id: str, title: str) -> None:
 
 def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
     """Daily 09:00 / 20:00 scheduled scan completed."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "hotspots_digest",
+            payload={"scan_count": scan_count, "top_titles": list(top_titles)},
+        )
+        return
     if not _is_configured():
         return
     if scan_count == 0:
@@ -433,6 +481,29 @@ def notify_draft_ready(
     Gate B's TG card is the source of truth and always fires; this
     function is a parallel fan-out, never a replacement.
     """
+    if _lark_app_primary():
+        md = draft_md
+        if md is None and draft_md_path:
+            try:
+                with open(draft_md_path, "r", encoding="utf-8") as fh:
+                    md = fh.read()
+            except OSError:
+                md = None
+        md = (md or "").strip()
+        _emit_notify_event(
+            "draft_ready",
+            article_id=article_id,
+            payload={
+                "title": title,
+                "audit_summary": audit_summary,
+                "mirror_url": mirror_url,
+                "draft_md_path": draft_md_path,
+                "draft_excerpt": md[:2000],
+                "draft_length": len(md),
+                "draft_truncated": len(md) > 2000,
+            },
+        )
+        return
     if not _is_configured():
         return
     if not _draft_fanout_enabled():
@@ -503,6 +574,14 @@ def notify_spawn_failure(*, label: str, target_id: str, error_tail: str) -> None
     """Mirror of daemon._notify_spawn_failure into Lark for the on-call
     channel. Operator sees both TG and Lark; whichever they monitor first
     triggers triage."""
+    if _lark_app_primary():
+        tail = error_tail[-_stderr_maxlen():] if error_tail else "(no stderr)"
+        _emit_notify_event(
+            "spawn_failure",
+            article_id=target_id,
+            payload={"label": label, "target_id": target_id, "error_tail": tail},
+        )
+        return
     if not _is_configured():
         return
     tail = error_tail[-_stderr_maxlen():] if error_tail else "(no stderr)"
