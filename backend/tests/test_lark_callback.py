@@ -296,5 +296,394 @@ class MissingArticleIdTests(_AgentflowHomeTestCase):
         mock_trans.assert_not_called()
 
 
+def _make_meta(home: Path, article_id: str, payload: dict | None = None) -> Path:
+    """Create a metadata.json under <home>/drafts/<id>/ with the given payload."""
+    p = home / "drafts" / article_id
+    p.mkdir(parents=True, exist_ok=True)
+    f = p / "metadata.json"
+    f.write_text(json.dumps(payload or {}, ensure_ascii=False), encoding="utf-8")
+    return f
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Gate A handlers
+# ---------------------------------------------------------------------------
+
+
+class GateAWriteTests(_AgentflowHomeTestCase):
+    def test_spawn_invoked_with_correct_argv(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="hs_x",
+                action="gate_a_write",
+                payload={"angle_index": 2, "target_series": "B"},
+                operator=_OPERATOR,
+            )
+        self.assertTrue(res["ack"])
+        self.assertIn("gate_a_write_spawned", res["side_effects"])
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("write", argv)
+        self.assertIn("hs_x", argv)
+        self.assertIn("--angle-index", argv)
+        self.assertIn("2", argv)
+
+    def test_spawn_failure_returns_red_card(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=False):
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="hs_x",
+                action="gate_a_write",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("spawn_failed", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "red")
+
+
+class GateARejectAllTests(_AgentflowHomeTestCase):
+    def test_returns_red_card_no_spawn(self) -> None:
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="hs_x",
+                action="gate_a_reject_all",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_a_reject_all", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "red")
+        mock_spawn.assert_not_called()
+
+
+class GateAExpandTests(_AgentflowHomeTestCase):
+    def test_expand_finds_hotspot_and_renders_card(self) -> None:
+        hpath = self.home / "hotspots"
+        hpath.mkdir(parents=True, exist_ok=True)
+        (hpath / "2026-05-06.json").write_text(
+            json.dumps(
+                {
+                    "hotspots": [
+                        {
+                            "id": "hs_target",
+                            "topic_one_liner": "RLUSD 跨链",
+                            "mainstream_views": ["v1", "v2"],
+                            "overlooked_angles": ["a1"],
+                        }
+                    ]
+                }
+            )
+        )
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="hs_target",
+            action="gate_a_expand",
+            payload={},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_a_expand", res["side_effects"])
+        body = res["reply_card"]["elements"][0]["text"]["content"]
+        self.assertIn("RLUSD", body)
+        self.assertIn("v1", body)
+
+    def test_expand_returns_grey_when_not_found(self) -> None:
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="missing",
+            action="gate_a_expand",
+            payload={},
+            operator=_OPERATOR,
+        )
+        self.assertIn("hotspot_not_found", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "grey")
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Gate B remaining
+# ---------------------------------------------------------------------------
+
+
+class GateBRewriteTests(_AgentflowHomeTestCase):
+    def test_rewrite_transitions_state_then_spawns(self) -> None:
+        _make_meta(self.home, "art_b", {
+            "gate_history": [{"to_state": "draft_pending_review", "gate": "B"}],
+        })
+        with patch.object(lark_callback.review_state, "transition") as mock_trans, \
+             patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_b",
+                action="gate_b_rewrite",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_b_rewrite_spawned", res["side_effects"])
+        mock_trans.assert_called_once()
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "drafting")
+        mock_spawn.assert_called_once()
+
+    def test_rewrite_already_handled_returns_grey(self) -> None:
+        from agentflow.agent_review.state import StateError as _SE
+        with patch.object(
+            lark_callback.review_state, "transition", side_effect=_SE("nope")
+        ), patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_b",
+                action="gate_b_rewrite",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("already_handled", res["side_effects"])
+        mock_spawn.assert_not_called()
+
+
+class GateBEditTests(_AgentflowHomeTestCase):
+    def test_edit_logs_pending_event(self) -> None:
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_e",
+            action="gate_b_edit",
+            payload={"section_index": 1, "paragraph_index": 0},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_b_edit_pending", res["side_effects"])
+        body = res["reply_card"]["elements"][0]["text"]["content"]
+        self.assertIn("section=1", body)
+
+
+class GateBDiffTests(_AgentflowHomeTestCase):
+    def test_diff_renders_audit_event(self) -> None:
+        memory.append_memory_event(
+            "d2_structure_audit",
+            article_id="art_d",
+            payload={
+                "verdict": "patch",
+                "score": 0.62,
+                "dim_scores": {"cohesion": 0.5},
+                "issues": ["[Section 1] missing anchor"],
+            },
+        )
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_d",
+            action="gate_b_diff",
+            payload={},
+            operator=_OPERATOR,
+        )
+        body = res["reply_card"]["elements"][0]["text"]["content"]
+        self.assertIn("patch", body)
+        self.assertIn("missing anchor", body)
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Gate C
+# ---------------------------------------------------------------------------
+
+
+class GateCTests(_AgentflowHomeTestCase):
+    def test_approve_transitions_to_image_approved(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="gate_c_approve",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_c_approve", res["side_effects"])
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "image_approved")
+
+    def test_skip_transitions_to_image_skipped(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="gate_c_skip",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_c_skip", res["side_effects"])
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "image_skipped")
+
+    def test_regen_spawns_image_gate(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="gate_c_regen",
+                payload={"mode": "logo_centric"},
+                operator=_OPERATOR,
+            )
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("image-gate", argv)
+        self.assertIn("--mode", argv)
+        self.assertIn("logo_centric", argv)
+        self.assertIn("gate_c_regen_spawned", res["side_effects"])
+
+    def test_full_renders_image_placeholder_list(self) -> None:
+        _make_meta(self.home, "art_c", {
+            "image_placeholders": [
+                {"description": "封面 hero", "resolved_path": "/tmp/a.png"},
+                {"description": "图 2", "resolved_path": None},
+            ]
+        })
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_c",
+            action="gate_c_full",
+            payload={},
+            operator=_OPERATOR,
+        )
+        body = res["reply_card"]["elements"][0]["text"]["content"]
+        self.assertIn("封面 hero", body)
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Gate D
+# ---------------------------------------------------------------------------
+
+
+class GateDTests(_AgentflowHomeTestCase):
+    def test_toggle_adds_then_removes_platform(self) -> None:
+        _make_meta(self.home, "art_d", {})
+        # Toggle on
+        res1 = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_d",
+            action="gate_d_toggle",
+            payload={"platform": "medium"},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_d_toggle_on", res1["side_effects"])
+        # Toggle off
+        res2 = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_d",
+            action="gate_d_toggle",
+            payload={"platform": "medium"},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_d_toggle_off", res2["side_effects"])
+        meta = json.loads((self.home / "drafts" / "art_d" / "metadata.json").read_text())
+        self.assertEqual(meta["gate_d_selection"], [])
+
+    def test_select_all_overwrites_selection(self) -> None:
+        _make_meta(self.home, "art_d", {"gate_d_selection": ["medium"]})
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_d",
+            action="gate_d_select_all",
+            payload={"platforms": ["medium", "ghost"]},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_d_select_all", res["side_effects"])
+        meta = json.loads((self.home / "drafts" / "art_d" / "metadata.json").read_text())
+        self.assertEqual(meta["gate_d_selection"], ["medium", "ghost"])
+
+    def test_confirm_with_empty_selection_does_not_spawn(self) -> None:
+        _make_meta(self.home, "art_d", {"gate_d_selection": []})
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_d",
+                action="gate_d_confirm",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("empty_selection", res["side_effects"])
+        mock_spawn.assert_not_called()
+
+    def test_confirm_with_selection_transitions_then_spawns_publish(self) -> None:
+        _make_meta(self.home, "art_d", {"gate_d_selection": ["medium", "ghost"]})
+        with patch.object(lark_callback.review_state, "transition") as mock_trans, \
+             patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_d",
+                action="gate_d_confirm",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_d_publish_spawned", res["side_effects"])
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("publish", argv)
+        self.assertIn("medium,ghost", argv)
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "ready_to_publish")
+
+    def test_save_default_writes_preferences_file(self) -> None:
+        _make_meta(self.home, "art_d", {"gate_d_selection": ["medium", "ghost"]})
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_d",
+            action="gate_d_save_default",
+            payload={},
+            operator=_OPERATOR,
+        )
+        self.assertIn("gate_d_save_default", res["side_effects"])
+        prefs = json.loads((self.home / "preferences.json").read_text())
+        self.assertEqual(prefs["gate_d"]["default_platforms"], ["medium", "ghost"])
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Locked Takeover (L)
+# ---------------------------------------------------------------------------
+
+
+class LockedTakeoverTests(_AgentflowHomeTestCase):
+    def test_critique_renders_audit_event(self) -> None:
+        memory.append_memory_event(
+            "d2_structure_audit",
+            article_id="art_l",
+            payload={
+                "verdict": "rewrite",
+                "score": 0.3,
+                "issues": ["all over the place"],
+            },
+        )
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_l",
+            action="locked_critique",
+            payload={},
+            operator=_OPERATOR,
+        )
+        body = res["reply_card"]["elements"][0]["text"]["content"]
+        self.assertIn("rewrite", body)
+        self.assertIn("all over the place", body)
+
+    def test_give_up_transitions_to_draft_rejected(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_l",
+                action="locked_give_up",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertIn("locked_give_up", res["side_effects"])
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "draft_rejected")
+
+
+# ---------------------------------------------------------------------------
+# v1.1.1 — Defer
+# ---------------------------------------------------------------------------
+
+
+class DeferTests(_AgentflowHomeTestCase):
+    def test_defer_returns_grey_card_no_state_mutation(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_x",
+                action="defer",
+                payload={"gate": "B"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("deferred", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "grey")
+        mock_trans.assert_not_called()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

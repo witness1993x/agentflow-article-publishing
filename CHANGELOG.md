@@ -16,6 +16,63 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.1.1] — 2026-05-06
+
+**Full TG → Lark callback parity (27 actions across Gate A/B/C/D/L).**
+
+v1.1.0 shipped a 6-command Lark callback skeleton (approve_b / reject_b
+/ takeover / view_audit / view_meta / refill stub). v1.1.1 extends the
+bridge to **29 lark_* commands** total — every TG callback the daemon
+handles now has a Lark-side equivalent the OpenClaw plugin can register
+as a tool.
+
+Coverage:
+
+* **Gate A (3)** — `lark_gate_a_write` (spawn `af write --auto-pick`),
+  `lark_gate_a_reject_all`, `lark_gate_a_expand` (read-only hotspot
+  detail card)
+* **Gate B (5)** — adds `lark_gate_b_rewrite` (spawn `af fill --rewrite`),
+  `lark_gate_b_edit` (register pending edit slot for next @-bot
+  message), `lark_gate_b_diff` (read latest `d2_structure_audit`
+  verdict)
+* **Gate C (5)** — `lark_gate_c_approve` / `_skip` (state transitions),
+  `_regen` / `_relogo` (spawn `af image-gate`), `_full` (read image
+  placeholders)
+* **Gate D (8)** — `_toggle` / `_select_all` (write
+  metadata.gate_d_selection), `_save_default` (write
+  preferences.json), `_confirm` (transition + spawn `af publish`),
+  `_cancel`, `_resume`, `_extend`, `_retry`
+* **Locked Takeover (3)** — `lark_locked_critique` (read audit),
+  `lark_locked_edit` (register pending edit slot), `lark_locked_give_up`
+  (transition to draft_rejected)
+* **Generic (1)** — `lark_defer` for any-Gate defer
+
+Heavy actions that spawn subprocess (write / rewrite / regen / relogo /
+confirm / retry — 6 in total) are marked `dangerous: true` and require
+`AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true` in the AgentFlow
+environment. They use `subprocess.Popen(start_new_session=True)` for
+fire-and-forget; results land via the existing `emit_agent_event`
+webhook so the OpenClaw agent can update the original Lark card when
+the subprocess emits `agent.command.completed` /
+`agent.command.failed`.
+
+State transitions remain idempotent under `StateError`
+(`side_effects=["already_handled"]`, HTTP 200).
+
+Documentation:
+* `docs/openclaw_plugin_integration.md` — full 29-command vocab table
+  (per Gate), event webhook schema with the 9 OpenClaw should listen
+  for, listener pseudo-code, security policy update.
+
+Tests:
+* `tests/test_lark_callback.py` — 21 new tests (one+ per new handler);
+  total 34 lark_callback tests now pass.
+* `tests/test_v02_workflows.py::LarkBridgeCommandTests` — 3 new tests
+  (full vocab presence, dangerous flag check, payload-pass-through).
+
+Backend full regression: 173/174 (1 pre-existing
+NewsletterCorrectionTests JSON-parse failure, unrelated).
+
 ## [1.0.30] — 2026-04-30
 
 **Lark draft fan-out at Gate B.**
