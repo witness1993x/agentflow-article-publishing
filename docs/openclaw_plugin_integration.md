@@ -99,7 +99,7 @@ v1.1.1 起，AgentFlow 暴露 **29 个 `lark_*` 命令**，覆盖原 TG 全部 5
 | `lark_gate_b_approve` | review | `article_id` | `state.transition` → `draft_approved`，幂等（重复点 → `already_handled`） |
 | `lark_gate_b_reject` | review | `article_id` | `state.transition` → `drafting` |
 | `lark_gate_b_rewrite` | pipeline ⚠️ | `article_id` | `state.transition` → `drafting` 然后 spawn `af fill --rewrite` |
-| `lark_gate_b_edit` | review | `article_id`, `payload.section_index`, `payload.paragraph_index`, `payload.comment` | 兼容输入框：有 `comment` 时直接 spawn `af edit`；无输入时注册 interactive-edit 等待槽 |
+| `lark_gate_b_edit` | review ⚠️ | `article_id`, `payload.section_index`, `payload.paragraph_index`, `payload.comment` | 兼容输入框：有 `comment` 时直接 spawn `af edit`；无输入时注册 interactive-edit 等待槽 |
 | `lark_gate_b_diff` | read | `article_id` | 返回最新 `d2_structure_audit` verdict + dim_scores + issues 卡片 |
 
 ### Gate C · 配图
@@ -141,7 +141,7 @@ v1.1.1 起，AgentFlow 暴露 **29 个 `lark_*` 命令**，覆盖原 TG 全部 5
 | `lark_view_audit` | read | `article_id` | 返回 audit 历史 |
 | `lark_view_meta` | read | `article_id` | 返回 metadata snapshot |
 | `lark_refill` | review ⚠️ | `article_id` | `state.transition` → `drafting`，后台 spawn `af fill <article_id> --skeleton-only --auto-pick` |
-| `lark_apply_pending_edit` | review | `article_id`, `payload.text` | OpenClaw 收到 @-bot 后续消息后调用；读取最近 `lark_edit_pending` / `lark_locked_edit_pending` 并 spawn `af edit --post-review` |
+| `lark_apply_pending_edit` | review ⚠️ | `article_id`, `payload.text` | OpenClaw 收到 @-bot 后续消息后调用；读取并一次性消费最近 `lark_edit_pending` / `lark_locked_edit_pending`，然后 spawn `af edit --post-review` |
 | `lark_defer` | review | `article_id`, `payload.gate` | 任意 Gate 延后决定，无状态变更 |
 
 ⚠️ 标记的命令是 **dangerous=true** ，在 AgentFlow 一侧 OpenClaw 进程必须设

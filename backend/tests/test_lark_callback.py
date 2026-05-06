@@ -550,6 +550,36 @@ class GateBEditTests(_AgentflowHomeTestCase):
         self.assertIn("--post-review", argv)
         self.assertIn("这里加一个反例", argv)
 
+    def test_apply_pending_edit_does_not_reuse_consumed_slot(self) -> None:
+        memory.append_memory_event(
+            "lark_edit_pending",
+            article_id="art_e",
+            payload={
+                "operator_open_id": _OPERATOR["open_id"],
+                "section_index": 2,
+            },
+        )
+        with patch.object(lark_callback, "_spawn_async", return_value=True):
+            first = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="apply_pending_edit",
+                payload={"text": "补一个例子"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("apply_pending_edit_spawned", first["side_effects"])
+
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            second = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="apply_pending_edit",
+                payload={"text": "再补一次"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("pending_edit_not_found", second["side_effects"])
+        mock_spawn.assert_not_called()
+
 
 class GateBDiffTests(_AgentflowHomeTestCase):
     def test_diff_renders_audit_event(self) -> None:

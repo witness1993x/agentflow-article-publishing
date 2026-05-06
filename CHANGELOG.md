@@ -33,6 +33,8 @@ runtime code parity.
   gap.
 - Added `lark_apply_pending_edit` so OpenClaw can forward @-bot follow-up
   messages into the latest pending Gate B / locked-takeover edit slot.
+- Marked edit-spawning Lark commands as dangerous and made pending edit slots
+  one-shot so follow-up messages cannot reuse the same pending request.
 - Added `AGENTFLOW_LARK_APP_PRIMARY=true` notification routing: legacy
   Lark Custom Bot `notify_*` calls now emit `notify.*` agent events for
   OpenClaw instead of posting to the old webhook.

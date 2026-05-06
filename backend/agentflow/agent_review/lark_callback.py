@@ -1609,6 +1609,20 @@ def _handle_locked_give_up(
 def _latest_pending_edit(article_id: str, operator: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     """Find the latest pending Lark edit slot for this article/operator."""
     operator_id = operator.get("open_id")
+    consumed: set[tuple[str, str]] = set()
+    try:
+        consumed_events = read_memory_events(
+            article_id=article_id, event_type="lark_pending_edit_consumed"
+        )
+    except Exception:
+        consumed_events = []
+    for ev in consumed_events:
+        payload = ev.get("payload") or {}
+        event_type = str(payload.get("pending_event_type") or "")
+        event_ts = str(payload.get("pending_event_ts") or "")
+        if event_type and event_ts:
+            consumed.add((event_type, event_ts))
+
     candidates: list[tuple[str, dict[str, Any]]] = []
     for event_type in ("lark_edit_pending", "lark_locked_edit_pending"):
         try:
@@ -1616,6 +1630,9 @@ def _latest_pending_edit(article_id: str, operator: dict[str, Any]) -> tuple[str
         except Exception:
             events = []
         for ev in events:
+            event_ts = str(ev.get("ts") or "")
+            if (event_type, event_ts) in consumed:
+                continue
             payload = ev.get("payload") or {}
             if operator_id and payload.get("operator_open_id") not in {None, operator_id}:
                 continue

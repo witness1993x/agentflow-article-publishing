@@ -302,9 +302,9 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_gate_b_edit": {
         "scope": "review",
-        "description": "Gate B → register an interactive-edit pending slot for the next @-bot message.",
+        "description": "Gate B → register or apply an edit; inline text can spawn `af edit --post-review`.",
         "timeout_seconds": 5,
-        "dangerous": False,
+        "dangerous": True,
         "in_process": True,
     },
     "lark_gate_b_diff": {
@@ -433,7 +433,7 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "scope": "review",
         "description": "Apply a Lark @-bot follow-up message to the latest pending edit slot.",
         "timeout_seconds": 5,
-        "dangerous": False,
+        "dangerous": True,
         "in_process": True,
     },
     # ----- v1.1.1 — generic defer -----

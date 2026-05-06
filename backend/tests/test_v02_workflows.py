@@ -5065,12 +5065,13 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
                 "lark_takeover",
                 "lark_view_audit",
                 "lark_view_meta",
-                "lark_apply_pending_edit",
             ):
                 self.assertIn(name, commands)
                 self.assertFalse(commands[name]["dangerous"])
             self.assertIn("lark_refill", commands)
             self.assertTrue(commands["lark_refill"]["dangerous"])
+            self.assertIn("lark_apply_pending_edit", commands)
+            self.assertTrue(commands["lark_apply_pending_edit"]["dangerous"])
 
     def test_lark_gate_b_approve_dispatches_in_process(self) -> None:
         from agentflow.agent_review import lark_callback
@@ -5196,10 +5197,12 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         for spawning in (
             "lark_gate_a_write",
             "lark_gate_b_rewrite",
+                "lark_gate_b_edit",
             "lark_gate_c_regen",
             "lark_gate_c_relogo",
             "lark_gate_d_confirm",
             "lark_gate_d_retry",
+                "lark_apply_pending_edit",
         ):
             self.assertTrue(
                 commands[spawning]["dangerous"], msg=f"{spawning} should be dangerous"
