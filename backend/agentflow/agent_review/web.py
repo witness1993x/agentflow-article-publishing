@@ -270,6 +270,173 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "dangerous": False,
         "in_process": True,
     },
+    # ----- v1.1.1 — Gate A handlers -----
+    "lark_gate_a_write": {
+        "scope": "pipeline",
+        "description": "Gate A → spawn `af write <hotspot_id> --auto-pick` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_gate_a_reject_all": {
+        "scope": "review",
+        "description": "Gate A → reject the whole scan card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_a_expand": {
+        "scope": "read",
+        "description": "Gate A → expand a hotspot into a detail card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    # ----- v1.1.1 — Gate B remaining handlers -----
+    "lark_gate_b_rewrite": {
+        "scope": "pipeline",
+        "description": "Gate B → spawn `af fill --rewrite` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_gate_b_edit": {
+        "scope": "review",
+        "description": "Gate B → register an interactive-edit pending slot for the next @-bot message.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_b_diff": {
+        "scope": "read",
+        "description": "Gate B → render the latest d2_structure_audit verdict as a card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    # ----- v1.1.1 — Gate C (image gate) handlers -----
+    "lark_gate_c_approve": {
+        "scope": "review",
+        "description": "Gate C → image_approved transition.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_c_skip": {
+        "scope": "review",
+        "description": "Gate C → image_skipped transition.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_c_regen": {
+        "scope": "pipeline",
+        "description": "Gate C → spawn `af image-gate --mode <mode>` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_gate_c_relogo": {
+        "scope": "pipeline",
+        "description": "Gate C → spawn `af image-gate --logo-only` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_gate_c_full": {
+        "scope": "read",
+        "description": "Gate C → render full image-placeholder list.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    # ----- v1.1.1 — Gate D (channel selection + dispatch) handlers -----
+    "lark_gate_d_toggle": {
+        "scope": "review",
+        "description": "Gate D → toggle a single platform in metadata.gate_d_selection.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_select_all": {
+        "scope": "review",
+        "description": "Gate D → select all platforms (or those passed in payload.platforms).",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_save_default": {
+        "scope": "review",
+        "description": "Gate D → save current selection as operator's default for future drafts.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_confirm": {
+        "scope": "publish",
+        "description": "Gate D → spawn `af publish --platforms <selection>` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_gate_d_cancel": {
+        "scope": "review",
+        "description": "Gate D → clear selection, transition back to image_approved.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_resume": {
+        "scope": "review",
+        "description": "Gate D → re-post the channel-selection card via existing TG trigger.",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_extend": {
+        "scope": "review",
+        "description": "Gate D → extend short_id TTL one round (telemetry only).",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_gate_d_retry": {
+        "scope": "publish",
+        "description": "Gate D → spawn `af publish` retry for failed platforms.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    # ----- v1.1.1 — Locked Takeover handlers -----
+    "lark_locked_critique": {
+        "scope": "read",
+        "description": "L → render audit critique card from the latest d2_structure_audit event.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_locked_edit": {
+        "scope": "review",
+        "description": "L → register an interactive-edit pending slot for manual takeover.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_locked_give_up": {
+        "scope": "review",
+        "description": "L → give up: transition article to draft_rejected.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    # ----- v1.1.1 — generic defer -----
+    "lark_defer": {
+        "scope": "review",
+        "description": "Defer a Gate decision (operator carries gate label in payload.gate).",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
 }
 
 _BRIDGE_SPEC_VERSION = "1.0"
@@ -505,12 +672,42 @@ def _run_lark_command_in_process(
     raw_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
 
     action_map = {
+        # v1.1.0
         "lark_gate_b_approve": "approve_b",
         "lark_gate_b_reject": "reject_b",
         "lark_takeover": "takeover",
         "lark_view_audit": "view_audit",
         "lark_view_meta": "view_meta",
         "lark_refill": "refill",
+        # v1.1.1 — Gate A
+        "lark_gate_a_write": "gate_a_write",
+        "lark_gate_a_reject_all": "gate_a_reject_all",
+        "lark_gate_a_expand": "gate_a_expand",
+        # v1.1.1 — Gate B remaining
+        "lark_gate_b_rewrite": "gate_b_rewrite",
+        "lark_gate_b_edit": "gate_b_edit",
+        "lark_gate_b_diff": "gate_b_diff",
+        # v1.1.1 — Gate C
+        "lark_gate_c_approve": "gate_c_approve",
+        "lark_gate_c_skip": "gate_c_skip",
+        "lark_gate_c_regen": "gate_c_regen",
+        "lark_gate_c_relogo": "gate_c_relogo",
+        "lark_gate_c_full": "gate_c_full",
+        # v1.1.1 — Gate D
+        "lark_gate_d_toggle": "gate_d_toggle",
+        "lark_gate_d_select_all": "gate_d_select_all",
+        "lark_gate_d_save_default": "gate_d_save_default",
+        "lark_gate_d_confirm": "gate_d_confirm",
+        "lark_gate_d_cancel": "gate_d_cancel",
+        "lark_gate_d_resume": "gate_d_resume",
+        "lark_gate_d_extend": "gate_d_extend",
+        "lark_gate_d_retry": "gate_d_retry",
+        # v1.1.1 — Locked Takeover
+        "lark_locked_critique": "locked_critique",
+        "lark_locked_edit": "locked_edit",
+        "lark_locked_give_up": "locked_give_up",
+        # v1.1.1 — generic defer (operator carries gate label in payload.gate)
+        "lark_defer": "defer",
     }
     result = lark_callback.handle_event(
         event_kind="card_action",

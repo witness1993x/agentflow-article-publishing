@@ -5106,6 +5106,98 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
             self.assertEqual(res.status_code, 200)
             self.assertEqual(seen_action, ["view_audit"])
 
+    def test_v111_all_29_lark_commands_listed_in_bridge(self) -> None:
+        """v1.1.1 — full Gate A/B/C/D + L parity should expose 29 lark_* commands."""
+        with patch.dict(
+            os.environ,
+            {"REVIEW_DASHBOARD_TOKEN": "rt", "AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt"},
+            clear=False,
+        ):
+            client = self._client()
+            res = client.get("/api/bridge", headers={"Authorization": "Bearer rt"})
+        self.assertEqual(res.status_code, 200)
+        commands = res.json()["commands"]
+        lark = sorted(c for c in commands if c.startswith("lark_"))
+        # 6 v1.1.0 + 23 v1.1.1 = 29
+        self.assertEqual(len(lark), 29)
+        # Spot-check coverage for each Gate
+        for required in (
+            "lark_gate_a_write",
+            "lark_gate_a_reject_all",
+            "lark_gate_a_expand",
+            "lark_gate_b_rewrite",
+            "lark_gate_b_edit",
+            "lark_gate_b_diff",
+            "lark_gate_c_approve",
+            "lark_gate_c_skip",
+            "lark_gate_c_regen",
+            "lark_gate_c_relogo",
+            "lark_gate_c_full",
+            "lark_gate_d_toggle",
+            "lark_gate_d_select_all",
+            "lark_gate_d_save_default",
+            "lark_gate_d_confirm",
+            "lark_gate_d_cancel",
+            "lark_gate_d_resume",
+            "lark_gate_d_extend",
+            "lark_gate_d_retry",
+            "lark_locked_critique",
+            "lark_locked_edit",
+            "lark_locked_give_up",
+            "lark_defer",
+        ):
+            self.assertIn(required, commands, msg=f"missing {required}")
+
+    def test_v111_dangerous_subprocess_commands_marked_dangerous(self) -> None:
+        """Heavy spawn-subprocess commands must be marked dangerous to require explicit opt-in."""
+        with patch.dict(
+            os.environ, {"REVIEW_DASHBOARD_TOKEN": "rt"}, clear=False
+        ):
+            client = self._client()
+            res = client.get("/api/bridge", headers={"Authorization": "Bearer rt"})
+        commands = res.json()["commands"]
+        for spawning in (
+            "lark_gate_a_write",
+            "lark_gate_b_rewrite",
+            "lark_gate_c_regen",
+            "lark_gate_c_relogo",
+            "lark_gate_d_confirm",
+            "lark_gate_d_retry",
+        ):
+            self.assertTrue(
+                commands[spawning]["dangerous"], msg=f"{spawning} should be dangerous"
+            )
+
+    def test_v111_lark_gate_d_toggle_dispatches_with_payload(self) -> None:
+        """v1.1.1 — payload (e.g. platform name) must reach handle_event verbatim."""
+        from agentflow.agent_review import lark_callback
+
+        seen: dict = {}
+
+        def fake_handle(**kwargs):
+            seen.update(kwargs)
+            return {"ack": True, "reply_card": None, "reply_text": None, "side_effects": []}
+
+        with patch.dict(
+            os.environ, {"AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt"}, clear=False
+        ), patch.object(lark_callback, "handle_event", new=fake_handle):
+            client = self._client()
+            res = client.post(
+                "/api/commands",
+                headers={"Authorization": "Bearer wt"},
+                json={
+                    "command": "lark_gate_d_toggle",
+                    "params": {
+                        "article_id": "art_z",
+                        "operator_open_id": "ou_x",
+                        "payload": {"platform": "ghost"},
+                    },
+                },
+            )
+        self.assertEqual(res.status_code, 200, msg=res.text)
+        self.assertEqual(seen["action"], "gate_d_toggle")
+        self.assertEqual(seen["payload"], {"platform": "ghost"})
+
 
 if __name__ == "__main__":
     unittest.main()
