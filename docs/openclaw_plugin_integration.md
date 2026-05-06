@@ -71,7 +71,9 @@ Content-Type: application/json
 }
 ```
 
-`AGENTFLOW_AGENT_BRIDGE_TOKEN` 在 AgentFlow 端的 `.env` 里（已有）。`AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS` 不必开 — Lark 命令都标了 `dangerous: false`。
+`AGENTFLOW_AGENT_BRIDGE_TOKEN` 在 AgentFlow 端的 `.env` 里（已有）。如果要允许 Lark 触发写作、refill、重生成图片、发布等 spawn 子进程动作，OpenClaw 进程需要设置 `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`。
+
+Lark App 主路径部署时设置 `AGENTFLOW_LARK_APP_PRIMARY=true`。这会让 `notify.draft_ready` / `notify.publish_ready` / `notify.hotspots_digest` / `notify.dispatch_result` / `notify.spawn_failure` 走 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`，不再 POST 旧 Custom Bot。
 
 OpenClaw 部署如果与 AgentFlow 同机，URL 用 `http://127.0.0.1:8000`（或你 review-daemon 启动时绑的端口）。跨机部署同时要保证 token 在 OpenClaw 一侧也配好。
 
@@ -97,7 +99,7 @@ v1.1.1 起，AgentFlow 暴露 **29 个 `lark_*` 命令**，覆盖原 TG 全部 5
 | `lark_gate_b_approve` | review | `article_id` | `state.transition` → `draft_approved`，幂等（重复点 → `already_handled`） |
 | `lark_gate_b_reject` | review | `article_id` | `state.transition` → `drafting` |
 | `lark_gate_b_rewrite` | pipeline ⚠️ | `article_id` | `state.transition` → `drafting` 然后 spawn `af fill --rewrite` |
-| `lark_gate_b_edit` | review | `article_id`, `payload.section_index`, `payload.paragraph_index` | 注册 interactive-edit 等待槽，等下一条 @-bot 消息作为修改指令 |
+| `lark_gate_b_edit` | review ⚠️ | `article_id`, `payload.section_index`, `payload.paragraph_index`, `payload.comment` | 兼容输入框：有 `comment` 时直接 spawn `af edit`；无输入时注册 interactive-edit 等待槽 |
 | `lark_gate_b_diff` | read | `article_id` | 返回最新 `d2_structure_audit` verdict + dim_scores + issues 卡片 |
 
 ### Gate C · 配图
@@ -106,7 +108,7 @@ v1.1.1 起，AgentFlow 暴露 **29 个 `lark_*` 命令**，覆盖原 TG 全部 5
 |---|---|---|---|
 | `lark_gate_c_approve` | review | `article_id` | `state.transition` → `image_approved` |
 | `lark_gate_c_skip` | review | `article_id` | `state.transition` → `image_skipped` |
-| `lark_gate_c_regen` | pipeline ⚠️ | `article_id`, `payload.mode` | spawn `af image-gate --mode <mode>`，结果异步 |
+| `lark_gate_c_regen` | pipeline ⚠️ | `article_id`, `payload.mode`, `payload.prompt` | 兼容输入框：有 `prompt` 时作为 `--cover-description` 传给 `af image-gate`；结果异步 |
 | `lark_gate_c_relogo` | pipeline ⚠️ | `article_id` | spawn `af image-gate --logo-only`，结果异步 |
 | `lark_gate_c_full` | read | `article_id` | 返回完整 image_placeholders 列表卡片 |
 
@@ -138,7 +140,8 @@ v1.1.1 起，AgentFlow 暴露 **29 个 `lark_*` 命令**，覆盖原 TG 全部 5
 | `lark_takeover` | review | `article_id` | 直接进入 manual takeover（fire `triggers.post_locked_takeover`） |
 | `lark_view_audit` | read | `article_id` | 返回 audit 历史 |
 | `lark_view_meta` | read | `article_id` | 返回 metadata snapshot |
-| `lark_refill` | review | `article_id` | **Phase 1 stub**：返回卡片让 operator 去 TG 完成 |
+| `lark_refill` | review ⚠️ | `article_id` | `state.transition` → `drafting`，后台 spawn `af fill <article_id> --skeleton-only --auto-pick` |
+| `lark_apply_pending_edit` | review ⚠️ | `article_id`, `payload.text` | OpenClaw 收到 @-bot 后续消息后调用；读取并一次性消费最近 `lark_edit_pending` / `lark_locked_edit_pending`，然后 spawn `af edit --post-review` |
 | `lark_defer` | review | `article_id`, `payload.gate` | 任意 Gate 延后决定，无状态变更 |
 
 ⚠️ 标记的命令是 **dangerous=true** ，在 AgentFlow 一侧 OpenClaw 进程必须设
@@ -219,7 +222,7 @@ registerTool({
 
 ## Gate B 卡片内容
 
-OpenClaw plugin 在收到 AgentFlow 端 `notify_draft_ready` 事件时（v1.1.1 会把这个事件桥接过去；v1.1.0 仍只在 TG / Custom Bot webhook 发），渲染一张 interactive card，按钮的 `value.action` 字段就是上面命令名（去掉 `lark_` 前缀的）：
+OpenClaw plugin 在收到 AgentFlow 端 `notify.draft_ready` 事件（`AGENTFLOW_LARK_APP_PRIMARY=true`）或 `draft_pending_review` state transition 时，渲染一张 interactive card。按钮的 `value.action` 字段就是上面命令名（去掉 `lark_` 前缀的）：
 
 ```json
 {
@@ -245,6 +248,15 @@ OpenClaw plugin 在收到 AgentFlow 端 `notify_draft_ready` 事件时（v1.1.1 
           "tag": "button",
           "text": { "tag": "plain_text", "content": "🔍 看审计" },
           "value": { "action": "view_audit", "article_id": "<id>" }
+        },
+        {
+          "tag": "button",
+          "text": { "tag": "plain_text", "content": "✏️ 提交修改" },
+          "value": {
+            "action": "gate_b_edit",
+            "article_id": "<id>",
+            "payload": {"section_index": 2, "comment": "<textarea value>"}
+          }
         }
       ]
     }
@@ -302,6 +314,7 @@ AGENTFLOW_AGENT_EVENT_WEBHOOK_TOKEN=<shared-secret>
 | `agent.command.completed` `payload.command == "image-gate"` | Gate C regen / relogo 完成 | 更新原 Gate C 卡片或发新图预览 |
 | `agent.command.completed` `payload.command == "publish"` | Gate D 发布完成 | 发 publish 结果播报 |
 | `agent.command.failed` | 任何子进程失败 | 发红色错误卡，附 stderr 摘要 |
+| `notify.draft_ready` / `notify.hotspots_digest` / `notify.publish_ready` / `notify.dispatch_result` / `notify.spawn_failure` | `AGENTFLOW_LARK_APP_PRIMARY=true` 时的 Lark-first 通知 | OpenClaw 直接渲染对应 Lark 卡片，不走 Custom Bot |
 | `lark_callback` | 任何 Lark callback 落 memory log（telemetry） | 一般忽略，仅用于审计 |
 
 **关键设计**：state 变化 = OpenClaw 在 Lark 渲新卡的契机。AgentFlow 的
@@ -346,7 +359,7 @@ async function renderGateBCard(articleId) {
 ## 安全策略
 
 - **AgentFlow bridge token** 只发给 OpenClaw 进程，不对 Lark 群成员可见
-- **Dangerous commands disabled**：v1.1.0 的 `lark_*` 全是 `dangerous: false`，跑命令不需要开 `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS`
+- **Dangerous commands opt-in**：spawn 子进程 / 发布类 `lark_*` 需要 `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`；只读和纯 review 命令不需要
 - **OpenClaw plugin 群级别 allowlist**：在插件配置里限制 bot 只回应特定群、特定成员，避免外部成员误触发审稿
 - **operator 身份链路**：AgentFlow 用 `operator_open_id` 当 `actor=lark:<open_id>` 写状态机历史，事后可审计是谁通过 / 拒绝的
 
@@ -363,7 +376,7 @@ async function renderGateBCard(articleId) {
 ## 版本路线
 
 - ✅ **v1.1.0** — 基础 callback bridge（6 个 lark_* 命令：approve_b / reject_b / takeover / view_audit / view_meta / refill stub）
-- ✅ **v1.1.1（当前）** — 全 27 个 TG callback 动作 Lark 端 parity（Gate A / B / C / D / L 全覆盖）+ event webhook 文档化
-- ⏭ **v1.1.2** — Phase 2 启动 refill 真实写路径（v1.1.0 stub 升级）；OpenClaw 一侧实现 conversational follow-up（@-bot 接 `lark_gate_b_edit` / `lark_locked_edit` 留下的 pending 槽位）
+- ✅ **v1.1.1** — 全 27 个 TG callback 动作 Lark 端 parity（Gate A / B / C / D / L 全覆盖）+ event webhook 文档化
+- ✅ **v1.1.2（当前）** — Lark-first UX：`lark_refill` 真实写路径、输入框 / @bot pending edit 闭环、30 个 `lark_*` 命令、`AGENTFLOW_LARK_APP_PRIMARY=true` 通知迁移
 - ⏭ **Phase 2 doc** — 把整篇稿件作为飞书云文档承载（替代 v1.0.30 的截断 + 镜像链接），需 `docx:document` / `drive:drive` 权限
 - Phase 2：把整篇稿件作为飞书云文档发到群（替代 v1.0.30 的截断 + 镜像链接）

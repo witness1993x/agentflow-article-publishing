@@ -3279,6 +3279,40 @@ class LarkWebhookTests(AgentflowHomeTestCase):
                 label="x", target_id="y", error_tail="z",
             )
 
+    def test_lark_app_primary_routes_notifications_to_agent_events(self) -> None:
+        from agentflow.shared import lark_webhook
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                    "LARK_WEBHOOK_URL": "https://legacy-custom-bot",
+                },
+                clear=False,
+            ),
+            patch("agentflow.shared.agent_bridge.emit_agent_event") as emit_mock,
+            patch.object(lark_webhook, "_post") as post_mock,
+        ):
+            lark_webhook.notify_draft_ready(
+                article_id="aid",
+                title="Draft title",
+                draft_md="hello draft body",
+                audit_summary="audit ok",
+            )
+            lark_webhook.notify_spawn_failure(
+                label="fill", target_id="aid", error_tail="boom"
+            )
+
+        post_mock.assert_not_called()
+        event_types = [c.kwargs["event_type"] for c in emit_mock.call_args_list]
+        self.assertEqual(event_types, ["notify.draft_ready", "notify.spawn_failure"])
+        self.assertEqual(emit_mock.call_args_list[0].kwargs["article_id"], "aid")
+        self.assertIn(
+            "hello draft body",
+            emit_mock.call_args_list[0].kwargs["payload"]["draft_excerpt"],
+        )
+
     def test_sign_matches_lark_spec(self) -> None:
         """Per Lark docs: HmacSHA256(stringToSign='timestamp\\n'+secret, body=b'')
         then base64."""
@@ -5031,10 +5065,13 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
                 "lark_takeover",
                 "lark_view_audit",
                 "lark_view_meta",
-                "lark_refill",
             ):
                 self.assertIn(name, commands)
                 self.assertFalse(commands[name]["dangerous"])
+            self.assertIn("lark_refill", commands)
+            self.assertTrue(commands["lark_refill"]["dangerous"])
+            self.assertIn("lark_apply_pending_edit", commands)
+            self.assertTrue(commands["lark_apply_pending_edit"]["dangerous"])
 
     def test_lark_gate_b_approve_dispatches_in_process(self) -> None:
         from agentflow.agent_review import lark_callback
@@ -5106,8 +5143,8 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
             self.assertEqual(res.status_code, 200)
             self.assertEqual(seen_action, ["view_audit"])
 
-    def test_v111_all_29_lark_commands_listed_in_bridge(self) -> None:
-        """v1.1.1 — full Gate A/B/C/D + L parity should expose 29 lark_* commands."""
+    def test_v112_all_30_lark_commands_listed_in_bridge(self) -> None:
+        """v1.1.2 — Lark exposes TG parity plus pending-edit follow-up."""
         with patch.dict(
             os.environ,
             {"REVIEW_DASHBOARD_TOKEN": "rt", "AGENTFLOW_AGENT_BRIDGE_TOKEN": "wt"},
@@ -5118,8 +5155,8 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         self.assertEqual(res.status_code, 200)
         commands = res.json()["commands"]
         lark = sorted(c for c in commands if c.startswith("lark_"))
-        # 6 v1.1.0 + 23 v1.1.1 = 29
-        self.assertEqual(len(lark), 29)
+        # 29 v1.1.1 commands + v1.1.2 lark_apply_pending_edit = 30
+        self.assertEqual(len(lark), 30)
         # Spot-check coverage for each Gate
         for required in (
             "lark_gate_a_write",
@@ -5144,6 +5181,7 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
             "lark_locked_critique",
             "lark_locked_edit",
             "lark_locked_give_up",
+            "lark_apply_pending_edit",
             "lark_defer",
         ):
             self.assertIn(required, commands, msg=f"missing {required}")
@@ -5159,10 +5197,12 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         for spawning in (
             "lark_gate_a_write",
             "lark_gate_b_rewrite",
+                "lark_gate_b_edit",
             "lark_gate_c_regen",
             "lark_gate_c_relogo",
             "lark_gate_d_confirm",
             "lark_gate_d_retry",
+                "lark_apply_pending_edit",
         ):
             self.assertTrue(
                 commands[spawning]["dangerous"], msg=f"{spawning} should be dangerous"

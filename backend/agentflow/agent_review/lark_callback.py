@@ -22,12 +22,9 @@ Design notes (Phase 1):
   :class:`agentflow.agent_review.state.StateError` on illegal transitions.
   Two operators clicking the same card produce one transition + one
   ``side_effects=["already_handled"]`` ack — never two transitions.
-* Write-side actions that are dangerous to mirror onto Lark right now
-  (``refill``, full rewrite) are intentionally read-only-write parity:
-  return a reply card asking the operator to use Telegram. Phase 2 will
-  enable these once we trust the auth + idempotency story.
-* No subprocesses are spawned from the callback path — the daemon's review
-  loop already takes care of long-running work.
+* Write-side actions that may take a while return immediately and spawn the
+  corresponding ``af`` command in the background; completion is reported via
+  the AgentFlow event webhook.
 """
 
 from __future__ import annotations
@@ -222,12 +219,29 @@ def _handle_refill(
     operator: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Phase 1: read-only-write parity. Do NOT mutate state, do NOT spawn.
-
-    We log the request as a memory event so operators can audit Lark
-    refill attempts later, then return a card directing them to Telegram.
-    """
+    """Spawn ``af fill <article_id> --skeleton-only --auto-pick`` from Lark."""
     response = _empty_response()
+    actor = _actor_for(operator)
+    try:
+        review_state.transition(
+            article_id,
+            gate="B",
+            to_state=STATE_DRAFTING,
+            actor=actor,
+            decision="refill_via_lark",
+        )
+    except StateError as err:
+        response["side_effects"].append("already_handled")
+        response["reply_card"] = _state_error_card(action="refill", err=err)
+        _telemetry(
+            event_kind="card_action",
+            action="refill",
+            article_id=article_id,
+            operator=operator,
+            outcome="already_handled",
+        )
+        return response
+
     try:
         append_memory_event(
             "lark_refill_requested",
@@ -235,25 +249,36 @@ def _handle_refill(
             payload={
                 "operator_open_id": operator.get("open_id"),
                 "operator_name": operator.get("name"),
+                "mode": "skeleton_only_auto_pick",
             },
         )
     except Exception:
         _log.warning("failed to record lark_refill_requested", exc_info=True)
-    response["side_effects"].append("refill_deferred_to_tg")
-    response["reply_card"] = _make_card(
-        title="Refill 暂未在 Lark 端开启",
-        body=(
-            "Phase 1 还未在 Lark 上开放 refill 写操作。\n\n"
-            "请在 Telegram 端完成 refill (Phase 2 将启用)。"
-        ),
-        template="grey",
-    )
+
+    argv = _af_executable() + [
+        "fill",
+        article_id,
+        "--skeleton-only",
+        "--auto-pick",
+        "--json",
+    ]
+    spawned = _spawn_async(argv, article_id=article_id, action="refill")
+    if spawned:
+        response["side_effects"].append("refill_spawned")
+        response["reply_card"] = _kicked_off_card(action="refill", article_id=article_id)
+    else:
+        response["side_effects"].append("spawn_failed")
+        response["reply_card"] = _make_card(
+            title="Refill 启动失败",
+            body=f"无法启动 fill 子进程 (`{article_id}`)",
+            template="red",
+        )
     _telemetry(
         event_kind="card_action",
         action="refill",
         article_id=article_id,
         operator=operator,
-        outcome="deferred_to_tg",
+        outcome="spawned" if spawned else "spawn_failed",
     )
     return response
 
@@ -524,6 +549,153 @@ def _state_error_card(*, action: str, err: Exception) -> dict[str, Any]:
     )
 
 
+def _payload_text(payload: dict[str, Any]) -> str:
+    """Extract textarea-style user input from common card payload shapes."""
+    for key in (
+        "comment",
+        "edit_text",
+        "editText",
+        "instruction",
+        "prompt",
+        "feedback",
+        "text",
+        "value",
+    ):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    form = payload.get("form")
+    if isinstance(form, dict):
+        return _payload_text(form)
+    return ""
+
+
+def _parse_edit_instruction(text: str) -> tuple[str | None, int | None, str]:
+    """Parse TG-compatible edit text: `title ...`, `opening ...`, `2 ...`."""
+    import re
+
+    m = re.match(
+        r"^(title|opening|closing|\d+)\s+(.+)$",
+        text.strip(),
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not m:
+        return None, None, text.strip()
+    scope = m.group(1).lower()
+    body = m.group(2).strip()
+    if scope in {"title", "opening", "closing"}:
+        return scope, None, body
+    return None, int(scope), body
+
+
+def _spawn_edit_from_payload(
+    *,
+    article_id: str,
+    operator: dict[str, Any],
+    payload: dict[str, Any],
+    action: str,
+    fallback_section_index: Any = None,
+    fallback_paragraph_index: Any = None,
+) -> dict[str, Any]:
+    response = _empty_response()
+    edit_text = _payload_text(payload)
+    if not edit_text:
+        response["side_effects"].append(f"{action}_missing_text")
+        response["reply_card"] = _make_card(
+            title="缺少修改内容",
+            body="没有收到输入框文本或 @bot 消息正文。",
+            template="orange",
+        )
+        return response
+
+    parsed_target, parsed_section, command_text = _parse_edit_instruction(edit_text)
+    target = str(payload.get("target") or parsed_target or "").strip().lower()
+    section_index = payload.get("section_index")
+    if section_index is None:
+        section_index = parsed_section if parsed_section is not None else fallback_section_index
+    paragraph_index = payload.get("paragraph_index")
+    if paragraph_index is None:
+        paragraph_index = fallback_paragraph_index
+
+    argv = _af_executable() + [
+        "edit",
+        article_id,
+        "--command",
+        command_text,
+        "--post-review",
+        "--json",
+    ]
+    if target in {"title", "opening", "closing"}:
+        argv.extend(["--target", target])
+    elif section_index is not None:
+        argv.extend(["--section", str(section_index)])
+        if paragraph_index is not None:
+            argv.extend(["--paragraph", str(paragraph_index)])
+        target = "section"
+    else:
+        response["side_effects"].append(f"{action}_missing_target")
+        response["reply_card"] = _make_card(
+            title="修改意见已收到，但缺少目标段落",
+            body=(
+                f"`{article_id}` 没有可用的 section_index / target。\n\n"
+                "请在消息开头带目标，例如 `title 标题更锋利`、"
+                "`opening 开头更短`、`2 第二节补数据`。"
+            ),
+            template="orange",
+        )
+        _telemetry(
+            event_kind="card_action",
+            action=action,
+            article_id=article_id,
+            operator=operator,
+            outcome="missing_target",
+            extra={"has_text": True},
+        )
+        return response
+
+    spawned = _spawn_async(argv, article_id=article_id, action=action)
+    try:
+        append_memory_event(
+            "lark_edit_submitted",
+            article_id=article_id,
+            payload={
+                "operator_open_id": operator.get("open_id"),
+                "operator_name": operator.get("name"),
+                "section_index": section_index,
+                "paragraph_index": paragraph_index,
+                "target": target,
+                "text": command_text,
+                "source_action": action,
+            },
+        )
+    except Exception:
+        _log.warning("lark_edit_submitted memory append failed", exc_info=True)
+    if spawned:
+        response["side_effects"].append(f"{action}_spawned")
+        response["reply_card"] = _kicked_off_card(action=action, article_id=article_id)
+    else:
+        response["side_effects"].append("spawn_failed")
+        response["reply_card"] = _make_card(
+            title="修改启动失败",
+            body=f"无法启动 edit 子进程 (`{article_id}`)",
+            template="red",
+        )
+    _telemetry(
+        event_kind="card_action",
+        action=action,
+        article_id=article_id,
+        operator=operator,
+        outcome="spawned" if spawned else "spawn_failed",
+        extra={
+            "section_index": section_index,
+            "paragraph_index": paragraph_index,
+            "target": target,
+            "has_text": True,
+        },
+    )
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Gate A handlers (write / reject_all / expand / defer)
 # ---------------------------------------------------------------------------
@@ -734,15 +906,22 @@ def _handle_gate_b_rewrite(
 def _handle_gate_b_edit(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Open an interactive edit slot.
-
-    Phase 1 implementation: log the request + return a card asking the
-    operator to provide the edit prompt as a follow-up message. The
-    OpenClaw plugin handles the conversational follow-up via @-bot.
-    """
+    """Apply inline edit text, or open an interactive edit slot."""
     response = _empty_response()
     section_index = payload.get("section_index")
     paragraph_index = payload.get("paragraph_index")
+    edit_text = _payload_text(payload)
+
+    if edit_text:
+        return _spawn_edit_from_payload(
+            article_id=article_id,
+            operator=operator,
+            payload=payload,
+            action="gate_b_edit",
+            fallback_section_index=section_index,
+            fallback_paragraph_index=paragraph_index,
+        )
+
     try:
         append_memory_event(
             "lark_edit_pending",
@@ -910,6 +1089,9 @@ def _handle_gate_c_regen(
     response = _empty_response()
     mode = str(payload.get("mode") or "auto")
     argv = _af_executable() + ["image-gate", article_id, "--mode", mode, "--json"]
+    prompt = _payload_text(payload)
+    if prompt:
+        argv.extend(["--cover-description", prompt])
     if _spawn_async(argv, article_id=article_id, action="gate_c_regen"):
         response["side_effects"].append("gate_c_regen_spawned")
         response["reply_card"] = _kicked_off_card(
@@ -928,7 +1110,7 @@ def _handle_gate_c_regen(
         article_id=article_id,
         operator=operator,
         outcome="spawned" if "gate_c_regen_spawned" in response["side_effects"] else "spawn_failed",
-        extra={"mode": mode},
+        extra={"mode": mode, "has_inline_prompt": bool(prompt)},
     )
     return response
 
@@ -1424,6 +1606,91 @@ def _handle_locked_give_up(
     return response
 
 
+def _latest_pending_edit(article_id: str, operator: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Find the latest pending Lark edit slot for this article/operator."""
+    operator_id = operator.get("open_id")
+    consumed: set[tuple[str, str]] = set()
+    try:
+        consumed_events = read_memory_events(
+            article_id=article_id, event_type="lark_pending_edit_consumed"
+        )
+    except Exception:
+        consumed_events = []
+    for ev in consumed_events:
+        payload = ev.get("payload") or {}
+        event_type = str(payload.get("pending_event_type") or "")
+        event_ts = str(payload.get("pending_event_ts") or "")
+        if event_type and event_ts:
+            consumed.add((event_type, event_ts))
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for event_type in ("lark_edit_pending", "lark_locked_edit_pending"):
+        try:
+            events = read_memory_events(article_id=article_id, event_type=event_type)
+        except Exception:
+            events = []
+        for ev in events:
+            event_ts = str(ev.get("ts") or "")
+            if (event_type, event_ts) in consumed:
+                continue
+            payload = ev.get("payload") or {}
+            if operator_id and payload.get("operator_open_id") not in {None, operator_id}:
+                continue
+            candidates.append((event_type, ev))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: str(item[1].get("ts") or ""))
+    return candidates[-1]
+
+
+def _handle_apply_pending_edit(
+    *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the next @-bot message to the latest pending Lark edit slot."""
+    pending = _latest_pending_edit(article_id, operator)
+    if pending is None:
+        response = _empty_response()
+        response["side_effects"].append("pending_edit_not_found")
+        response["reply_card"] = _make_card(
+            title="没有待处理的修改槽位",
+            body=f"`{article_id}` 没有找到最近的 Lark edit pending 事件。",
+            template="grey",
+        )
+        _telemetry(
+            event_kind="message",
+            action="apply_pending_edit",
+            article_id=article_id,
+            operator=operator,
+            outcome="pending_not_found",
+        )
+        return response
+
+    event_type, event = pending
+    pending_payload = event.get("payload") or {}
+    response = _spawn_edit_from_payload(
+        article_id=article_id,
+        operator=operator,
+        payload=payload,
+        action="apply_pending_edit",
+        fallback_section_index=pending_payload.get("section_index"),
+        fallback_paragraph_index=pending_payload.get("paragraph_index"),
+    )
+    try:
+        append_memory_event(
+            "lark_pending_edit_consumed",
+            article_id=article_id,
+            payload={
+                "operator_open_id": operator.get("open_id"),
+                "pending_event_type": event_type,
+                "pending_event_ts": event.get("ts"),
+                "side_effects": list(response.get("side_effects") or []),
+            },
+        )
+    except Exception:
+        _log.warning("lark_pending_edit_consumed memory append failed", exc_info=True)
+    return response
+
+
 # Action vocabulary — must match the Adapter Service exactly.
 _ACTION_HANDLERS = {
     # v1.1.0
@@ -1460,6 +1727,7 @@ _ACTION_HANDLERS = {
     "locked_critique": _handle_locked_critique,
     "locked_edit": _handle_locked_edit,
     "locked_give_up": _handle_locked_give_up,
+    "apply_pending_edit": _handle_apply_pending_edit,
     # v1.1.1 — generic defer (gate carried in payload.gate)
     "defer": _handle_defer,
 }

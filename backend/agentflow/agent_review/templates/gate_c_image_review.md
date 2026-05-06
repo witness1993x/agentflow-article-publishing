@@ -1,4 +1,4 @@
-# Gate C — Image (Cover) Review (Telegram)
+# Gate C — Image (Cover) Review (Lark-first / TG fallback)
 
 **When fired:** after `af image-gate` completes a generation pass. Only fires
 when generation actually ran (`mode=cover-only` or `cover-plus-body`).
@@ -20,7 +20,7 @@ auto-rejects the cover and falls back to "no cover" mode.
 
 ---
 
-## Message template
+## Telegram message template
 
 The bot sends a **photo message** (the rendered cover, with logo overlay
 already applied) with a caption — Telegram caption limit is 1024 chars,
@@ -63,6 +63,42 @@ inline body images: *{inline_body_count}* (cover\\-only mode → 0)
 [ 🖼 看完整尺寸 ]   [ ⏰ 推迟 2h ]
 ```
 
+## Lark / OpenClaw card layout
+
+Lark is the primary operator surface. Render the cover preview and self-check
+as an interactive card. The regenerate path should include a textarea so the
+operator can say what to change:
+
+```json
+{
+  "article_id": "{article_id}",
+  "action": "gate_c_regen",
+  "payload": {
+    "mode": "cover-only",
+    "prompt": "<textarea value>"
+  }
+}
+```
+
+Recommended buttons / inputs:
+
+```text
+[ ✅ 用这张 ]        -> lark_gate_c_approve
+[ 🔁 按意见再生成 ]  -> lark_gate_c_regen + payload.prompt
+[ 🎨 换 logo 位置 ] -> lark_gate_c_relogo
+[ 🚫 不用图 ]        -> lark_gate_c_skip
+[ 🖼 看完整尺寸 ]    -> lark_gate_c_full
+[ ⏰ 推迟 ]          -> lark_defer payload.gate="C"
+```
+
+Input compatibility:
+- Send image-review text as `payload.prompt` (also accepted: `comment`,
+  `feedback`, `text`).
+- Backend passes the text into `af image-gate --cover-description`, clears the
+  old cover resolution, regenerates, then posts a fresh Gate C.
+- `lark_gate_c_regen` / `lark_gate_c_relogo` are `dangerous=true`; the bridge
+  must opt in with `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`.
+
 ## callback_data values
 
 | Button | callback_data |
@@ -97,7 +133,7 @@ Optional (warning only, doesn't block):
 | User action | Backend effect |
 |---|---|
 | ✅ 用这张 | gate_history append; daemon advances to publish-ready |
-| 🔁 再生成一张 | `af image-cover-add --reset && af image-generate --style cover --skip-body`; new card |
+| 🔁 再生成一张 | `af image-gate --cover-description <feedback>` when feedback exists; otherwise regenerate with the current prompt; new card |
 | 🎨 换 logo 位置 | bot prompts anchor pick; `brand_overlay.apply_overlay` re-run with new anchor; new card |
 | 🚫 不用图 | metadata cleared of cover; pipeline continues with no feature image |
 | 🖼 看完整尺寸 | bot replies with original 2k PNG as document |

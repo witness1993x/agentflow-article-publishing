@@ -2,7 +2,7 @@
 
 ## 1. Current Product Stage
 
-The repo is past the v0.1 MVP skeleton. The TG-driven review pipeline is the canonical path and most main-loop sprints have closed:
+The repo is past the v0.1 MVP skeleton. The review pipeline is now Lark-first through OpenClaw, with Telegram kept as mobile / fallback. The state machine remains the single source of truth, and most main-loop sprints have closed:
 
 - S0.1 skill harness: review complete
 - S0.2 env / config bootstrap: review complete
@@ -14,7 +14,7 @@ The repo is past the v0.1 MVP skeleton. The TG-driven review pipeline is the can
 - S6 Medium manual mark loop: review complete
 - S7 `/list` extensions: partially implemented
 
-The TG bot exposes callback prefixes `A` / `B` / `C` / `D`, plus `PD`, `I`, `L`, `PR`, `P`, and `S`.
+The Lark bridge exposes 30 `lark_*` commands through `/api/commands`; write / spawn commands require `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`. The TG fallback bot still exposes callback prefixes `A` / `B` / `C` / `D`, plus `PD`, `I`, `L`, `PR`, `P`, and `S`.
 
 Do not describe this repo as "early skeleton" or use the old 5-state model unless the current code regresses to that.
 
@@ -22,15 +22,15 @@ Do not describe this repo as "early skeleton" or use the old 5-state model unles
 
 ```text
 cron `af hotspots`
-  -> Gate A
-  -> A:write
+  -> Gate A (Lark card + TG fallback)
+  -> lark_gate_a_write / A:write
   -> `af write` + `af fill`
-  -> Gate B
-  -> B:approve
-  -> operator runs `af image-gate`
-  -> Gate C
-  -> C:approve or C:skip
-  -> Gate D channel selection
+  -> Gate B (Lark input box / @bot edit follow-up supported)
+  -> lark_gate_b_approve / B:approve
+  -> operator runs `af image-gate` or Lark triggers image regen
+  -> Gate C (image-review prompt can feed `--cover-description`)
+  -> lark_gate_c_approve / C:approve or skip
+  -> Gate D channel selection (Lark + TG fallback)
   -> dispatch preview
   -> PD:dispatch
   -> ready_to_publish
@@ -63,6 +63,7 @@ Use this source-of-truth map:
 | timeout state | `~/.agentflow/review/timeout_state.json` | per-gate clocks |
 | audit log | `~/.agentflow/review/audit.jsonl` | append-only audit |
 | pending edits | `~/.agentflow/review/pending_edits.json` | active TG edit sessions |
+| Lark pending edits | `~/.agentflow/memory/events.jsonl` (`lark_edit_pending`, `lark_locked_edit_pending`, `lark_pending_edit_consumed`) | Lark @bot follow-up slots; consumed once |
 | auth grants | `~/.agentflow/review/auth.json` | per-uid action grants |
 | review config | `~/.agentflow/review/config.json` | TG chat id and knobs |
 
@@ -98,7 +99,10 @@ Current `STATE_*` set in `backend/agentflow/agent_review/state.py`:
 The current image path must preserve these edges:
 
 - `B:approve` sends an image picker prompt and leaves state at `draft_approved`.
+- `lark_gate_b_edit` can apply inline input (`comment` / `prompt` / `text`) immediately via `af edit --post-review`; without input it registers a pending Lark edit slot.
+- `lark_apply_pending_edit` consumes the latest pending Lark edit slot once, then runs `af edit --post-review`.
 - `af image-gate <aid> --mode cover-only|cover-plus-body` generates image assets and posts Gate C.
+- `lark_gate_c_regen` can pass review text into `af image-gate --cover-description`.
 - `af image-gate <aid> --mode none` transitions to `image_skipped` and immediately calls `triggers.post_gate_d(aid)`.
 - `C:approve` transitions to `image_approved` and spawns Gate D.
 - `C:skip` transitions to `image_skipped` and spawns Gate D.
@@ -114,6 +118,8 @@ Required in real-key mode:
 - `ATLASCLOUD_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_REVIEW_CHAT_ID`
+- `AGENTFLOW_AGENT_BRIDGE_TOKEN` for Lark/OpenClaw command bridge
+- `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` for Lark/OpenClaw event rendering
 
 Optional or on-demand:
 

@@ -16,6 +16,29 @@ runtime code parity.
 
 - _no changes yet_
 
+## [1.1.2] — 2026-05-06
+
+- Lark `refill` is now a real Gate B write path: it transitions the article
+  back to `drafting` and spawns `af fill <article_id> --skeleton-only
+  --auto-pick --json` instead of deferring operators to Telegram.
+- `af fill` accepts `--skeleton-only --auto-pick` (plus `--ignore-prefs`)
+  so existing skeleton drafts can be refilled with the same default-picking
+  behavior used by `af write --auto-pick`.
+- Lark card input boxes are now accepted on Gate B edit and Gate C image
+  regeneration callbacks. Gate B can submit inline section/meta edit text;
+  Gate C can pass image-review feedback into `af image-gate
+  --cover-description`.
+- `af edit --post-review` lets Lark inline edits return to Gate B after the
+  edit command finishes, closing the "submitted but no fresh review card"
+  gap.
+- Added `lark_apply_pending_edit` so OpenClaw can forward @-bot follow-up
+  messages into the latest pending Gate B / locked-takeover edit slot.
+- Marked edit-spawning Lark commands as dangerous and made pending edit slots
+  one-shot so follow-up messages cannot reuse the same pending request.
+- Added `AGENTFLOW_LARK_APP_PRIMARY=true` notification routing: legacy
+  Lark Custom Bot `notify_*` calls now emit `notify.*` agent events for
+  OpenClaw instead of posting to the old webhook.
+
 ## [1.1.1] — 2026-05-06
 
 **Full TG → Lark callback parity (27 actions across Gate A/B/C/D/L).**

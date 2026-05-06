@@ -2026,18 +2026,40 @@ def write(
 
 @cli.command("fill", help="Fill all sections of a skeleton-only draft.")
 @click.argument("article_id")
-@click.option("--title", "chosen_title", type=int, required=True)
-@click.option("--opening", "chosen_opening", type=int, required=True)
-@click.option("--closing", "chosen_closing", type=int, required=True)
+@click.option("--title", "chosen_title", type=int, required=False)
+@click.option("--opening", "chosen_opening", type=int, required=False)
+@click.option("--closing", "chosen_closing", type=int, required=False)
+@click.option(
+    "--skeleton-only",
+    is_flag=True,
+    default=False,
+    help="Explicitly fill the persisted skeleton for this article.",
+)
+@click.option(
+    "--auto-pick",
+    is_flag=True,
+    default=False,
+    help="Auto-pick title/opening/closing defaults before filling.",
+)
+@click.option(
+    "--ignore-prefs",
+    is_flag=True,
+    default=False,
+    help="Ignore ~/.agentflow/preferences.yaml and force 0/0/0 for --auto-pick.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def fill(
     article_id: str,
-    chosen_title: int,
-    chosen_opening: int,
-    chosen_closing: int,
+    chosen_title: int | None,
+    chosen_opening: int | None,
+    chosen_closing: int | None,
+    skeleton_only: bool,
+    auto_pick: bool,
+    ignore_prefs: bool,
     as_json: bool,
 ) -> None:
     from agentflow.agent_d2.main import fill_all_sections
+    from agentflow.shared import preferences as _prefs_mod
     from agentflow.shared.memory import append_memory_event
     from agentflow.shared.models import SkeletonOutput
 
@@ -2075,13 +2097,69 @@ def fill(
         except Exception:
             hotspot_id = ""
 
+    chosen_title_idx = 0
+    chosen_opening_idx = 0
+    chosen_closing_idx = 0
+    defaults_source = "hardcoded"
+    defaults_source_events: int | None = None
+    defaults_confidence: float | None = None
+    any_explicit_override = any(
+        v is not None for v in (chosen_title, chosen_opening, chosen_closing)
+    )
+    if auto_pick:
+        if not ignore_prefs and not any_explicit_override:
+            prefs_data = _prefs_mod.get_defaults()
+            picked = _prefs_mod.pick_write_indices(prefs_data)
+            write_section = (
+                prefs_data.get("write") if isinstance(prefs_data, dict) else None
+            )
+            if any(v is not None for v in picked.values()):
+                defaults_source = "preferences"
+                if isinstance(write_section, dict):
+                    defaults_source_events = write_section.get("_source_events")
+                    defaults_confidence = write_section.get("_confidence")
+                if picked["title_idx"] is not None:
+                    chosen_title_idx = int(picked["title_idx"])
+                if picked["opening_idx"] is not None:
+                    chosen_opening_idx = int(picked["opening_idx"])
+                if picked["closing_idx"] is not None:
+                    chosen_closing_idx = int(picked["closing_idx"])
+    elif not all(v is not None for v in (chosen_title, chosen_opening, chosen_closing)):
+        raise click.ClickException(
+            "Pass --title/--opening/--closing or use --auto-pick."
+        )
+
+    if chosen_title is not None:
+        chosen_title_idx = chosen_title
+        defaults_source = "hardcoded"
+    if chosen_opening is not None:
+        chosen_opening_idx = chosen_opening
+        defaults_source = "hardcoded"
+    if chosen_closing is not None:
+        chosen_closing_idx = chosen_closing
+        defaults_source = "hardcoded"
+
+    if skeleton_only and not as_json:
+        click.echo("using persisted skeleton", err=True)
+    if auto_pick and not as_json:
+        if defaults_source == "preferences":
+            click.echo(
+                f"using historical default: title={chosen_title_idx} "
+                f"opening={chosen_opening_idx} closing={chosen_closing_idx} "
+                f"(based on {defaults_source_events} past runs, "
+                f"confidence {defaults_confidence})",
+                err=True,
+            )
+        elif not ignore_prefs and not any_explicit_override:
+            click.echo("no preferences yet, using 0/0/0", err=True)
+
     try:
         draft = asyncio.run(
             fill_all_sections(
                 skeleton=skeleton,
-                chosen_title=chosen_title,
-                chosen_opening=chosen_opening,
-                chosen_closing=chosen_closing,
+                chosen_title=chosen_title_idx,
+                chosen_opening=chosen_opening_idx,
+                chosen_closing=chosen_closing_idx,
                 style_profile=_load_style_profile_safe(),
                 article_id=article_id,
             )
@@ -2098,9 +2176,9 @@ def fill(
         meta.update(
             {
                 "status": "draft_ready",
-                "chosen_title_index": chosen_title,
-                "chosen_opening_index": chosen_opening,
-                "chosen_closing_index": chosen_closing,
+                "chosen_title_index": chosen_title_idx,
+                "chosen_opening_index": chosen_opening_idx,
+                "chosen_closing_index": chosen_closing_idx,
                 "updated_at": _now_iso(),
             }
         )
@@ -2114,10 +2192,11 @@ def fill(
         article_id=article_id,
         hotspot_id=hotspot_id,
         payload={
-            "chosen_title_index": chosen_title,
-            "chosen_opening_index": chosen_opening,
-            "chosen_closing_index": chosen_closing,
-            "mode": "manual_refill",
+            "chosen_title_index": chosen_title_idx,
+            "chosen_opening_index": chosen_opening_idx,
+            "chosen_closing_index": chosen_closing_idx,
+            "mode": "auto_skeleton_refill" if auto_pick else "manual_refill",
+            "defaults_source": defaults_source,
         },
     )
 
@@ -2159,6 +2238,11 @@ def fill(
 
     draft_dict = draft.to_dict()
     if as_json:
+        draft_dict["chosen_title_index"] = chosen_title_idx
+        draft_dict["chosen_opening_index"] = chosen_opening_idx
+        draft_dict["chosen_closing_index"] = chosen_closing_idx
+        draft_dict["defaults_source"] = defaults_source
+        draft_dict["defaults_source_events"] = defaults_source_events
         _emit_json(draft_dict)
         return
 
@@ -2191,6 +2275,12 @@ def fill(
 @click.option("--command", "edit_command", type=str, required=False, default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option(
+    "--post-review",
+    is_flag=True,
+    default=False,
+    help="After editing, post a fresh Gate B review card.",
+)
+@click.option(
     "--from-file",
     "from_file",
     type=click.Path(exists=True, dir_okay=False),
@@ -2205,6 +2295,7 @@ def edit(
     paragraph_index: int | None,
     edit_command: str | None,
     as_json: bool,
+    post_review: bool,
     from_file: str | None,
 ) -> None:
     overrides = _load_yaml_overrides(from_file)
@@ -2277,6 +2368,12 @@ def edit(
         )
 
         section_dict = new_section.to_dict()
+        if post_review:
+            try:
+                from agentflow.agent_review import triggers as _triggers
+                _triggers.post_gate_b(article_id)
+            except Exception as _err:  # pragma: no cover
+                click.echo(f"(Gate B auto-post skipped: {_err})", err=True)
         if as_json:
             _emit_json(section_dict)
             return
@@ -2340,6 +2437,13 @@ def edit(
         hotspot_id=hotspot_id,
         payload={"target": target, "command": edit_command},
     )
+
+    if post_review:
+        try:
+            from agentflow.agent_review import triggers as _triggers
+            _triggers.post_gate_b(article_id)
+        except Exception as _err:  # pragma: no cover
+            click.echo(f"(Gate B auto-post skipped: {_err})", err=True)
 
     if as_json:
         _emit_json({"target": target, "old": old_value, "new": new_value})

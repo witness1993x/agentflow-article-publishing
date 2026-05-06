@@ -405,6 +405,12 @@ def image_cover_add(
     default="2k",
     show_default=True,
 )
+@click.option(
+    "--cover-description",
+    type=str,
+    default=None,
+    help="Override the cover placeholder prompt before generation.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def image_gate(
     article_id: str,
@@ -412,6 +418,7 @@ def image_gate(
     cover_style: str,
     cover_size: str,
     cover_resolution: str,
+    cover_description: str | None,
     as_json: bool,
 ) -> None:
     from agentflow.agent_d2.image_generator import generate_images
@@ -480,18 +487,24 @@ def image_gate(
             summary["actions"].append(f"Gate D auto-post skipped: {_err}")
     else:
         # Ensure cover placeholder exists at index 0
-        if not any(p.role == "cover" for p in draft.image_placeholders):
+        cover = next((p for p in draft.image_placeholders if p.role == "cover"), None)
+        if cover is None:
             draft.image_placeholders.insert(
                 0,
                 ImagePlaceholder(
                     id=f"{draft.article_id}_cover",
-                    description=_COVER_DEFAULT_DESCRIPTION,
+                    description=cover_description or _COVER_DEFAULT_DESCRIPTION,
                     section_heading="",
                     role="cover",
                 ),
             )
             save_draft(draft)
             summary["actions"].append("added cover placeholder")
+        elif cover_description:
+            cover.description = cover_description
+            cover.resolved_path = None
+            save_draft(draft)
+            summary["actions"].append("updated cover prompt from review feedback")
 
         skip_body = mode == "cover-only"
         try:
@@ -527,7 +540,7 @@ def image_gate(
     append_memory_event(
         "image_gate",
         article_id=article_id,
-        payload={"mode": mode},
+        payload={"mode": mode, "has_cover_description_override": bool(cover_description)},
     )
 
     if as_json:

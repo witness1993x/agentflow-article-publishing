@@ -265,9 +265,9 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_refill": {
         "scope": "review",
-        "description": "Phase 1 stub — returns a Lark card directing operator to TG; no state mutation.",
-        "timeout_seconds": 5,
-        "dangerous": False,
+        "description": "Gate B → spawn `af fill <article_id> --skeleton-only --auto-pick` in background.",
+        "timeout_seconds": 10,
+        "dangerous": True,
         "in_process": True,
     },
     # ----- v1.1.1 — Gate A handlers -----
@@ -302,9 +302,9 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
     },
     "lark_gate_b_edit": {
         "scope": "review",
-        "description": "Gate B → register an interactive-edit pending slot for the next @-bot message.",
+        "description": "Gate B → register or apply an edit; inline text can spawn `af edit --post-review`.",
         "timeout_seconds": 5,
-        "dangerous": False,
+        "dangerous": True,
         "in_process": True,
     },
     "lark_gate_b_diff": {
@@ -427,6 +427,13 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "description": "L → give up: transition article to draft_rejected.",
         "timeout_seconds": 5,
         "dangerous": False,
+        "in_process": True,
+    },
+    "lark_apply_pending_edit": {
+        "scope": "review",
+        "description": "Apply a Lark @-bot follow-up message to the latest pending edit slot.",
+        "timeout_seconds": 5,
+        "dangerous": True,
         "in_process": True,
     },
     # ----- v1.1.1 — generic defer -----
@@ -590,17 +597,24 @@ def _build_command_argv(req: CommandRequest) -> list[str]:
             argv.extend(["--closing", str(closing)])
         return argv
     if cmd == "fill":
-        return [
+        argv = [
             "fill",
             _str_param(params, "article_id", required=True) or "",
-            "--title",
-            str(_int_param(params, "title", required=True)),
-            "--opening",
-            str(_int_param(params, "opening", required=True)),
-            "--closing",
-            str(_int_param(params, "closing", required=True)),
             "--json",
         ]
+        if _bool_opt(options, "skeleton_only"):
+            argv.append("--skeleton-only")
+        if _bool_opt(options, "auto_pick"):
+            argv.append("--auto-pick")
+        if _bool_opt(options, "ignore_prefs"):
+            argv.append("--ignore-prefs")
+        if (title := _int_param(params, "title")) is not None:
+            argv.extend(["--title", str(title)])
+        if (opening := _int_param(params, "opening")) is not None:
+            argv.extend(["--opening", str(opening)])
+        if (closing := _int_param(params, "closing")) is not None:
+            argv.extend(["--closing", str(closing)])
+        return argv
     if cmd == "image_gate":
         argv = ["image-gate", _str_param(params, "article_id", required=True) or "", "--json"]
         if (mode := _str_param(params, "mode")):
@@ -611,6 +625,8 @@ def _build_command_argv(req: CommandRequest) -> list[str]:
             argv.extend(["--cover-size", cover_size])
         if (cover_resolution := _str_param(params, "cover_resolution")):
             argv.extend(["--cover-resolution", cover_resolution])
+        if (cover_description := _str_param(params, "cover_description")):
+            argv.extend(["--cover-description", cover_description])
         return argv
     if cmd == "preview":
         argv = ["preview", _str_param(params, "article_id", required=True) or "", "--json"]
@@ -706,6 +722,7 @@ def _run_lark_command_in_process(
         "lark_locked_critique": "locked_critique",
         "lark_locked_edit": "locked_edit",
         "lark_locked_give_up": "locked_give_up",
+        "lark_apply_pending_edit": "apply_pending_edit",
         # v1.1.1 — generic defer (operator carries gate label in payload.gate)
         "lark_defer": "defer",
     }

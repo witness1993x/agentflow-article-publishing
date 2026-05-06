@@ -1,4 +1,4 @@
-# Gate B — Draft Article Review (Telegram)
+# Gate B — Draft Article Review (Lark-first / TG fallback)
 
 **When fired:** after `af fill` completes (D2 finished, body has compliance
 score). Draft is paused before image generation. Cannot be skipped — long-form
@@ -11,7 +11,7 @@ worth the wait).
 
 ---
 
-## Message template (Markdown V2, two-message pattern)
+## Telegram message template (Markdown V2, two-message pattern)
 
 The draft is too long for one Telegram message (4096 char limit). The bot
 sends:
@@ -67,6 +67,43 @@ tags: {tags_joined}
 [ 📊 看 diff ]  [ ⏰ 推迟 2h ]
 ```
 
+## Lark / OpenClaw card layout
+
+Lark is the primary operator surface. Render the same summary as an
+interactive card, but use command payloads instead of Telegram `callback_data`:
+
+```json
+{
+  "article_id": "{article_id}",
+  "action": "gate_b_edit",
+  "payload": {
+    "section_index": 2,
+    "paragraph_index": 0,
+    "comment": "<textarea value>"
+  }
+}
+```
+
+Recommended buttons / inputs:
+
+```text
+[ ✅ 通过 ]        -> lark_gate_b_approve
+[ ✏️ 提交修改 ]    -> lark_gate_b_edit + payload.comment
+[ 🔁 重写/refill ] -> lark_refill or lark_gate_b_rewrite (dangerous)
+[ 🚫 拒绝 ]        -> lark_gate_b_reject
+[ 📊 看 diff ]     -> lark_gate_b_diff
+[ ⏰ 推迟 ]         -> lark_defer payload.gate="B"
+```
+
+Input compatibility:
+- If the card has an inline textarea, send the text as `payload.comment`
+  (also accepted: `edit_text`, `prompt`, `feedback`, `text`).
+- If the operator @-mentions the bot later, OpenClaw must call
+  `lark_apply_pending_edit` with `payload.text`. The backend consumes the
+  latest pending slot once and runs `af edit --post-review`.
+- Edit-spawning Lark commands are `dangerous=true`; the bridge must opt in
+  with `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`.
+
 ## callback_data values
 
 | Button | callback_data |
@@ -79,9 +116,11 @@ tags: {tags_joined}
 | ⏰ 推迟 2h | `B:defer:{short_id}:hours=2` |
 
 After ✏️ or 🔁, the bot enters a multi-turn flow:
-- ✏️ 编辑 → bot replies "回复想改的位置 (title / subtitle / 第 N 段 / 全部)
+- ✏️ 编辑 → TG replies "回复想改的位置 (title / opening / closing / 第 N 段)
   + 改写指令"; user replies; bot calls `af edit <article_id> --section <N>
-  --instruction "<text>"` and re-posts an updated card.
+  --command "<text>" --post-review` and re-posts an updated card. Lark either
+  submits inline `payload.comment` directly or uses `lark_apply_pending_edit`
+  for the @bot follow-up.
 - 🔁 重写 → bot calls `af fill <article_id>` again with the same
   title/opening/closing indices but bumps a `rewrite_round` counter;
   after 2 rewrites, escalates to 🔴 (forces human edit, no further auto-rewrite).
@@ -103,8 +142,8 @@ Soft blockers (✅ enabled but warning shown):
 | User action | Backend effect |
 |---|---|
 | ✅ 通过 | metadata.status = `draft_approved`; gate_history append; daemon advances to Gate C |
-| ✏️ 编辑 | Multi-turn edit; new version posted, ✅/🚫 again |
-| 🔁 重写 | `af fill` re-run; rewrite_round++; if =2, escalate to manual |
+| ✏️ 编辑 | Multi-turn / inline edit; `af edit --post-review`; new version posted, ✅/🚫 again |
+| 🔁 重写/refill | `af fill` / `af fill --skeleton-only --auto-pick` re-run; rewrite_round++; if =2, escalate to manual |
 | 🚫 拒绝 | metadata.status = `draft_rejected`; article archived; pipeline halts |
 | 📊 看 diff | Bot sends a unified diff against last reviewed version |
 | ⏰ 推迟 2h | Re-post in 2h |
