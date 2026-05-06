@@ -474,12 +474,14 @@ def notify_draft_ready(
     ``mirror_url`` (a read-only mirror — typically the dashboard's
     draft preview, or the operator's intranet markdown server).
 
-    Audit (Gate B remains the action surface — Lark is read-only). When
-    ``mirror_url`` is empty, the mirror button is omitted.
+    In legacy Custom Bot mode this remains push-only. In Lark App primary
+    mode (``AGENTFLOW_LARK_APP_PRIMARY=true``), this function emits a
+    ``notify.draft_ready`` agent event so OpenClaw can render the actionable
+    Gate B card.
 
     Behavior is gated by ``AGENTFLOW_LARK_DRAFT_FANOUT`` (default off).
-    Gate B's TG card is the source of truth and always fires; this
-    function is a parallel fan-out, never a replacement.
+    Gate B state transitions remain the source of truth; the notification
+    surface can be Lark-first with TG as fallback.
     """
     if _lark_app_primary():
         md = draft_md

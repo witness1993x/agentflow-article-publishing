@@ -222,7 +222,7 @@ registerTool({
 
 ## Gate B 卡片内容
 
-OpenClaw plugin 在收到 AgentFlow 端 `notify_draft_ready` 事件时（v1.1.1 会把这个事件桥接过去；v1.1.0 仍只在 TG / Custom Bot webhook 发），渲染一张 interactive card，按钮的 `value.action` 字段就是上面命令名（去掉 `lark_` 前缀的）：
+OpenClaw plugin 在收到 AgentFlow 端 `notify.draft_ready` 事件（`AGENTFLOW_LARK_APP_PRIMARY=true`）或 `draft_pending_review` state transition 时，渲染一张 interactive card。按钮的 `value.action` 字段就是上面命令名（去掉 `lark_` 前缀的）：
 
 ```json
 {
@@ -248,6 +248,15 @@ OpenClaw plugin 在收到 AgentFlow 端 `notify_draft_ready` 事件时（v1.1.1 
           "tag": "button",
           "text": { "tag": "plain_text", "content": "🔍 看审计" },
           "value": { "action": "view_audit", "article_id": "<id>" }
+        },
+        {
+          "tag": "button",
+          "text": { "tag": "plain_text", "content": "✏️ 提交修改" },
+          "value": {
+            "action": "gate_b_edit",
+            "article_id": "<id>",
+            "payload": {"section_index": 2, "comment": "<textarea value>"}
+          }
         }
       ]
     }
@@ -305,6 +314,7 @@ AGENTFLOW_AGENT_EVENT_WEBHOOK_TOKEN=<shared-secret>
 | `agent.command.completed` `payload.command == "image-gate"` | Gate C regen / relogo 完成 | 更新原 Gate C 卡片或发新图预览 |
 | `agent.command.completed` `payload.command == "publish"` | Gate D 发布完成 | 发 publish 结果播报 |
 | `agent.command.failed` | 任何子进程失败 | 发红色错误卡，附 stderr 摘要 |
+| `notify.draft_ready` / `notify.hotspots_digest` / `notify.publish_ready` / `notify.dispatch_result` / `notify.spawn_failure` | `AGENTFLOW_LARK_APP_PRIMARY=true` 时的 Lark-first 通知 | OpenClaw 直接渲染对应 Lark 卡片，不走 Custom Bot |
 | `lark_callback` | 任何 Lark callback 落 memory log（telemetry） | 一般忽略，仅用于审计 |
 
 **关键设计**：state 变化 = OpenClaw 在 Lark 渲新卡的契机。AgentFlow 的
@@ -366,7 +376,7 @@ async function renderGateBCard(articleId) {
 ## 版本路线
 
 - ✅ **v1.1.0** — 基础 callback bridge（6 个 lark_* 命令：approve_b / reject_b / takeover / view_audit / view_meta / refill stub）
-- ✅ **v1.1.1（当前）** — 全 27 个 TG callback 动作 Lark 端 parity（Gate A / B / C / D / L 全覆盖）+ event webhook 文档化
-- ⏭ **v1.1.2** — Phase 2 启动 refill 真实写路径（v1.1.0 stub 升级）；OpenClaw 一侧实现 conversational follow-up（@-bot 接 `lark_gate_b_edit` / `lark_locked_edit` 留下的 pending 槽位）
+- ✅ **v1.1.1** — 全 27 个 TG callback 动作 Lark 端 parity（Gate A / B / C / D / L 全覆盖）+ event webhook 文档化
+- ✅ **v1.1.2（当前）** — Lark-first UX：`lark_refill` 真实写路径、输入框 / @bot pending edit 闭环、30 个 `lark_*` 命令、`AGENTFLOW_LARK_APP_PRIMARY=true` 通知迁移
 - ⏭ **Phase 2 doc** — 把整篇稿件作为飞书云文档承载（替代 v1.0.30 的截断 + 镜像链接），需 `docx:document` / `drive:drive` 权限
 - Phase 2：把整篇稿件作为飞书云文档发到群（替代 v1.0.30 的截断 + 镜像链接）

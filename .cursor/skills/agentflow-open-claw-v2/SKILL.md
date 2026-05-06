@@ -1,6 +1,6 @@
 ---
 name: agentflow-open-claw-v2
-description: AgentFlow article-publishing OpenClaw skill. Default entry is first deployment/onboarding: verify runtime repo, venv, .env, ~/.agentflow, then guide through af bootstrap/onboard/topic-profile/doctor. Use also for Gate A/B/C/D, review-daemon, af CLI, image-gate, publish-mark, PR:mark, PD:dispatch, or state-transition work. No runtime source is included.
+description: AgentFlow article-publishing OpenClaw skill. Default entry is first deployment/onboarding: verify runtime repo, venv, .env, ~/.agentflow, then guide through af bootstrap/onboard/topic-profile/doctor. Use also for Lark-first Gate A/B/C/D review, Telegram fallback, review-daemon, af CLI, image-gate, publish-mark, PR:mark, PD:dispatch, or state-transition work. No runtime source is included.
 ---
 
 # AgentFlow Open Claw v2.7
@@ -13,7 +13,7 @@ description: AgentFlow article-publishing OpenClaw skill. Default entry is first
 - `references/`：长文档、模板、示例，按需读取。
 - `assets/`：可作为 `af topic-profile ... --from-file` 参数传入的 YAML 模板。
 
-包内不放 `backend/agentflow/` 源码。OpenClaw/Cursor/Claude Code 只是 skill harness；它们加载本 skill 后通过 `af` CLI 操作 runtime。不要为了 skill 额外启动守护进程；`af review-daemon` 只属于 Telegram review 业务运行面。
+包内不放 `backend/agentflow/` 源码。OpenClaw/Cursor/Claude Code 是 skill / agent harness；它们加载本 skill 后通过 `af` CLI 或 AgentFlow bridge 操作 runtime。不要为了 skill 额外启动守护进程；`af review-daemon` 属于 TG fallback / 本地审稿运行面，Lark-first 部署还需要 OpenClaw event webhook + command bridge。
 
 ## Default Entry: First Deployment
 
@@ -32,7 +32,7 @@ description: AgentFlow article-publishing OpenClaw skill. Default entry is first
 
 - **Pipeline**: D0 风格 → D1 hotspots → Gate A 选题 → D2 写作 → Gate B 草稿 → D2.5 image → Gate C 封面 → Gate D 渠道 → D3 preview → D4 publish → D4.5 mark/stats
 - **State machine**: 14 STATE_* (`backend/agentflow/agent_review/state.py`)。**不是 5 个**——5-state "approved/skeleton/draft/preview/published" 模型已陈旧
-- **入口**: `af` CLI + Telegram bot (prefix A/B/C/D + PD/I/L/PR/P/S) + 7 Claude Code skills + cursor skill
+- **入口**: `af` CLI + Lark App / OpenClaw bridge (`lark_*` commands, event webhook) + Telegram fallback bot (prefix A/B/C/D + PD/I/L/PR/P/S) + Claude/Cursor skills
 - **存储**: `~/.agentflow/` 用户数据；`backend/agentflow/` 框架 (brand-neutral)
 
 ## 3 条 hard rules
@@ -44,9 +44,10 @@ description: AgentFlow article-publishing OpenClaw skill. Default entry is first
 ## Progressive disclosure
 
 - 改动史 → `~/Desktop/agentflow-status.md` (最权威, 7 批)
-- callback → grep `_route` / `_ACTION_REQ` in `backend/agentflow/agent_review/daemon.py`
+- TG callback → grep `_route` / `_ACTION_REQ` in `backend/agentflow/agent_review/daemon.py`
+- Lark callback → `backend/agentflow/agent_review/lark_callback.py` + `backend/agentflow/agent_review/web.py`
 - state 图 → `backend/agentflow/agent_review/templates/state_machine.md`
-- TG flow → `docs/flows/TG_BOT_FLOWS.md`
+- TG flow → `docs/flows/TG_BOT_FLOWS.md`; Lark/OpenClaw → `docs/openclaw_plugin_integration.md`
 - 场景 → `docs/flows/USER_SCENARIOS.md`
 - 长参考 → `references/reference.md`
 
@@ -73,7 +74,7 @@ To **actually run** AgentFlow you need:
 
 1. **Runtime repo** (`agentflow-framework-{YYYYMMDD}-slim.zip`，含 `backend/agentflow/` 全部 Python 代码 + `pyproject.toml`)
 2. **Python venv** (`cd backend && python3 -m venv .venv && pip install -e .`)
-3. **`.env`** (mock-only 需 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_REVIEW_CHAT_ID` + `MOCK_LLM=true`；real-key 加 LLM/embedding/Atlas 等)
+3. **`.env`** (mock-only 需 `MOCK_LLM=true`；TG fallback 需 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_REVIEW_CHAT_ID`；Lark-first 需 bridge/event webhook token 与 OpenClaw 侧配置；real-key 加 LLM/embedding/Atlas 等)
 4. **`~/.agentflow/`** 数据目录（首次跑 `af review-init` 自动创建）
 
 Skill 仅在 LLM/agent 思考"在这个 repo 里要做什么"时被加载。**没有 repo，skill 也"无 act 可做"**。
@@ -86,7 +87,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 |---|---|---|
 | `<repo>/backend/agentflow/` | 框架代码 | 完全无法运行；先 unzip slim |
 | `<repo>/backend/.venv/bin/af` | CLI 入口 | 任何 `af *` 命令都失败；先 `pip install -e .` |
-| `<repo>/backend/.env` | 凭据 | TG bot 不会 connect；先 cp template + 填 token |
+| `<repo>/backend/.env` | 凭据 | TG/Lark/LLM bridge 不会 connect；先 cp template + 用 onboard/bootstrap 补齐 |
 | `~/.agentflow/review/last_heartbeat.json` | daemon 心跳 | `af doctor` 第 13 项报 stale；先 `af review-daemon` 起来 |
 
 如 user 在云端报 "agentflow not found / af command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
@@ -106,6 +107,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 | Profile derive | `af topic-profile derive --profile <id>` | 手填 keyword_groups / do / dont |
 | Style 导入 | `af learn-from-handle <handle> --profile <id>` | 手编 `~/.agentflow/style_profile.yaml` |
 | TG bot 首次 chat_id 绑定 | TG 发 `/start`（daemon 自动 capture） | 手编 `~/.agentflow/review/config.json` |
+| Lark App 主路径 | 配 `AGENTFLOW_AGENT_BRIDGE_TOKEN` / `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` / `AGENTFLOW_LARK_APP_PRIMARY=true`；写操作需 `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true` | 继续扩 Custom Bot webhook 或把 Lark 当 TG 镜像 |
 | Daemon 启动 | `af review-daemon` (前台 / systemd / launchd) | `python -m agentflow.cli.commands review-daemon` |
 | Cron 定时 | `af review-cron-install --times "..."` | 手写 launchd plist / systemd timer unit |
 | 健康度自检 | `af doctor` (13 probe + cache) | grep `~/.agentflow/review/last_heartbeat.json` 自己写逻辑 |
@@ -120,9 +122,9 @@ Before this skill provides useful guidance, the following must exist on disk:
 4. ❌ **手编 `~/.agentflow/topic_profiles.yaml`** — 用 `af topic-profile {init -i, update --from-file, suggest, derive}`；这些命令会 audit + materialize_user_topic_profiles + memory_event 写入
 5. ❌ **Framework 代码 hard-code 品牌词**（chainstream / web3 / crypto / kafka / 具体产品名）— framework 是 brand-neutral，brand 内容只从 `publisher_account` 块（per-profile yaml）读
 6. ❌ **`force=True` 从 STATE_PUBLISHED rewind** — `triggers.post_publish_ready` 已加 guard；任何 force-rewind 都要 explicit decision + audit
-7. ❌ **Daemon callback handler 内 sync LLM 调用** — TG 6s `answer_callback_query` SLA；任何 LLM 调必须 spawn subprocess + 立即 ack
+7. ❌ **Callback handler 内 sync LLM 调用** — TG / Lark 都要快速 ack；任何 LLM 调必须 spawn subprocess + 立即回卡
 8. ❌ **TG 含未 escape MarkdownV2 chars 不传 `parse_mode=None`** — `_ * [ ] ( ) ~ ` > # + - = | { } . !` 全是 reserved；要么调 `_render.escape_md2(...)`，要么 `parse_mode=None`
-9. ❌ **`pending_edits.register` 在 `_handle_message` slash command dispatch 之后** — slash 命令必须排在 `pending_edits.take()` 之前，否则 `/list` / `/help` 等会被 edit-reply 吃掉
+9. ❌ **编辑 follow-up 不做一次性消费** — TG `pending_edits.take()` / Lark `lark_pending_edit_consumed` 都必须防止同一槽位被重复消息复用
 10. ❌ **`_write_heartbeat` 包外 try-except 之外** — 心跳 best-effort，磁盘满 / 权限错不能让 poll loop 崩；任何 IO 失败都 swallow
 11. ❌ **信任 LLM 输出无人审 fact-check** — D2 fill 在 product_facts 之外可能编造：历史事件 / 数据点 / 时间戳 / 产品发布 / 漏洞日期 / 引用人物。skill 应主动提示 user "section X 引用了 'Q1 DuckDB 漏洞'，product_facts 没声明，请核实事实或加 source URL"。任何**未 grounded** 的具体数字 / 日期 / 公司名都是潜在 hallucination。
 
@@ -221,8 +223,8 @@ AI:   "再跑 `af bootstrap --next-step --json`"
 
 ```
 clean (≥0.85 + 0 violations)         → B:approve → image-gate
-1 节有问题 (1-2 violations)            → B:edit 该节
-1 节崩坏 (compliance <0.5)             → B:rewrite (round 1; max 2)
+1 节有问题 (1-2 violations)            → B:edit 该节；Lark 可用输入框 comment 或 @bot → lark_apply_pending_edit
+1 节崩坏 (compliance <0.5)             → B:rewrite / lark_refill (dangerous opt-in, max 2 rewrite)
 多节崩坏                              → B:reject 或 escalate to L:* (round 3+ → drafting_locked_human)
 LLM 编造关键事实                        → ✏️ edit + 加 source URL 或删除虚构段
 ```
