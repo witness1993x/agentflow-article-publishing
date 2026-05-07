@@ -1,8 +1,8 @@
 # BlogFlow TG → Lark 迁移规约（Parity + Independence）
 
 Date: 2026-05-07
-Owner: 待指派
-Status: Proposal · 等待 gap 修补范围确认
+Owner: lark-parity branch (fork: agentflow-lark-parity)
+Status: **Phase 1 COMPLETE · Phase 2 happy-path VERIFIED · See §11 for completion report**
 
 ---
 
@@ -381,3 +381,70 @@ phase 1 完成后需新增/更新：
 ## 10. 下一步
 
 等用户对 D-1 ~ D-5 拍板。phase 1 步骤 1.1 + 1.2（IND-1/IND-2/IND-3）是可以**今天就动手**的低风险改造（只增字段、不改既有逻辑），其余等决策后排期。
+
+---
+
+## 11. Phase 1 完工报告（2026-05-07 当日完成）
+
+### 11.1 交付概览
+
+按默认决策（D-1=A 硬 fork / D-2=blogflow / D-3=phase 1 上 lark_operators / D-4=不要 TG 移动 fallback / D-5=phase 3 延后）执行，多 agent 并行 + 串行混合协同完成。
+
+- **fork 仓**：`~/Desktop/experimental/medium&blog_posting_agent/agentflow-lark-parity/`，分支 `lark-parity`，从主仓 v1.1.9 + WIP blogflow rename 起点
+- **commit 链**：`3106718` 起点 snapshot → `<wave1>` 基础层 → `<wave2>` gap 实现 → `01d760a` Wave 4 e2e
+- **测试基线**：230 → **303** passed（73 个新增测试，0 既有 regression）
+
+### 11.2 Wave 1 · 基础层（4 agent 并行）
+
+| Wave 1 步骤 | 文件 | 测试 |
+|---|---|---|
+| **IND-1** `gate_history` 双轨 schema | `state.py` + `templates/state_machine.md` + `templates/callback_data_schema.md` | `test_lark_schema_dual_track.py` (5) |
+| **IND-2** `short_id.attach_lark_card` | `short_id.py` | 同上 |
+| **IND-3** `is_authorized_open_id` fail-closed + `lark_operators` 段 + 4 CLI 命令 | `auth.py` + `cli/review_commands.py` | `test_auth_lark_operators.py` (7) |
+| **IND-6** `claim/find/release_active_session_lark` + `migrate_session_schema_v2` | `topic_profile_lifecycle.py` | `test_profile_session_lark_schema.py` (5) |
+| **GAP-NOTIFY** notify.\* 渲染契约 | `docs/flows/LARK_NOTIFY_CARDS.md`（新，255 行）+ `lark_review_cards.md` 顶部交叉引用 | (文档，无单测) |
+
+### 11.3 Wave 2 · Gap 实现（4 agent 串行）
+
+每个 agent 受严格 prompt 约束（`is_authorized_open_id` 而非旧 `is_lark_authorized` / 关键词去歧义 / false-positive 守卫）。
+
+| Wave 2 步骤 | 新增触点 | 测试 |
+|---|---|---|
+| **GAP-S** Suggestions 整族 | 2 张卡 + 4 命令 + `_authorize_or_deny_v2` + `_LARK_ACTION_REQ` 表 + `_SUGGESTION_HANDLERS` 早期路由 | `test_lark_suggestions.py` (8) |
+| **GAP-P2** Profile 多轮追问（daemon-driven） | `review.profile_setup_card` 增 question 字段 + `lark_profile_advance` 命令 + `_PROFILE_HANDLERS` 早期路由 + `notify.profile_setup_done` 真实 emit | `test_lark_profile_advance.py` (9) |
+| **GAP-CHROME** 12 operator 意图 | `_CHROME_INTENTS` + `_CHROME_VERB_PATTERNS` + 12 chrome handlers + 7 emit helpers + 12 lark_chrome_\* 命令 + `LARK_OPERATOR_INTENTS.md` | `test_lark_chrome_intents.py` (31，含 6 false-positive 守卫) |
+| **GAP-AUDIT-LIST** | `review.audit_list_card` + `_handle_view_audit_recent` + `_AUDIT_HANDLERS` 早期路由 + 刷新/仅看失败按钮 | `test_lark_audit_list.py` (7) |
+
+### 11.4 Wave 4 · e2e 验证
+
+`backend/tests/test_e2e_lark_pure.py`（673 行，1 个综合 test）：
+
+模拟操作员 alice (open_id=ou_e2e_alice, actions=[\"\\*\"])，从 D1 hotspot 起，依次：
+
+1. **Gate A** → `lark_gate_a_write` (slot=0) → mocked `_spawn_async` 同步发出 Gate B 卡
+2. **Gate B** → `lark_gate_b_approve` → state `draft_approved` → mocked image picker spawn
+3. **Image Picker** → `lark_image_gate_cover_only` → state `image_pending_review`
+4. **Gate C** → `lark_gate_c_approve` → state `image_approved` → Gate D 卡
+5. **Gate D** → `lark_gate_d_toggle("medium")` + `lark_gate_d_confirm` → mocked publish dispatch → state `published`
+
+**TG 独立性 sentinel**：替换 `tg_client.send_message / send_photo / send_document / send_long_text / answer_callback_query / edit_message_reply_markup / edit_message_text / get_me / get_updates` 为 raise-on-call 哨兵。**测试结尾 `tg_violations == []`**——零 TG 调用。
+
+**结论**：Phase 2 happy-path 独立性 **已验证**——`TELEGRAM_BOT_TOKEN` 不存在、`AGENTFLOW_LARK_APP_PRIMARY=true` 时，文章可以全程 D1 → published 走 Lark，零 TG 路径泄漏。
+
+### 11.5 已知遗留（不影响 Phase 1，列入 Phase 2 后续）
+
+| ID | 项 | 说明 |
+|---|---|---|
+| **L-1** | IND-4 import-time 独立性 | `triggers.py:30` 仍无条件 `import tg_client`。运行时 sentinel 已证明零调用，但 module load 仍依赖 SDK 存在。修法：lazy import to inside-function。被刻意推迟（多函数引用，独立 PR） |
+| **L-2** | Profile yaml 实际 mutation | GAP-P2 答案落 `session.collected[]`，未回写 `topic_profiles.yaml`。`build_patch_from_answers` 存在但 key 命名不匹配（`publisher_account.brand` 点路径 vs 友好 slot 名 `brand`）。需补一层翻译 |
+| **L-3** | `chrome_defer` 不真正 schedule | TG 的 `_schedule_deferred_repost` 未在 chrome 路径调用，只 ack + 写 audit memory。需 wire 到现有 deferred-repost store |
+| **L-4** | 旧 `_authorize_or_deny`（fail-open via `is_lark_authorized`）仍在用 | 现存 ~30 个 lark_callback handler 走旧路径。新增 v2 handler 都用 `_authorize_or_deny_v2`，但**全量迁移**未做。Phase 2 步骤 2.x |
+| **L-5** | `blogflow doctor --fresh` 无 TG token 验证 | 在 pytest 范围之外，需要 CLI/Linux box 手验。Phase 2 §6.2 acceptance |
+
+### 11.6 给主仓的合并建议
+
+- 不建议直接 squash merge 进 `agentflow-article-publishing`：fork 当前 73 个新增测试 + 4 个新文件大块写入，PR 会很大。建议**分批 cherry-pick**：先合 Wave 1（基础 schema 演进，影响面最小），再分别合 GAP-S / GAP-P2 / GAP-CHROME / GAP-AUDIT-LIST 四个独立 PR。
+- e2e 测试（Wave 4）作为最后一个 PR 合，标志 phase 1 完工。
+- L-1 ~ L-5 单独立项进 Phase 2 排期。
+
+
