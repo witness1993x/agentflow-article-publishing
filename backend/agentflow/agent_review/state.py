@@ -114,6 +114,8 @@ def transition(
     decision: str,
     tg_chat_id: int | None = None,
     tg_message_id: int | None = None,
+    lark_chat_id: str | None = None,
+    lark_card_id: str | None = None,
     callback_data: str | None = None,
     round_: int = 0,
     notes: str | None = None,
@@ -122,7 +124,13 @@ def transition(
     """Atomic gate-state transition. Returns the appended history entry.
 
     ``force=True`` bypasses the allowed-transitions check (used by recovery /
-    admin tools like ``af review-resume``)."""
+    admin tools like ``af review-resume``).
+
+    The ``tg_*`` and ``lark_*`` surface fields are independently optional:
+    a TG callsite sets only ``tg_chat_id`` / ``tg_message_id``; a Lark
+    callsite sets only ``lark_chat_id`` / ``lark_card_id``; in dual-emission
+    mode both surface families may be present on the same entry. None of
+    the four are required."""
     data = _read(article_id)
     history: list[dict[str, Any]] = list(data.get("gate_history") or [])
     from_state = (
@@ -148,6 +156,10 @@ def transition(
         entry["tg_chat_id"] = tg_chat_id
     if tg_message_id is not None:
         entry["tg_message_id"] = tg_message_id
+    if lark_chat_id is not None:
+        entry["lark_chat_id"] = str(lark_chat_id)
+    if lark_card_id is not None:
+        entry["lark_card_id"] = str(lark_card_id)
     if callback_data:
         entry["callback_data"] = callback_data
     if notes:

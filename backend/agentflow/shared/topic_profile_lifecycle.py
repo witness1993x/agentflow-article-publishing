@@ -343,6 +343,114 @@ def find_active_session_for_uid(uid: int) -> dict[str, Any] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Lark parity additions (GAP-P2 / IND-6)
+#
+# Profile sessions originally only tracked Telegram operators via
+# ``active_uid`` + ``active_chat_id``. For Lark we store the operator's
+# ``open_id`` and the message's ``chat_id`` (oc_xxx) under
+# ``active_open_id`` and ``active_lark_chat_id``. A session has *one*
+# operator on *one* surface, so the active-session lookup matches by
+# whichever pair the incoming message carries — TG path checks
+# ``active_uid``, Lark path checks ``active_open_id``. ``status`` must
+# always be ``"collecting"`` for a session to be considered active.
+# ---------------------------------------------------------------------------
+
+
+def claim_session_lark(
+    session_id: str,
+    open_id: str,
+    lark_chat_id: str,
+) -> dict[str, Any]:
+    """Mark an existing session as actively collecting on the Lark surface.
+
+    Sets ``status="collecting"``, ``active_open_id`` and
+    ``active_lark_chat_id``. Mirrors the inline TG claim logic in
+    ``daemon.py`` (which sets ``active_uid`` + ``active_chat_id``).
+    """
+    session = load_session(session_id)
+    session["status"] = "collecting"
+    session["active_open_id"] = str(open_id) if open_id is not None else None
+    session["active_lark_chat_id"] = (
+        str(lark_chat_id) if lark_chat_id is not None else None
+    )
+    save_session(session)
+    return session
+
+
+def release_session_lark(session_id: str, *, status: str = "released") -> dict[str, Any]:
+    """Clear Lark active fields and move the session out of ``collecting``.
+
+    ``status`` defaults to ``"released"`` but callers may pass another
+    terminal status (e.g. ``"applied"``, ``"cancelled"``).
+    """
+    session = load_session(session_id)
+    session["active_open_id"] = None
+    session["active_lark_chat_id"] = None
+    if status == "collecting":
+        # Defensive: release should never leave the session active.
+        status = "released"
+    session["status"] = status
+    save_session(session)
+    return session
+
+
+def find_active_session_lark(open_id: str) -> dict[str, Any] | None:
+    """Find a session actively collecting for the given Lark ``open_id``.
+
+    Counterpart to :func:`find_active_session_for_uid`. Matches when
+    ``status == "collecting"`` AND ``active_open_id == open_id``. A
+    session claimed via TG (``active_open_id is None``) will *not*
+    match here, even if some other field happens to coincide.
+    """
+    target = str(open_id or "").strip()
+    if not target:
+        return None
+    for path in sorted(constraint_sessions_dir().glob("*.json"), reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("status") != "collecting":
+            continue
+        candidate = data.get("active_open_id")
+        if candidate is None:
+            continue
+        if str(candidate) != target:
+            continue
+        return data
+    return None
+
+
+def migrate_session_schema_v2(session_path: Path | str) -> dict[str, Any]:
+    """Idempotently add Lark active fields to an existing session file.
+
+    Older sessions written before the Lark parity work do not have
+    ``active_open_id`` / ``active_lark_chat_id`` keys at all. This
+    helper loads the file, fills in ``None`` for any missing keys, and
+    rewrites only when something actually changed. Safe to run twice.
+    """
+    path = Path(session_path)
+    data = json.loads(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid session payload at {path}")
+    changed = False
+    if "active_open_id" not in data:
+        data["active_open_id"] = None
+        changed = True
+    if "active_lark_chat_id" not in data:
+        data["active_lark_chat_id"] = None
+        changed = True
+    if changed:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return data
+
+
 def suggestion_path(suggestion_id: str) -> Path:
     return constraint_suggestions_dir() / f"{suggestion_id}.json"
 

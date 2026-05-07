@@ -29,7 +29,10 @@ The bot daemon maintains `~/.agentflow/review/short_id_index.json`:
     "article_id": "hs_topic_id_001-20260425042222-b563bc3c",
     "gate": "B",
     "created_at": "2026-04-25T08:00:00+00:00",
-    "expires_at": "2026-04-26T08:00:00+00:00"
+    "expires_at": "2026-04-26T08:00:00+00:00",
+    "tg_message_id": 789,
+    "lark_card_id": "om_xxx",
+    "lark_chat_id": "oc_lark_chat_42"
   },
   "c91d04": {
     "kind": "topic_batch",
@@ -44,6 +47,12 @@ The bot daemon maintains `~/.agentflow/review/short_id_index.json`:
 - `short_id` is generated as `secrets.token_hex(3)` (6 hex chars, ~17M unique).
 - Each entry has a TTL ≥ the gate's timeout. Expired entries are GC'd hourly.
 - Collisions detected on insert; regen on collision.
+- Surface identifiers — `tg_message_id` (Telegram) and `lark_card_id` /
+  `lark_chat_id` (Lark) — are stamped after the card is sent, by
+  `attach_message_id()` and `attach_lark_card()` respectively. Both are
+  optional and may coexist on a single entry in dual-emission mode (the
+  same gate decision rendered to both surfaces). Daemon-side handlers use
+  these to edit / disable the rendered card when a callback fires.
 
 When a callback_query arrives:
 

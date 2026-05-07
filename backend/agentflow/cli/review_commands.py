@@ -408,6 +408,106 @@ def review_auth_set_actions_cmd(uid: int, actions_csv: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lark operator allowlist (parallel to the TG uid commands above; writes the
+# ``lark_operators`` section of auth.json — fail-closed when empty).
+# ---------------------------------------------------------------------------
+
+
+@cli.command(
+    "review-auth-add-lark",
+    help="Authorize a Lark operator open_id to interact with the review bot.",
+)
+@click.argument("open_id", type=str)
+@click.option("--name", default=None, help="Optional human-readable label.")
+@click.option(
+    "--actions",
+    "actions_csv",
+    default=None,
+    help="Comma-separated action list (review,write,edit,image,publish,*). "
+    "Default: * (full access).",
+)
+def review_auth_add_lark_cmd(
+    open_id: str, name: str | None, actions_csv: str | None
+) -> None:
+    from agentflow.agent_review import auth
+
+    actions = _parse_actions_csv(actions_csv)
+    auth.lark_operator_add(open_id, name=name, actions=actions)
+    eff = ",".join(actions or ["*"])
+    click.echo(
+        f"authorized lark open_id={open_id}"
+        f"{' (' + name + ')' if name else ''} actions={eff}"
+    )
+
+
+@cli.command(
+    "review-auth-remove-lark",
+    help="Revoke a previously authorized Lark operator open_id.",
+)
+@click.argument("open_id", type=str)
+def review_auth_remove_lark_cmd(open_id: str) -> None:
+    from agentflow.agent_review import auth
+
+    if auth.lark_operator_remove(open_id):
+        click.echo(f"revoked lark open_id={open_id}")
+    else:
+        click.echo(f"open_id={open_id} was not in the lark_operators list")
+
+
+@cli.command(
+    "review-auth-list-lark",
+    help="Show authorized Lark operator open_ids.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def review_auth_list_lark_cmd(as_json: bool) -> None:
+    from agentflow.agent_review import auth
+
+    grants = auth.list_lark_operators()
+    if as_json:
+        _emit_json({"lark_operators": grants})
+        return
+    if not grants:
+        click.echo(
+            "lark_operators: (none — fail-closed; add with "
+            "`blogflow review-auth-add-lark <open_id>`)"
+        )
+        return
+    click.echo(f"lark_operators ({len(grants)}):")
+    for entry in grants:
+        nm = entry.get("name") or ""
+        label = f"({nm})" if nm else ""
+        actions = ",".join(entry.get("actions") or [])
+        added = entry.get("added_at") or ""
+        click.echo(
+            f"  +{entry.get('open_id')}  {label}  {actions}  ({added})"
+        )
+
+
+@cli.command(
+    "review-auth-set-lark-actions",
+    help="Overwrite the actions list on an existing Lark operator grant "
+    "(comma-separated, e.g. review,edit). Use '*' for full access.",
+)
+@click.argument("open_id", type=str)
+@click.option(
+    "--actions",
+    "actions_csv",
+    required=True,
+    help="Comma-separated action list (review,write,edit,image,publish,*).",
+)
+def review_auth_set_lark_actions_cmd(open_id: str, actions_csv: str) -> None:
+    from agentflow.agent_review import auth
+
+    actions = _parse_actions_csv(actions_csv) or ["*"]
+    if not auth.lark_operator_set_actions(open_id, actions):
+        raise click.ClickException(
+            f"open_id={open_id} is not in the lark_operators list; "
+            f"add it first with `blogflow review-auth-add-lark {open_id}`."
+        )
+    click.echo(f"updated lark open_id={open_id} actions={','.join(actions)}")
+
+
+# ---------------------------------------------------------------------------
 # Document library
 # ---------------------------------------------------------------------------
 

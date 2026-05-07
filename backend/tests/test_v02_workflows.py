@@ -3491,7 +3491,7 @@ class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
             ".cursor/skills/agentflow-open-claw-v2/references/reference.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("AgentFlow Open Claw v2.8", skill)
+        self.assertIn("AgentFlow Open Claw v2.9", skill)
         self.assertIn("docs/flows/LARK_FIRST_REVIEW_FLOWS.md", skill)
         self.assertIn("34 `lark_*` commands", reference)
         self.assertIn("daemon-owned", reference)

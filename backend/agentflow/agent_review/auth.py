@@ -347,3 +347,161 @@ def list_authorized() -> list[dict[str, Any]]:
         clone["allowed_actions"] = _entry_actions(entry)
         out.append(clone)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Lark operator allowlist — co-located in the same ``auth.json`` under the
+# ``lark_operators`` top-level key (parity with TG's ``authorized_uids`` but
+# **fail-closed**: an empty / missing section denies all open_ids). Phase 2
+# Lark deployments without TG must not silently allow everything just because
+# nobody has run ``blogflow review-auth-add-lark`` yet.
+#
+# Distinct from the legacy :func:`is_lark_authorized` path (which lives in
+# ``lark_auth.json`` and fails open on empty); kept separate so the older
+# code & tests keep working while new call sites adopt the closed default.
+# ---------------------------------------------------------------------------
+
+
+def _load_lark_operators() -> list[dict[str, Any]]:
+    """Read the ``lark_operators`` array from ``auth.json``. Returns ``[]``
+    when the section is absent / file missing / file malformed. Mirrors the
+    forgiving shape of :func:`_read` so a TG-only auth.json keeps working."""
+    data = _read()
+    raw = data.get("lark_operators")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, dict) and entry.get("open_id"):
+            out.append(entry)
+    return out
+
+
+def _lark_entry_actions(entry: dict[str, Any]) -> list[str]:
+    """Effective actions for a Lark grant entry.
+
+    Note: differs from :func:`_entry_actions` — Lark entries store the action
+    list under ``actions`` (per the documented schema), not
+    ``allowed_actions``. Missing/empty list → ``[]`` (NOT a wildcard) so a
+    half-configured entry fails closed."""
+    raw = entry.get("actions")
+    if not isinstance(raw, list):
+        return []
+    return [str(a).strip().lower() for a in raw if str(a).strip()]
+
+
+def is_authorized_open_id(open_id: str | None, action: str) -> bool:
+    """Lark equivalent of :func:`is_authorized`.
+
+    Checks a Lark operator ``open_id`` against the ``lark_operators`` section
+    of ``~/.agentflow/review/auth.json``. Same action vocabulary as the TG
+    path (see :data:`ACTION_VOCABULARY`).
+
+    Semantics:
+      * ``open_id is None`` (or empty) → ``False``. No anonymous Lark callbacks.
+      * ``lark_operators`` empty or absent → ``False`` (**fail-closed**).
+        A phase-2 deployment that hasn't onboarded any Lark operator must
+        not let bridge-token holders fire arbitrary actions.
+      * Matching entry found → action authorized iff ``"*"`` is present
+        OR the literal ``action`` token is in the entry's ``actions`` list.
+      * Unknown ``open_id`` → ``False``.
+    """
+    if open_id is None:
+        return False
+    oid = str(open_id).strip()
+    if not oid:
+        return False
+    operators = _load_lark_operators()
+    if not operators:
+        return False  # fail-closed
+    for entry in operators:
+        if str(entry.get("open_id")) != oid:
+            continue
+        allowed = _lark_entry_actions(entry)
+        if not allowed:
+            return False
+        if "*" in allowed or action in allowed:
+            return True
+        return False
+    return False
+
+
+def lark_operator_add(
+    open_id: str,
+    *,
+    name: str | None = None,
+    actions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Add or update a ``lark_operators`` entry. ``actions=None`` → ``["*"]``
+    on insert; on update, ``actions`` (when provided) overwrites and ``name``
+    is filled in only when previously blank."""
+    normalized = _normalize_actions(actions)
+    data = _read()
+    items = data.setdefault("lark_operators", [])
+    if not isinstance(items, list):
+        items = []
+        data["lark_operators"] = items
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("open_id")) == str(open_id):
+            if name and not entry.get("name"):
+                entry["name"] = name
+            if actions is not None:
+                entry["actions"] = normalized
+            elif "actions" not in entry:
+                entry["actions"] = normalized
+            _write(data)
+            return data
+    items.append({
+        "open_id": str(open_id),
+        "name": name,
+        "actions": normalized,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _write(data)
+    return data
+
+
+def lark_operator_set_actions(open_id: str, actions: list[str]) -> bool:
+    """Overwrite ``actions`` for an existing Lark grant. Returns False
+    if the open_id isn't found."""
+    normalized = _normalize_actions(actions)
+    data = _read()
+    items = data.get("lark_operators") or []
+    if not isinstance(items, list):
+        return False
+    for entry in items:
+        if isinstance(entry, dict) and str(entry.get("open_id")) == str(open_id):
+            entry["actions"] = normalized
+            _write(data)
+            return True
+    return False
+
+
+def lark_operator_remove(open_id: str) -> bool:
+    data = _read()
+    items = data.get("lark_operators") or []
+    if not isinstance(items, list):
+        return False
+    kept: list[Any] = []
+    removed = False
+    for entry in items:
+        if isinstance(entry, dict) and str(entry.get("open_id")) == str(open_id):
+            removed = True
+            continue
+        kept.append(entry)
+    if removed:
+        data["lark_operators"] = kept
+        _write(data)
+    return removed
+
+
+def list_lark_operators() -> list[dict[str, Any]]:
+    """Return stored Lark operator grants with normalized ``actions``."""
+    out: list[dict[str, Any]] = []
+    for entry in _load_lark_operators():
+        clone = dict(entry)
+        clone["actions"] = _lark_entry_actions(entry)
+        out.append(clone)
+    return out

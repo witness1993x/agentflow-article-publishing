@@ -5,7 +5,10 @@ AgentFlow emits `review.*_card` events; OpenClaw renders them as Lark
 interactive cards and sends callbacks to `/api/commands`.
 
 `notify.*` events are broadcast/status cards only. They must not be rendered as
-review cards, and `notify.hotspots_digest` must never be treated as Gate A.
+review cards, and `notify.hotspots_digest` must never be treated as Gate A. See
+[`docs/flows/LARK_NOTIFY_CARDS.md`](../../../../docs/flows/LARK_NOTIFY_CARDS.md)
+for the `notify.*` family rendering contract (required fields, button policy,
+severity hints).
 
 ## v1.1.8 — free-text @-mention path
 
