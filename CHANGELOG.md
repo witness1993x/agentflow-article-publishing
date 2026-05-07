@@ -16,6 +16,138 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.2.0] — 2026-05-07 — TG → Lark parity (`lark-parity` branch)
+
+> Phase 1 of the BlogFlow Lark-only roadmap. Brings the Lark review
+> surface to functional parity with TG (every TG button has a Lark
+> equivalent), adds operator chrome cards (status / list / scan / etc.),
+> hardens auth with a fail-closed Lark operator whitelist, and verifies
+> end-to-end independence: a full article D1 → published runs with
+> `TELEGRAM_BOT_TOKEN` unset and zero TG calls. Test suite: 230 → 308
+> passing (78 new). See `docs/BLOGFLOW_TG_TO_LARK_PARITY.md` for the
+> full migration spec.
+
+### Independence layer (Wave 1)
+
+- **`gate_history` dual-track schema.** `state.transition()` accepts
+  `lark_chat_id` / `lark_card_id` kwargs; both are optional and additive.
+  Existing TG entries (read or written) are unaffected. Updated
+  `templates/state_machine.md` and `templates/callback_data_schema.md`
+  with the dual-emission note.
+- **`short_id.attach_lark_card(sid, lark_card_id, lark_chat_id)`.**
+  Mirrors `attach_message_id()`. Persists Lark card identity to
+  `~/.agentflow/review/short_id_index.json` so daemon-side code can later
+  edit / disable the rendered card.
+- **`auth.is_authorized_open_id(open_id, action)`.** New fail-closed
+  Lark operator whitelist. `auth.json` gains a `lark_operators` section
+  (`{open_id, name, actions[]}`). When the file is absent → fail-open
+  (dev-friendly default); when the file exists but `lark_operators` is
+  empty/missing → fail-closed (explicit configuration). Four CLI commands
+  added: `blogflow review-auth-{add,remove,list,set-actions}-lark`.
+- **Profile-session schema for Lark.** `topic_profile_lifecycle` gains
+  `claim_session_lark`, `release_session_lark`, `find_active_session_lark`
+  + idempotent `migrate_session_schema_v2` helper. Sessions store
+  `active_open_id` / `active_lark_chat_id` alongside the TG fields.
+- **`docs/flows/LARK_NOTIFY_CARDS.md` (NEW, 255 lines).** Rendering
+  contract for `notify.*` family: `dispatch_preview`, `dispatch_result`,
+  `publish_ready`, `publish_digest`, `hotspots_digest`, `draft_ready`,
+  `spawn_failure`, `profile_setup_done`. Cross-referenced from
+  `lark_review_cards.md`. Codifies the "notify.* are NOT review cards"
+  rule that the v1.1.7 footgun violated.
+
+### Parity gaps closed (Wave 2)
+
+- **GAP-S Suggestions parity.** TG had `S:review` / `S:apply` /
+  `S:dismiss` callbacks via `render_suggestion_list` / `render_suggestion_review`;
+  Lark had nothing. Added `review.suggestion_list_card` +
+  `review.suggestion_review_card` templates, `_emit_lark_suggestion_*_card`
+  helpers in `triggers.py`, four `lark_suggestion_*` commands
+  (`list/review/apply/dismiss`), and `_authorize_or_deny_v2` (fail-closed
+  via `is_authorized_open_id`) for new handlers. Suggestions are
+  profile-scoped (not article-scoped) — `_SUGGESTION_HANDLERS` early-route
+  bypasses the article_id guard. Test: `test_lark_suggestions.py` (8 tests).
+- **GAP-P2 Profile multi-turn (daemon-driven).** TG had
+  `render_profile_setup_question` for multi-turn follow-up; Lark had only
+  the intro card. Extended `review.profile_setup_card` schema with
+  `current_question` / `question_index` / `total_questions`, added
+  `_emit_lark_profile_question_card`, `_handle_profile_advance` +
+  `_PROFILE_HANDLERS` early-route, plus `notify.profile_setup_done` real
+  emit site. Wired through `claim_session_lark` / `find_active_session_lark`
+  per the schema-footgun memory (must set `status="collecting"` + active
+  open_id). KNOWN GAP: profile yaml mutation deferred (answers stay in
+  `session.collected[]`) — see L-2 in §11.5 of plan doc. Test:
+  `test_lark_profile_advance.py` (9 tests).
+- **GAP-CHROME 12 operator intents.** TG had 14 slash commands; Lark
+  had only `lark_message` free-text with limited keyword coverage.
+  Added `_CHROME_INTENTS` keyword table + `_CHROME_VERB_PATTERNS` regex
+  for verb intents (skip / defer / publish-mark / cancel) — all
+  deterministic, NO LLM-based inference (honors v1.1.8 false-positive
+  lock). Twelve chrome handlers cover: 状态/list/已发/扫一下/任务/
+  跳过/推迟/标记已发/取消/审计列表/鉴权/建议. Seven `_emit_lark_*_card`
+  helpers in `triggers.py`. Twelve `lark_chrome_*` commands in `web.py`.
+  Six false-positive guards (e.g. `审计` keeps routing to
+  `gate_b_diff` so chrome reserves only `审计列表` / `audit list`;
+  `已发` vs `已发现`; `任务` vs `新任务给你`; `扫一下` vs `扫地了`).
+  New doc: `docs/flows/LARK_OPERATOR_INTENTS.md` (190 lines). Test:
+  `test_lark_chrome_intents.py` (31 tests).
+- **GAP-AUDIT-LIST.** `lark_view_audit` previously per-article only;
+  TG `/audit` could also list recent events. Added unified
+  `_handle_view_audit_recent` (clamp `n` ≤ 100, optional `kind` filter,
+  fail-closed auth), `_AUDIT_HANDLERS` early-route, `lark_view_audit_recent`
+  command. `_emit_lark_audit_list_card` payload locked to
+  `{entries, total, since, filter}` plus `刷新` / `仅看失败` buttons.
+  `_handle_chrome_audit_list` now thin DRY wrapper. Test:
+  `test_lark_audit_list.py` (7 tests).
+
+### Phase 2 closure (started 2026-05-07)
+
+- **L-1 / IND-4 import-time independence.** `triggers.py` and `daemon.py`
+  now wrap `from agentflow.agent_review import tg_client` in try/except
+  with a `_TgClientUnavailable` sentinel that raises informatively on
+  any method call (so missed chat_id guards are loud, not silent). The
+  29 callsites in `triggers.py` and 100+ in `daemon.py` are unchanged —
+  they remain gated by `chat_id is not None` upstream. Test:
+  `test_no_tg_runtime.py` (5 tests, including a subprocess-isolated test
+  with a `MetaPathFinder` blocking `tg_client` to verify Phase 3
+  deletion-tolerance). Phase 2 deployment without `tg_client.py` now
+  loads cleanly.
+
+### End-to-end verification
+
+- **`test_e2e_lark_pure.py` (NEW, 673 lines).** Drives a complete
+  pipeline D1 hotspot → Gate A → Gate B → image picker → Gate C →
+  Gate D → published, entirely through Lark cards (`_emit_lark_*`) and
+  `lark_*` callbacks. Replaces all `tg_client.*` outbound functions
+  (`send_message` / `send_photo` / `send_document` / `send_long_text` /
+  `answer_callback_query` / `edit_message_reply_markup` /
+  `edit_message_text` / `get_me` / `get_updates`) with raise-on-call
+  sentinels. Test ends with `tg_violations == []` — **zero TG calls
+  leaked into the Lark-only happy path**. Phase 2 happy-path
+  independence: VERIFIED.
+
+### Known follow-ups (Phase 2 remaining)
+
+Documented in `docs/BLOGFLOW_TG_TO_LARK_PARITY.md` §11.5:
+
+- **L-2** Profile yaml write-back (currently `session.collected[]` stays
+  unwritten on completion — needs dotted-key → friendly-slot translation)
+- **L-3** `chrome_defer` real scheduling (currently only ack + audit log,
+  needs wiring to `_schedule_deferred_repost` store)
+- **L-4** Migrate ~30 legacy `_authorize_or_deny` callsites in
+  `lark_callback.py` to the v2 fail-closed path (current handlers still
+  use `is_lark_authorized` which fail-opens on missing whitelist)
+- **L-5** `blogflow doctor --fresh` validation without TG token
+  (CLI/Linux box manual verify, outside pytest scope)
+
+### Build / artifacts
+
+- `backend/pyproject.toml` version bumped 1.1.9 → 1.2.0
+- Deploy bundle: `blogflow-lark-deploy-v1.2.0.tar.gz` (built by
+  `scripts/build_deploy_bundle.sh`)
+- OpenClaw skill bundle: `dist/agentflow-open-claw-v3.0.zip` (skill
+  v2.9 → v3.0 documenting all new cards: suggestion list/review,
+  profile question-advance, 6 chrome cards, audit_list)
+
 ## [1.1.9] — 2026-05-07
 
 - **OpenClaw-Lark skill hardening (skill v2.8 → v2.9).**

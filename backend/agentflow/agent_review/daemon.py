@@ -21,9 +21,27 @@ from agentflow.agent_review import (
     self_check,
     short_id as _sid,
     state,
-    tg_client,
     timeout_state,
 )
+
+# L-1 (Phase 2 closure): tg_client may be absent in Phase 3 deployments
+# (deletion-tolerant import). Sentinel inlined to avoid circular import
+# with triggers.py (triggers imports daemon early during its own load).
+try:
+    from agentflow.agent_review import tg_client  # noqa: F401
+except ImportError:  # pragma: no cover — exercised by test_no_tg_runtime.py
+    class _TgClientUnavailable:
+        """Sentinel for 'tg_client SDK absent'. Any attribute access raises."""
+
+        def __getattr__(self, name: str) -> Any:
+            def _denied(*args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError(
+                    f"tg_client.{name} called in Lark-only deployment "
+                    "where the TG SDK is unavailable."
+                )
+            return _denied
+
+    tg_client = _TgClientUnavailable()  # type: ignore[assignment]
 from agentflow.shared.bootstrap import agentflow_home
 from agentflow.shared.logger import get_logger
 from agentflow.shared.topic_profile_lifecycle import (

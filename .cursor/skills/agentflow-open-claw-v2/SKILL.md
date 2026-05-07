@@ -3,7 +3,7 @@ name: agentflow-open-claw-v2
 description: AgentFlow article-publishing OpenClaw skill. Default entry is first deployment/onboarding: verify runtime repo, venv, .env, ~/.agentflow, then guide through blogflow bootstrap/onboard/topic-profile/doctor. Use also for Lark-first Gate A/B/C/D review, Telegram fallback, review-daemon, blogflow/mediaflow CLI, image-gate, publish-mark, PR:mark, PD:dispatch, or state-transition work. No runtime source is included.
 ---
 
-# AgentFlow Open Claw v2.9
+# AgentFlow Open Claw v3.0
 
 ## Package Contract
 
@@ -92,7 +92,20 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v2.9 与 `agentflow-framework-20260428-slim` 及更新版本配合（含 `blogflow-deploy-v1.1.9.tar.gz`）。v2.9 新增"Lark Card Rendering"段，要求 OpenClaw 侧装 `@larksuite/openclaw-lark` 时必须实现 `/agentflow/events` listener，按 `lark_review_cards.md` 渲染 interactive card；纯文本播报扫描结果是契约违反。
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.2.0.tar.gz` 及更新版本配合。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+
+- `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
+- `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）
+- `review.audit_list_card`（审计列表 + 刷新/仅看失败按钮；GAP-AUDIT-LIST）
+- 6 张 chrome cards：`review.status_card` / `review.article_list_card` / `review.published_list_card` / `review.scan_kicked_card` / `review.jobs_card` / `review.auth_debug_card`（GAP-CHROME）
+
+新 notify 事件：`notify.profile_setup_done`（profile 多轮追问完成时发出）。Notify 渲染契约现在文档化在 `docs/flows/LARK_NOTIFY_CARDS.md`（v2.9 没有，OpenClaw 之前是脑补的）。
+
+`@bot 自由文本` 现已扩展支持 12 个 deterministic 关键词意图（状态 / 列表 / 已发 / 扫一下 / 任务 / 跳过 <id> / 推迟 <id> <h> / 标记已发 <id> / 取消 <id> / 审计列表 / 鉴权 / 建议）。详见 `docs/flows/LARK_OPERATOR_INTENTS.md`。OpenClaw 端需透传所有自由文本到 `lark_message`，但**不要**自己做意图分类——daemon 决定分发。
+
+v2.9 的 "Lark Card Rendering" 段（`@larksuite/openclaw-lark` 集成约定）继续生效；v3.0 没改 listener / 卡片渲染 / 按钮回调的 wiring，只是新卡的 schema 多了。
+
+Lark-only 部署支持：v1.2.0 daemon 在 `TELEGRAM_BOT_TOKEN` 不存在时也能起来；`auth.json` 的 `lark_operators` 段是 fail-closed 白名单（先 `blogflow review-auth-add-lark <open_id> --actions '*'`，否则 chrome / suggestion / profile_advance 等新 handler 会 deny）。
 
 ## Required Init Flows (MUST follow)
 
