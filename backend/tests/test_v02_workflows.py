@@ -5467,7 +5467,11 @@ class LarkBridgeCommandTests(AgentflowHomeTestCase):
         lark = sorted(c for c in commands if c.startswith("lark_"))
         # 29 v1.1.1 commands + v1.1.2 pending edit + 3 image-picker actions
         # + v1.1.7 lark_message free-text router = 34
-        self.assertEqual(len(lark), 34)
+        # + GAP-S Suggestions parity (list/review/apply/dismiss) = 38
+        # + GAP-P2 Profile multi-turn follow-up (lark_profile_advance) = 39
+        # + GAP-CHROME 12 operator slash-command parity intents = 51
+        # + GAP-AUDIT-LIST lark_view_audit_recent (list-mode TG /audit parity) = 52
+        self.assertEqual(len(lark), 52)
         # Spot-check coverage for each Gate
         for required in (
             "lark_gate_a_write",

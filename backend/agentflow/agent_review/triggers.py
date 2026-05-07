@@ -348,6 +348,189 @@ def _emit_lark_gate_d_card(
     )
 
 
+def _emit_lark_suggestion_list_card(
+    *,
+    suggestions: list[dict[str, Any]],
+) -> None:
+    """Render the pending-suggestions queue as a Lark review card.
+
+    Suggestions are not bound to a single article — ``article_id`` for the
+    card-level emit is ``""`` (no-article); each per-row button passes its
+    suggestion's ``article_id`` (when present) or ``""`` so OpenClaw can wire
+    deep-links back without us inventing an id.
+    """
+    if not _lark_app_primary():
+        return
+    items: list[dict[str, Any]] = []
+    for suggestion in suggestions or []:
+        suggestion_id = str(suggestion.get("id") or suggestion.get("suggestion_id") or "")
+        if not suggestion_id:
+            continue
+        article_id = str(suggestion.get("article_id") or "")
+        headline = (
+            suggestion.get("title")
+            or suggestion.get("headline")
+            or suggestion.get("summary")
+            or "Suggestion"
+        )
+        items.append({
+            "suggestion_id": suggestion_id,
+            "article_id": article_id,
+            "headline": str(headline),
+            "source": str(suggestion.get("source") or suggestion.get("stage") or ""),
+            "created_at": str(suggestion.get("created_at") or ""),
+            "risk_level": str(suggestion.get("risk_level") or ""),
+            "profile_id": str(suggestion.get("profile_id") or ""),
+            "actions": [
+                _lark_action(
+                    "🔍 审阅",
+                    "lark_suggestion_review",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "🚫 忽略",
+                    "lark_suggestion_dismiss",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+            ],
+        })
+
+    _emit_lark_review_card(
+        "review.suggestion_list_card",
+        article_id="",
+        payload={
+            "gate": "S",
+            "card_kind": "review",
+            "count": len(items),
+            "suggestions": items,
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_suggestion_review_card(
+    *,
+    suggestion: dict[str, Any],
+) -> None:
+    """Render a single suggestion's detailed review card on Lark.
+
+    ``suggestion`` may be either the raw suggestion dict (as returned by
+    ``list_suggestions``) or the ``review_suggestion`` payload's ``suggestion``
+    field — both carry the same id/title/profile_id/proposed_patch shape.
+    """
+    if not _lark_app_primary():
+        return
+    suggestion_id = str(suggestion.get("id") or suggestion.get("suggestion_id") or "")
+    article_id = str(suggestion.get("article_id") or "")
+    body = (
+        suggestion.get("summary")
+        or suggestion.get("body")
+        or suggestion.get("title")
+        or ""
+    )
+    proposed = suggestion.get("proposed_patch") if isinstance(suggestion.get("proposed_patch"), dict) else {}
+    changed_keys = sorted(proposed.keys()) if proposed else []
+
+    _emit_lark_review_card(
+        "review.suggestion_review_card",
+        article_id=article_id,
+        payload={
+            "gate": "S",
+            "card_kind": "review",
+            "suggestion_id": suggestion_id,
+            "article_id": article_id,
+            "profile_id": str(suggestion.get("profile_id") or ""),
+            "stage": str(suggestion.get("stage") or ""),
+            "risk_level": str(suggestion.get("risk_level") or ""),
+            "title": str(suggestion.get("title") or "Suggestion"),
+            "body": str(body),
+            "source": str(suggestion.get("source") or suggestion.get("stage") or ""),
+            "created_at": str(suggestion.get("created_at") or ""),
+            "changed_keys": changed_keys,
+            "actions": [
+                _lark_action(
+                    "✅ 应用",
+                    "lark_suggestion_apply",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "🚫 忽略",
+                    "lark_suggestion_dismiss",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "↩️ 返回列表",
+                    "lark_suggestion_list",
+                    article_id,
+                ),
+            ],
+        },
+    )
+
+
+def _emit_lark_profile_question_card(
+    *,
+    session_path: str,
+    profile_id: str,
+    question_field: str,
+    question_text: str,
+    question_index: int,
+    total_questions: int,
+) -> None:
+    """Emit a `review.profile_setup_card` in *question-advance* form.
+
+    Counterpart to TG's `render_profile_setup_question`. The intro form
+    (no `current_question`) is emitted by :func:`post_profile_setup_prompt`.
+    This helper emits the per-question follow-up: `current_question`,
+    `question_field`, `question_index`, `total_questions` are populated and
+    the primary button switches from `开始补全` to `回答` (still routing to
+    the same `lark_profile_advance` command, but carrying `question_field`
+    so the daemon can write the answer to the right slot).
+    """
+    if not _lark_app_primary():
+        return
+    actions = [
+        _lark_action(
+            "回答",
+            "lark_profile_advance",
+            profile_id,
+            {
+                "profile_id": profile_id,
+                "session_path": session_path,
+                "question_field": question_field,
+                "answer_field": "text",
+            },
+        ),
+        _lark_action(
+            "稍后",
+            "lark_defer",
+            profile_id,
+            {"gate": "P"},
+        ),
+    ]
+    _emit_lark_review_card(
+        "review.profile_setup_card",
+        article_id=profile_id,
+        payload={
+            "gate": "P",
+            "card_kind": "review",
+            "profile_id": profile_id,
+            "session_path": session_path,
+            "current_question": question_text,
+            "question_field": question_field,
+            "question_index": int(question_index),
+            "total_questions": int(total_questions),
+            "missing_fields": [],
+            "reason": "profile setup question",
+            "actions": actions,
+        },
+    )
+
+
 def _emit_lark_locked_takeover_card(
     *,
     article_id: str,
@@ -372,6 +555,240 @@ def _emit_lark_locked_takeover_card(
                 _lark_action("🚫 放弃", "lark_locked_give_up", article_id),
             ],
             "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chrome card emit helpers (GAP-CHROME) — operator slash-command parity.
+#
+# Each helper emits a single ``review.<kind>_card`` event for the Lark
+# OpenClaw plugin to render. They follow the suggestion/profile pattern:
+# short-circuit silently when ``_lark_app_primary()`` is False, never raise.
+#
+# These cards are *informational*; mutating chrome intents (skip/defer/
+# publish_mark/cancel) emit a small ack via ``_make_card`` directly in the
+# handler — they don't need a dedicated review-card event.
+# ---------------------------------------------------------------------------
+
+
+def _emit_lark_status_card(
+    *,
+    in_review: int,
+    last_events: list[dict[str, Any]],
+    heartbeat_iso: str | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.status_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "status",
+            "in_review": int(in_review),
+            "heartbeat_iso": heartbeat_iso,
+            "last_events": list(last_events or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_article_list_card(
+    *,
+    articles: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.article_list_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "list",
+            "count": len(articles or []),
+            "articles": list(articles or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_published_list_card(
+    *,
+    articles: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.published_list_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "published",
+            "count": len(articles or []),
+            "articles": list(articles or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_scan_kicked_card(
+    *,
+    batch_path: str | None = None,
+    top_k: int | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.scan_kicked_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "scan",
+            "batch_path": batch_path,
+            "top_k": top_k,
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_jobs_card(
+    *,
+    jobs: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.jobs_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "jobs",
+            "count": len(jobs or []),
+            "jobs": list(jobs or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_audit_list_card(
+    *,
+    entries: list[dict[str, Any]],
+    filter_kind: str | None = None,
+    n: int = 20,
+) -> None:
+    """Render the recent-audit-events list card. Contract is canonical in
+    ``templates/lark_review_cards.md``; entries are normalized so each item
+    has ``timestamp``, ``kind``, ``actor``, ``summary``, plus optional
+    ``article_id``/``gate``/``action``. The card-level ``actions[]`` carries
+    refresh + filter buttons; per-entry ``actions[]`` carries the deep-link
+    to the single-article ``lark_view_audit`` only when ``article_id`` is
+    present.
+    """
+    raw_entries = list(entries or [])
+    items: list[dict[str, Any]] = []
+    for ev in raw_entries:
+        ts = str(
+            ev.get("timestamp")
+            or ev.get("audit_ts")
+            or ev.get("ts")
+            or ""
+        )
+        kind = str(ev.get("kind") or "")
+        article_id = str(ev.get("article_id") or "")
+        gate = str(ev.get("gate") or "")
+        action = str(ev.get("action") or ev.get("cmd") or "")
+        actor = str(
+            ev.get("actor")
+            or ev.get("operator")
+            or ev.get("uid")
+            or ev.get("open_id")
+            or ""
+        )
+        # Build a one-line summary; prefer existing fields, fall back to a
+        # heuristic combining gate + action + reason/error.
+        summary_raw = (
+            ev.get("summary")
+            or ev.get("reason")
+            or ev.get("error")
+            or ev.get("status")
+            or ""
+        )
+        summary = str(summary_raw)
+        if not summary:
+            parts = [p for p in (gate, action) if p]
+            summary = " ".join(parts)
+        if len(summary) > 160:
+            summary = summary[:157] + "..."
+
+        item: dict[str, Any] = {
+            "timestamp": ts,
+            "kind": kind,
+            "actor": actor,
+            "summary": summary,
+        }
+        if article_id:
+            item["article_id"] = article_id
+        if gate:
+            item["gate"] = gate
+        if action:
+            item["action"] = action
+        # Per-entry deep-link to single-article audit view (only if we have an
+        # article id to deep-link into).
+        if article_id:
+            item["actions"] = [
+                _lark_action(
+                    "📰 查看文章",
+                    "lark_view_audit",
+                    article_id,
+                ),
+            ]
+        else:
+            item["actions"] = []
+        items.append(item)
+
+    # ``since`` = oldest timestamp shown (entries are newest-first; oldest is last).
+    since = items[-1]["timestamp"] if items else ""
+
+    payload: dict[str, Any] = {
+        "gate": "OPS",
+        "card_kind": "audit",
+        "count": len(items),
+        "total": len(items),
+        "since": since,
+        "entries": items,
+        "actions": [
+            _lark_action(
+                "🔄 刷新",
+                "lark_view_audit_recent",
+                "",
+                {"n": int(n)},
+            ),
+            _lark_action(
+                "❌ 仅看失败",
+                "lark_view_audit_recent",
+                "",
+                {"kind": "spawn_failure", "n": int(n)},
+            ),
+        ],
+    }
+    if filter_kind:
+        payload["filter"] = {"kind": str(filter_kind)}
+    _emit_lark_review_card(
+        "review.audit_list_card",
+        article_id="",
+        payload=payload,
+    )
+
+
+def _emit_lark_auth_debug_card(
+    *,
+    operator_open_id: str,
+    authorized_actions: list[str],
+    in_whitelist: bool,
+    action_table: dict[str, str] | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.auth_debug_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "auth_debug",
+            "operator_open_id": operator_open_id,
+            "in_whitelist": bool(in_whitelist),
+            "authorized_actions": list(authorized_actions or []),
+            "action_table": dict(action_table or {}),
+            "actions": [],
         },
     )
 

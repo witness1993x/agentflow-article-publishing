@@ -76,14 +76,34 @@ Input fields: none.
 ## Profile Setup: `review.profile_setup_card`
 
 Purpose: collect missing topic profile fields before D1/D2 continues.
+The card has two forms: an *intro* form (initial prompt before any answer
+has been collected) and a *question-advance* form (one card per question
+asked during the multi-turn follow-up flow). The same event_type carries
+both — the optional fields below tell OpenClaw which form to render.
 
 Required fields: `profile_id`, `reason`, `missing_fields`, `session_path`.
 
-Required buttons:
+Optional fields (when in question-advance mode):
+
+| Field | Meaning |
+|---|---|
+| `current_question` | The question text to display |
+| `question_field` | The field key the answer will be written to (e.g. `default_description`) |
+| `question_index` | 0-based index of current question |
+| `total_questions` | Total questions to ask |
+
+Required buttons (intro form — no `current_question`):
 
 | Button | Command | Payload |
 |---|---|---|
-| `开始补全` | OpenClaw profile setup flow | `profile_id`, `session_path` |
+| `开始补全` | `lark_profile_advance` | `profile_id`, `session_path` |
+| `稍后` | `lark_defer` | `gate="P"` |
+
+Required buttons (question-advance form — `current_question` set):
+
+| Button | Command | Payload |
+|---|---|---|
+| `回答` | `lark_profile_advance` | `profile_id`, `session_path`, `question_field`, `answer` (from `payload.text`) |
 | `稍后` | `lark_defer` | `gate="P"` |
 
 Input fields:
@@ -229,3 +249,60 @@ Input fields for takeover edit:
 
 When `lark_locked_edit` has no text, OpenClaw must ask the operator to @bot
 with the edit body, then call `lark_apply_pending_edit`.
+
+## Suggestion List: `review.suggestion_list_card`
+
+Purpose: present the unread/pending suggestions queue.
+
+Required fields: `suggestions[]` (each item: `suggestion_id`, `headline`,
+`source`, `created_at`, `article_id?`).
+
+Per-suggestion buttons:
+
+| Button | Command | Payload |
+|---|---|---|
+| `审阅` | `lark_suggestion_review` | `suggestion_id` |
+| `忽略` | `lark_suggestion_dismiss` | `suggestion_id` |
+
+Card-level: `count` shown in title; no actions.
+
+## Suggestion Review: `review.suggestion_review_card`
+
+Purpose: review a single suggestion in detail.
+
+Required fields: `suggestion_id`, `article_id?`, `body`, `source`,
+`created_at`, `actions[]`.
+
+Required buttons:
+
+| Button | Command | Payload |
+|---|---|---|
+| `应用` | `lark_suggestion_apply` | `suggestion_id` |
+| `忽略` | `lark_suggestion_dismiss` | `suggestion_id` |
+| `返回列表` | `lark_suggestion_list` | none |
+
+## Audit List: `review.audit_list_card`
+
+Purpose: show recent audit events (operator actions, gate transitions, spawn
+outcomes) across all articles. The list-mode equivalent of `/audit` on TG.
+
+Required fields: `entries[]` (each: `timestamp`, `kind`, `article_id?`,
+`gate?`, `action?`, `actor`, `summary`), `total`, `since` (ISO timestamp of
+oldest entry shown).
+
+Optional fields: `filter` (e.g. `{kind: "spawn_failure"}` if filtered).
+
+Card-level buttons:
+
+| Button | Command | Payload |
+|---|---|---|
+| `刷新` | `lark_view_audit_recent` | `n=20` |
+| `仅看失败` | `lark_view_audit_recent` | `kind="spawn_failure"`, `n=20` |
+
+Per-entry button (only when the entry carries an `article_id`):
+
+| Button | Command | Payload |
+|---|---|---|
+| `查看文章 #N` | `lark_view_audit` | `article_id` |
+
+Layout: list-style with timestamp + kind + summary; tail-first (newest at top).

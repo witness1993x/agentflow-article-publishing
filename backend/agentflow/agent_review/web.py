@@ -262,6 +262,13 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "dangerous": False,
         "in_process": True,
     },
+    "lark_view_audit_recent": {
+        "scope": "read",
+        "description": "Render recent review/audit.jsonl entries (article-id-optional list mode, parity with TG /audit).",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
     "lark_view_meta": {
         "scope": "read",
         "description": "Render article metadata snapshot as a Lark card payload.",
@@ -463,6 +470,51 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "dangerous": True,
         "in_process": True,
     },
+    # ----- Suggestions (Gate S) — pending-suggestions queue + per-item review -----
+    # Parity with TG's S:review / S:apply / S:dismiss daemon branches. The
+    # store is JSON files under ``~/.agentflow/constraint_suggestions/``;
+    # apply is dangerous=True since it mutates the user topic profile.
+    "lark_suggestion_list": {
+        "scope": "review",
+        "description": "Suggestions → re-emit pending-suggestions list card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_suggestion_review": {
+        "scope": "review",
+        "description": "Suggestions → open a single suggestion's detail card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_suggestion_apply": {
+        "scope": "review",
+        "description": "Suggestions → apply a suggestion to the user topic profile.",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_suggestion_dismiss": {
+        "scope": "review",
+        "description": "Suggestions → mark a suggestion as dismissed.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    # ----- Profile multi-turn follow-up (Gate P) — daemon-driven question advance -----
+    # Parity with TG's ``render_profile_setup_question`` flow. Each click
+    # writes the operator's answer into the profile session and triggers
+    # the next question card. ``dangerous=True`` because it mutates the
+    # session JSON store (and on completion fires ``notify.profile_setup_done``
+    # which advances the article into D1 scan territory).
+    "lark_profile_advance": {
+        "scope": "review",
+        "description": "Profile → write answer to session and emit next question (or finish).",
+        "timeout_seconds": 30,
+        "dangerous": True,
+        "in_process": True,
+    },
     # ----- v1.1.7 — free-text @-mention router -----
     # OpenClaw posts here when an operator @-mentions the bot in chat.
     # Daemon classifies the intent (approve / reject / refill / advance / ...)
@@ -482,6 +534,95 @@ _COMMAND_SPECS: dict[str, dict[str, Any]] = {
         "description": "Defer a Gate decision (operator carries gate label in payload.gate).",
         "timeout_seconds": 5,
         "dangerous": False,
+        "in_process": True,
+    },
+    # ----- GAP-CHROME (operator slash-command parity) -----
+    # 12 commands mirroring TG's /status /list /published /scan /jobs /audit
+    # /auth-debug /suggestions /skip /defer /publish-mark /cancel. Read-only
+    # variants are non-dangerous; mutating ones (skip/defer/publish_mark/cancel)
+    # carry dangerous=True so they're gated by AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS.
+    "lark_chrome_status": {
+        "scope": "review",
+        "description": "Chrome → daemon status card (pending count + heartbeat + recent events).",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_list": {
+        "scope": "review",
+        "description": "Chrome → list articles in any pending_review state.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_published": {
+        "scope": "review",
+        "description": "Chrome → list last 20 published articles.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_scan": {
+        "scope": "review",
+        "description": "Chrome → trigger article-hotspots scan.",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_jobs": {
+        "scope": "review",
+        "description": "Chrome → list in-flight subprocess / cron jobs.",
+        "timeout_seconds": 10,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_audit_list": {
+        "scope": "review",
+        "description": "Chrome → tail recent entries from review/audit.jsonl.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_auth_debug": {
+        "scope": "review",
+        "description": "Chrome → show operator's open_id + actions + action-table summary.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_suggestions": {
+        "scope": "review",
+        "description": "Chrome → re-emit pending-suggestions list card.",
+        "timeout_seconds": 5,
+        "dangerous": False,
+        "in_process": True,
+    },
+    "lark_chrome_skip": {
+        "scope": "review",
+        "description": "Chrome → skip article's current gate (mutates state).",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_chrome_defer": {
+        "scope": "review",
+        "description": "Chrome → defer article gate by N hours (mutates schedule).",
+        "timeout_seconds": 5,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_chrome_publish_mark": {
+        "scope": "review",
+        "description": "Chrome → mark article published (terminal state, mutates).",
+        "timeout_seconds": 10,
+        "dangerous": True,
+        "in_process": True,
+    },
+    "lark_chrome_cancel": {
+        "scope": "review",
+        "description": "Chrome → cancel article (terminal *_rejected state, mutates).",
+        "timeout_seconds": 10,
+        "dangerous": True,
         "in_process": True,
     },
 }
@@ -758,6 +899,48 @@ def _run_lark_command_in_process(
             "stderr": None,
         }
 
+    # ----- GAP-CHROME: programmatic invocation of the 12 operator intents -----
+    # The free-text @-bot path goes via ``lark_message`` → ``_route_message_intent``
+    # → ``_classify_chrome_intent``. This direct path lets OpenClaw (or any
+    # bridge consumer) invoke a chrome handler without a synthetic message —
+    # useful for slash-menu integrations and tests.
+    chrome_command_map = {
+        "lark_chrome_status":       "chrome_status",
+        "lark_chrome_list":         "chrome_list",
+        "lark_chrome_published":    "chrome_published",
+        "lark_chrome_scan":         "chrome_scan",
+        "lark_chrome_jobs":         "chrome_jobs",
+        "lark_chrome_audit_list":   "chrome_audit_list",
+        "lark_chrome_auth_debug":   "chrome_auth_debug",
+        "lark_chrome_suggestions":  "chrome_suggestions",
+        "lark_chrome_skip":         "chrome_skip",
+        "lark_chrome_defer":        "chrome_defer",
+        "lark_chrome_publish_mark": "chrome_publish_mark",
+        "lark_chrome_cancel":       "chrome_cancel",
+    }
+    if command in chrome_command_map:
+        intent = chrome_command_map[command]
+        handler = lark_callback._CHROME_HANDLERS[intent]
+        kwargs: dict[str, Any] = {}
+        if intent in {"chrome_skip", "chrome_publish_mark", "chrome_cancel"}:
+            kwargs["article_id"] = article_id or _str_param(params, "article_id") or ""
+        elif intent == "chrome_defer":
+            kwargs["article_id"] = article_id or _str_param(params, "article_id") or ""
+            try:
+                hours_raw = params.get("hours")
+                kwargs["hours"] = float(hours_raw) if hours_raw is not None else None
+            except (TypeError, ValueError):
+                kwargs["hours"] = None
+        result = handler(operator, raw_payload, **kwargs)
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "command": command,
+            "scope": scope,
+            "data": result,
+            "stderr": None,
+        }
+
     action_map = {
         # v1.1.0
         "lark_gate_b_approve": "approve_b",
@@ -799,6 +982,15 @@ def _run_lark_command_in_process(
         "lark_apply_pending_edit": "apply_pending_edit",
         # v1.1.1 — generic defer (operator carries gate label in payload.gate)
         "lark_defer": "defer",
+        # Suggestions (Gate S)
+        "lark_suggestion_list": "suggestion_list",
+        "lark_suggestion_review": "suggestion_review",
+        "lark_suggestion_apply": "suggestion_apply",
+        "lark_suggestion_dismiss": "suggestion_dismiss",
+        # Profile multi-turn follow-up (Gate P)
+        "lark_profile_advance": "profile_advance",
+        # Audit list (no article_id) — TG /audit parity.
+        "lark_view_audit_recent": "view_audit_recent",
     }
     mode_defaults = {
         "lark_image_gate_cover_only": "cover-only",
