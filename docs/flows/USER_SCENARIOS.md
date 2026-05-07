@@ -1,6 +1,13 @@
 # AgentFlow User Scenarios
 
-从 operator（Telegram 单人值守）视角抽出的 13 个端到端场景泳道图。每图 5 列：Operator / Cron / Daemon / subprocess(CLI) / External（Atlas/Telegram/Medium/...）。后续"场景补充 + 优先级拆分"以本图为基底。
+从 operator 视角抽出的端到端场景泳道图。当前产品形态是
+Lark-first + Telegram fallback：Lark/OpenClaw 负责主审核卡与输入框回调，
+`blogflow review-daemon` 负责 heartbeat、timeout、定时 article-hotspots 和
+内置 `/api/commands` bridge；Telegram 仍可作为移动端/fallback。
+
+新的 Lark 主链路图见 `docs/flows/LARK_FIRST_REVIEW_FLOWS.md`。本文保留较长
+的历史场景拆分，旧图中出现的 TG callback / `PD:*` / `/list` 仍用于
+Telegram fallback；旧 `af` 命令请按 `blogflow` 读取。
 
 > 优先级标签未填，留空给 reviewer：`[P0 critical]` 流程闭环必备 / `[P1 productivity]` 日常省时间 / `[P2 polish]` 边缘 case。
 
@@ -19,7 +26,7 @@ sequenceDiagram
     autonumber
     participant User
     participant SH as SkillHarness(CC|Cursor)
-    participant CLI as af-CLI
+    participant CLI as blogflow CLI
     participant FS as FS(skill dir + ~/.agentflow)
     User->>FS: install standard skill package → agentflow-open-claw-v2 (v2.7)
     Note over FS: SKILL.md<br/>references/ (optional)<br/>assets/*.yaml
@@ -27,43 +34,43 @@ sequenceDiagram
     SH->>SH: register agentflow triggers
     User->>SH: invoke agentflow skill
     SH->>SH: load SKILL.md → follow CLI-only workflow
-    SH->>CLI: af doctor
+    SH->>CLI: blogflow doctor
     CLI-->>SH: .env + last_heartbeat.json + 12+ probes
-    SH->>CLI: af topic-profile show --profile <id>
+    SH->>CLI: blogflow topic-profile show --profile <id>
     alt missing fields
-        SH->>CLI: af topic-profile init --profile <id> --from-file assets/topic_profile.yaml
-        SH->>CLI: af topic-profile update --profile <id> --from-file assets/style_tuning.yaml
+        SH->>CLI: blogflow topic-profile init --profile <id> --from-file assets/topic_profile.yaml
+        SH->>CLI: blogflow topic-profile update --profile <id> --from-file assets/style_tuning.yaml
         CLI->>FS: write ~/.agentflow/topic_profiles.yaml
     end
-    Note over SH,CLI: skill 不包含源码、不 patch backend；harness 负责执行步骤，业务动作全部走 af CLI
+    Note over SH,CLI: skill 不包含源码、不 patch backend；harness 负责执行步骤，业务动作全部走 blogflow CLI
     Note over CLI,FS: 只有 CLI init/update 才写 ~/.agentflow/
 ```
 
-最新可交付包：`.cursor/skills/agentflow-open-claw-v2/`（v2.7），可分发 zip 为 `dist/agentflow-open-claw-v2.7.zip`。Skill 包采用标准结构：`SKILL.md` 放触发条件、工作流和 CLI 调用顺序；`references/` 可放长文档；`assets/` 放 YAML 模板/风格调节参数。默认入口按首次部署 / 初始化续跑处理，先检查 runtime repo、venv、`.env`、`~/.agentflow/`，再进入 `af bootstrap` / `af onboard` / `af doctor`。包内不放项目源码，避免 harness 执行偏离预期时改到实现代码，也降低安装体积。OpenClaw/Cursor/Claude Code 只作为 skill harness 负责加载与执行指令，不需要再为 skill 单独启动守护进程；Telegram review daemon 属于后续业务运行面，不是 S0.1 的安装依赖。
+最新可交付包：`.cursor/skills/agentflow-open-claw-v2/`（v2.8），可分发 zip 为 `dist/agentflow-open-claw-v2.8.zip`。Skill 包采用标准结构：`SKILL.md` 放触发条件、工作流和 CLI 调用顺序；`references/` 可放长文档；`assets/` 放 YAML 模板/风格调节参数。默认入口按首次部署 / 初始化续跑处理，先检查 runtime repo、venv、`.env`、`~/.agentflow/`，再进入 `blogflow bootstrap` / `blogflow onboard` / `blogflow doctor`。包内不放项目源码，避免 harness 执行偏离预期时改到实现代码，也降低安装体积。OpenClaw/Cursor/Claude Code 是 skill harness；业务运行面由 `blogflow review-daemon` 承担，Lark-first 时它同时提供 `/api/commands`。
 
 ---
 
 ## Scenario S0.2 — Backend 安装 + .env 起步  `[P_]`
 
-非 mermaid 场景。完整步骤见 `INSTALL.md` 顶部 5-Minute Mock Quickstart + Install steps（Step 1-8）。要点：venv 创建 → `pip install -e .` (deps 已 sync 到 pyproject.toml) → cp .env.template .env → `af bootstrap` 一站式起手 → `af doctor` 验。
+非 mermaid 场景。完整步骤见 `INSTALL.md` 顶部 5-Minute Mock Quickstart + Install steps（Step 1-8）。要点：venv 创建 → `pip install -e .` (deps 已 sync 到 pyproject.toml) → cp .env.template .env → `blogflow bootstrap` 一站式起手 → `blogflow doctor` 验。
 
 ---
 
-## Scenario S0.3 — `af onboard` 凭据向导  `[P_]`
+## Scenario S0.3 — `blogflow onboard` 凭据向导  `[P_]`
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant User
-    participant CLI as af-CLI
+    participant CLI as blogflow CLI
     participant Env as .env
     participant TP as topic_profiles.yaml
     alt --check (非交互)
-        User->>CLI: af onboard --check
+        User->>CLI: blogflow onboard --check
         CLI->>Env: read 10 sections × keys
         CLI-->>User: 每 section status (ok/missing/probe-fail)
     else --section <id> (单段)
-        User->>CLI: af onboard --section twitter
+        User->>CLI: blogflow onboard --section twitter
         CLI-->>User: why + required_for + keys 提示
         User->>CLI: 填值
         CLI->>Env: set_key per key
@@ -72,7 +79,7 @@ sequenceDiagram
             CLI-->>User: ok / fail
         end
     else 全交互 (10 步)
-        User->>CLI: af onboard
+        User->>CLI: blogflow onboard
         loop section ∈ [telegram, llm, embeddings, atlas, twitter, ghost, linkedin, webhook, resend, style]
             CLI-->>User: why + required_for + keys
             User->>CLI: 填值（可 skip）
@@ -83,7 +90,7 @@ sequenceDiagram
             end
         end
         Note over CLI,TP: 第 10 段 style 走 sample-driven 子链
-        CLI->>CLI: 触发 af learn-from-handle (链至 S0.4)
+        CLI->>CLI: 触发 blogflow learn-from-handle (链至 S0.4)
     end
 ```
 
@@ -91,26 +98,26 @@ sequenceDiagram
 
 ---
 
-## Scenario S0.4 — Style 导入 (`af learn-style` / `af learn-from-handle`)  `[P_]`
+## Scenario S0.4 — Style 导入 (`blogflow learn-style` / `blogflow learn-from-handle`)  `[P_]`
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant User
-    participant CLI as af-CLI
+    participant CLI as blogflow CLI
     participant D0 as D0 corpus dir
     participant LLM
     participant TP as topic_profiles.yaml
     participant SP as style_profile.yaml
-    alt (a) 本地 af learn-style --dir samples/
-        User->>CLI: af learn-style --dir samples/
+    alt (a) 本地 blogflow learn-style --dir samples/
+        User->>CLI: blogflow learn-style --dir samples/
         CLI->>D0: copy samples → ~/.agentflow/style_corpus/
         CLI->>LLM: extract style_signature
         LLM-->>CLI: signature
         CLI->>SP: write ~/.agentflow/style_profile.yaml (global)
         CLI-->>User: ok (global default)
-    else (b) 远程 af learn-from-handle <handle>
-        User->>CLI: af learn-from-handle <handle> [--profile <id>] [--max-keyword-candidates N]
+    else (b) 远程 blogflow learn-from-handle <handle>
+        User->>CLI: blogflow learn-from-handle <handle> [--profile <id>] [--max-keyword-candidates N]
         CLI->>LLM: scrape + extract style + keywords
         LLM-->>CLI: signature + keyword_candidates
         alt 不带 --profile
@@ -140,7 +147,7 @@ sequenceDiagram
     participant Daemon
     participant CLI as subprocess(CLI)
     participant Ext as Atlas/LLM
-    Cron->>CLI: af hotspots (scheduled)
+    Cron->>CLI: blogflow article-hotspots (scheduled)
     CLI->>Ext: scrape + LLM rank
     Ext-->>CLI: hotspots.jsonl
     CLI->>Daemon: triggers.post_gate_a (内部回调)
@@ -164,7 +171,7 @@ sequenceDiagram
     else A:reject_all (R2 整批拒绝)
         Op->>Daemon: callback "A:reject_all:<sid>"
         Daemon->>Daemon: 读 batch_path, 每个 hotspot status="rejected_batch"
-        Note over Daemon: audit kind=batch_rejected<br/>下次 af hotspots 不再出现
+        Note over Daemon: audit kind=batch_rejected<br/>下次 article-hotspots 不再出现
         Daemon-->>Op: 🚫 整批已拒绝
     else Gate A timeout (R3, _scan_timeouts loop)
         loop 每 60s
@@ -181,7 +188,7 @@ sequenceDiagram
     end
 ```
 
-Trigger: cron `af hotspots` → CLI 内部 trigger `post_gate_a` → state 进入 `topic_pool`（每个 hotspot 一条）→ `A:write:<sid>:slot=<N>` callback 后 daemon → `_spawn_write_and_fill(hid)` → `af write --auto-pick` 子进程在内部 4 跳：topic_pool → topic_approved → drafting → draft_pending_review。`A:reject_all`：batch 内每 hotspot status=rejected_batch（不动 article state）。Gate A timeout：12h ping / 24h auto-reject batch（同 reject_all 行为）。失败模式：spawn 子进程非 0 → daemon 发 TG "❌ 起稿失败" 含 stderr tail（不再 silent）。
+Trigger: cron `blogflow article-hotspots` → CLI 内部 trigger `post_gate_a` → state 进入 `topic_pool`（每个文章热点一条）→ `A:write:<sid>:slot=<N>` callback 后 daemon → `_spawn_write_and_fill(hid)` → `blogflow write --auto-pick` 子进程在内部 4 跳：topic_pool → topic_approved → drafting → draft_pending_review。`A:reject_all`：batch 内每个 article hotspot status=rejected_batch（不动 article state）。Gate A timeout：12h ping / 24h auto-reject batch（同 reject_all 行为）。失败模式：spawn 子进程非 0 → daemon 发 TG "❌ 起稿失败" 含 stderr tail（不再 silent）。
 
 ---
 
@@ -613,13 +620,13 @@ sequenceDiagram
     else /scan [top-k] (主动触发 hotspots)
         Op->>Daemon: send "/scan" or "/scan 5"
         Daemon->>Daemon: parse top-k (1-10, default 3)
-        Daemon-->>Op: "⏳ 主动扫描 hotspots 中..."
-        Daemon->>Daemon: _spawn_hotspots(top_k) → subprocess af hotspots
+        Daemon-->>Op: "⏳ 主动扫描文章热点中..."
+        Daemon->>Daemon: _spawn_hotspots(top_k) → subprocess blogflow article-hotspots
         Note over Daemon: 子进程跑完自动 trigger post_gate_a → Gate A 卡
         Note over Daemon: 失败 → _notify_spawn_failure
     else /jobs (cron 定时任务状态)
         Op->>Daemon: send "/jobs"
-        Daemon->>Daemon: _run_subprocess(af review-cron-status)
+        Daemon->>Daemon: _run_subprocess(blogflow review-cron-status)
         Daemon-->>Op: "⏰ Cron 定时任务 (launchd)<br/>plist/status/launchctl 输出"
         Note over Daemon: 仅只读, 不动 cron 配置
     end
@@ -634,7 +641,7 @@ sequenceDiagram
 
 `/published [N]` 默认 7d，max 90d（超界回错误提示）；按 `metadata.published_at` 过滤、按 recency 排序，显示 `<aid> — <title> (<age> on <platforms>)`，platform 取前 3，超出加 `…`；> 20 篇 truncate 并在 header 标 `(前 20)`；空结果回 `📭 最近 Nd 无 published 文章`。
 
-`/scan [N]` 主动 hotspots 扫描（不等 cron，default top-3 max 10）：daemon spawn `af hotspots --gate-a-top-k N` 子进程（300s timeout），CLI 跑完自动 trigger `post_gate_a` 推 Gate A 卡；失败由 `_notify_spawn_failure` 兜底。`/jobs` 只读 cron 状态（调 `af review-cron-status` 文本输出，仅 macOS / launchd；用 `af review-cron-{install,uninstall}` 改）。
+`/scan [N]` 主动文章热点搜索（不等 cron，default top-3 max 10）：daemon spawn `blogflow article-hotspots --gate-a-top-k N` 子进程（300s timeout），CLI 跑完自动 trigger `post_gate_a` 推 Gate A 卡；失败由 `_notify_spawn_failure` 兜底。`/jobs` 只读 cron 状态（调 `blogflow review-cron-status` 文本输出，仅 macOS / launchd；用 `blogflow review-cron-{install,uninstall}` 改）。
 
 ---
 
@@ -922,7 +929,7 @@ sequenceDiagram
     participant CLI as af-CLI
     participant Sched as launchd|systemd
     participant FS
-    User->>CLI: af review-cron-install --times "09:00,18:00"
+    User->>CLI: blogflow review-cron-install --times "09:00,18:00"
     alt macOS (launchd)
         CLI->>FS: 写 ~/Library/LaunchAgents/<plist>
         CLI->>Sched: launchctl load <plist>
@@ -933,19 +940,19 @@ sequenceDiagram
     end
     CLI-->>User: installed
     loop 每个时刻 (09:00, 18:00)
-        Sched->>CLI: af hotspots
+        Sched->>CLI: blogflow article-hotspots
         Note over CLI: 链至 S1 起稿
     end
-    User->>CLI: af review-cron-status
+    User->>CLI: blogflow review-cron-status
     CLI-->>User: enabled / next-fire
     opt 卸载
-        User->>CLI: af review-cron-uninstall
+        User->>CLI: blogflow review-cron-uninstall
         CLI->>Sched: unload / disable
         CLI->>FS: rm plist|unit
     end
 ```
 
-注解（≤50 字）：S0.6 是 init phase 末尾自动化，不强制；不装 cron 就改成手工跑 `af hotspots` 触发 S1。
+注解（≤50 字）：S0.6 是 init phase 末尾自动化，不强制；不装 cron 就改成手工跑 `blogflow article-hotspots` 触发 S1。
 
 ---
 

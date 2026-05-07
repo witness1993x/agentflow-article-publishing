@@ -1,6 +1,6 @@
 # Gate C — Image (Cover) Review (Lark-first / TG fallback)
 
-**When fired:** after `af image-gate` completes a generation pass. Only fires
+**When fired:** after `blogflow image-gate` completes a generation pass. Only fires
 when generation actually ran (`mode=cover-only` or `cover-plus-body`).
 For `mode=none`, Gate C is skipped entirely and the daemon advances directly
 to publish-ready.
@@ -94,7 +94,7 @@ Recommended buttons / inputs:
 Input compatibility:
 - Send image-review text as `payload.prompt` (also accepted: `comment`,
   `feedback`, `text`).
-- Backend passes the text into `af image-gate --cover-description`, clears the
+- Backend passes the text into `blogflow image-gate --cover-description`, clears the
   old cover resolution, regenerates, then posts a fresh Gate C.
 - `lark_gate_c_regen` / `lark_gate_c_relogo` are `dangerous=true`; the bridge
   must opt in with `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`.
@@ -133,7 +133,7 @@ Optional (warning only, doesn't block):
 | User action | Backend effect |
 |---|---|
 | ✅ 用这张 | gate_history append; daemon advances to publish-ready |
-| 🔁 再生成一张 | `af image-gate --cover-description <feedback>` when feedback exists; otherwise regenerate with the current prompt; new card |
+| 🔁 再生成一张 | `blogflow image-gate --cover-description <feedback>` when feedback exists; otherwise regenerate with the current prompt; new card |
 | 🎨 换 logo 位置 | bot prompts anchor pick; `brand_overlay.apply_overlay` re-run with new anchor; new card |
 | 🚫 不用图 | metadata cleared of cover; pipeline continues with no feature image |
 | 🖼 看完整尺寸 | bot replies with original 2k PNG as document |

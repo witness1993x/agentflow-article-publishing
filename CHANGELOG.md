@@ -18,6 +18,22 @@ surface** rather than runtime code parity.
 
 ## [1.1.9] — 2026-05-07
 
+- **OpenClaw-Lark skill hardening (skill v2.8 → v2.9).**
+  `agentflow-open-claw-v2/SKILL.md` gains a "Lark Card Rendering" section
+  documenting the only legal wiring when `@larksuite/openclaw-lark` is
+  installed: AgentFlow daemon POSTs `review.*_card` event envelopes to
+  an OpenClaw-side listener (e.g. `/agentflow/events`); listener renders
+  per `agent_review/templates/lark_review_cards.md` using `sendCardFeishu`;
+  button callbacks go through `dispatchFeishuPluginInteractiveHandler` to
+  AgentFlow's `/api/commands` with `lark_*` command format. Two new
+  anti-patterns added: (#11) `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` pointing
+  to AgentFlow's own `/api/commands` (causes 422 because envelope ≠
+  command format) and (#12) BEE falling back to plain-text scan dumps
+  when openclaw-lark is installed (strips the user of all Gate buttons).
+  No runtime / Python change — `agent_bridge.py:emit_agent_event` and
+  `agent_review/web.py:/api/commands` were already correct; the bug
+  surface was BEE's misconfiguration. Standalone skill zip:
+  `dist/agentflow-open-claw-v2.9.zip`.
 - **D1 third recall layer — Brave Web Search collector.** New
   `backend/agentflow/agent_d1/collectors/brave_search.py` mirrors the
   twitter_search.py contract: opt-in via `AGENTFLOW_BRAVE_SEARCH_ENABLED`,

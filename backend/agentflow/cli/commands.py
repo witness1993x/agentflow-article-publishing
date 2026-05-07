@@ -1,4 +1,4 @@
-"""`af` CLI entry point.
+"""`blogflow` / `mediaflow` CLI entry point.
 
 Every subcommand:
 
@@ -27,16 +27,18 @@ import click
 
 
 def _af_version() -> str:
-    try:
-        return _pkg_version("agentflow")
-    except PackageNotFoundError:
-        return "unknown"
+    for dist_name in ("agentflow-media", "agentflow"):
+        try:
+            return _pkg_version(dist_name)
+        except PackageNotFoundError:
+            continue
+    return "unknown"
 
 
 # Per-service secret files we'll auto-load from ``~/.agentflow/secrets/`` in
 # addition to the catch-all ``~/.agentflow/secrets/.env``. Order doesn't matter
 # (all use override=False so first-write-wins) but listing them makes the
-# precedence explicit and lets ``af keys-where`` enumerate the search space.
+# precedence explicit and lets ``blogflow keys-where`` enumerate the search space.
 _SECRET_SERVICES: tuple[str, ...] = (
     "telegram",
     "atlascloud",
@@ -52,7 +54,7 @@ _SECRET_SERVICES: tuple[str, ...] = (
 )
 
 
-# Populated by ``_load_dotenv_once`` so ``af doctor`` / ``af keys-where`` can
+# Populated by ``_load_dotenv_once`` so ``blogflow doctor`` / ``blogflow keys-where`` can
 # tell the operator which file each env var was resolved from. Maps env-var
 # name -> absolute path of the file that first defined it.
 _resolved_sources: dict[str, str] = {}
@@ -660,8 +662,8 @@ def _merge_profile_search_outputs(
 # ---------------------------------------------------------------------------
 
 
-@click.group(help="AgentFlow Article Publishing CLI")
-@click.version_option(_af_version(), prog_name="af")
+@click.group(help="AgentFlow Media / Blog Publishing CLI")
+@click.version_option(_af_version())
 def cli() -> None:
     pass
 
@@ -1108,11 +1110,11 @@ def _derive_style_signature(
 
 
 # ---------------------------------------------------------------------------
-# af hotspots
+# article-hotspots
 # ---------------------------------------------------------------------------
 
 
-@cli.command("hotspots", help="Run Agent D1 hotspot scan.")
+@cli.command("article-hotspots", help="Run Agent D1 article hotspot scan.")
 @click.option(
     "--scan-window-hours",
     type=int,
@@ -1125,14 +1127,14 @@ def _derive_style_signature(
     type=int,
     default=20,
     show_default=True,
-    help="Target number of hotspots to emit (upper bound).",
+    help="Target number of article hotspots to emit (upper bound).",
 )
 @click.option(
     "--filter",
     "filter_pattern",
     type=str,
     default=None,
-    help="Regex (case-insensitive) to keep only matching hotspots. Matched "
+    help="Regex (case-insensitive) to keep only matching article hotspots. Matched "
     "against topic_one_liner, suggested_angles titles, and source_reference "
     "text snippets. See docs/backlog/TOPIC_INTENT_FRAMEWORK.md.",
 )
@@ -1212,8 +1214,8 @@ def hotspots(
             _pf.assert_ready_for_hotspots()
         except Exception as _err:
             raise click.ClickException(
-                f"hotspots preflight failed: {_err}\n"
-                "Run `af doctor` for details, or set MOCK_LLM=true."
+                f"article-hotspots preflight failed: {_err}\n"
+                "Run `blogflow doctor` for details, or set MOCK_LLM=true."
             )
 
     active_intent = _load_current_intent_safe()
@@ -1295,7 +1297,7 @@ def hotspots(
             "topic_intent_used",
             article_id=None,
             payload={
-                "command": "hotspots",
+                "command": "article-hotspots",
                 "mode": "hybrid_recall",
                 "query": effective_filter_pattern,
                 "queries": search_queries,
@@ -1341,7 +1343,7 @@ def hotspots(
             "topic_intent_used",
             article_id=None,
             payload={
-                "command": "hotspots",
+                "command": "article-hotspots",
                 "mode": "regex",
                 "query": effective_filter_pattern,
                 "source": filter_source,
@@ -1456,6 +1458,17 @@ def hotspots(
             "label": _profile_meta(resolved_profile_id, topic_profile)["profile_label"],
         }
     click.echo(_json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+cli.add_command(
+    click.Command(
+        "hotspots",
+        callback=hotspots.callback,
+        params=hotspots.params,
+        help="Legacy alias for `article-hotspots`.",
+        hidden=True,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1663,11 +1676,11 @@ def search(
 
 
 # ---------------------------------------------------------------------------
-# af hotspot-show
+# article-hotspot-show
 # ---------------------------------------------------------------------------
 
 
-@cli.command("hotspot-show", help="Print a full hotspot record (JSON) by id.")
+@cli.command("article-hotspot-show", help="Print a full article hotspot record (JSON) by id.")
 @click.argument("hotspot_id")
 @click.option(
     "--date",
@@ -1679,6 +1692,17 @@ def search(
 def hotspot_show(hotspot_id: str, date: str | None) -> None:
     hs = _find_hotspot(hotspot_id, date=date)
     _emit_json(hs)
+
+
+cli.add_command(
+    click.Command(
+        "hotspot-show",
+        callback=hotspot_show.callback,
+        params=hotspot_show.params,
+        help="Legacy alias for `article-hotspot-show`.",
+        hidden=True,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -3037,7 +3061,7 @@ def _intents_path() -> Path:
 
 @cli.command(
     "intent-set",
-    help="Set the current TopicIntent — subsequent af hotspots/search "
+    help="Set the current TopicIntent — subsequent blogflow article-hotspots/search "
     "read it as a default filter. See docs/backlog/TOPIC_INTENT_FRAMEWORK.md.",
 )
 @click.argument("query", required=False)

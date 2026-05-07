@@ -1,6 +1,6 @@
 # Gate A — Topic Selection Review (Telegram)
 
-**When fired:** after `af hotspots` produces a fresh batch of candidates and
+**When fired:** after `blogflow article-hotspots` produces a fresh batch of article-topic candidates and
 auto-classifies them. Top-K (default 3) are pushed to the review chat.
 
 **Risk class:** Medium (long-form Medium article workflow). Human must approve

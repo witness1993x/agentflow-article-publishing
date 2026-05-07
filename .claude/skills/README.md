@@ -4,11 +4,11 @@ Self-contained skills that let a user drive the AgentFlow workflow from inside a
 
 ## Contents
 
-- `agentflow/` — top-level guide. Explains profile/bootstrap, hotspots, writing, and publishing.
-- `agentflow-style/` — wraps `af learn-style` to teach/refresh the voice profile.
-- `agentflow-hotspots/` — wraps `af hotspots` + `af hotspot-show` to pick today's topic.
-- `agentflow-write/` — wraps `af write` / `af fill` / `af edit` / `af image-resolve` for the full writing loop.
-- `agentflow-publish/` — wraps `af preview` + `af publish`, including Medium manual package fallback.
+- `agentflow/` — top-level guide. Explains profile/bootstrap, article hotspots, writing, and publishing.
+- `agentflow-style/` — wraps `blogflow learn-style` to teach/refresh the voice profile.
+- `agentflow-hotspots/` — wraps `blogflow article-hotspots` + `blogflow article-hotspot-show` to pick today's article topic.
+- `agentflow-write/` — wraps `blogflow write` / `blogflow fill` / `blogflow edit` / `blogflow image-resolve` for the full writing loop.
+- `agentflow-publish/` — wraps `blogflow preview` + `blogflow publish`, including Medium manual package fallback.
 - `agentflow-tweet/` — Twitter/X short-form distribution helpers.
 - `agentflow-newsletter/` — newsletter distribution helpers.
 
@@ -77,13 +77,13 @@ From a Claude Code session, use either:
 
 ## Prerequisites
 
-- Python venv at `backend/.venv/` with the `af` launcher installed (`.venv/bin/af`).
+- Python venv at `backend/.venv/` with the `blogflow` launcher installed (`.venv/bin/blogflow`; `mediaflow` is an equivalent alias).
 - All skills assume the project lives at `<repo_root>/` and the venv at `<repo_root>/backend/.venv/`.
 - For mock-friendly demos: `export MOCK_LLM=true` before running.
-- `topic_profiles.yaml` is the source of truth for publisher/topic constraints; use `af topic-profile` commands rather than editing it directly.
+- `topic_profiles.yaml` is the source of truth for publisher/topic constraints; use `blogflow topic-profile` commands rather than editing it directly.
 
 ## Shared rules (enforced by every skill)
 
-- Use the `af` CLI. Never import `agentflow.*` Python modules directly.
+- Use the `blogflow` CLI (`mediaflow` alias). Never import `agentflow.*` Python modules directly.
 - Prefer `--json` output; read JSON inline for small payloads, via the `Read` tool for large ones.
-- On any non-zero `af` exit, tail `~/.agentflow/logs/agentflow.log` and surface the last 20 lines.
+- On any non-zero `blogflow` exit, tail `~/.agentflow/logs/agentflow.log` and surface the last 20 lines.

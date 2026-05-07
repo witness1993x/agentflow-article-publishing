@@ -12,7 +12,7 @@ The scorer mirrors the tokenizer used elsewhere in agentflow (see
     survive even when they appear inside a longer phrase
   - Very common stopwords are dropped (English glue + Chinese function chars)
 
-Used by ``agent_review.triggers.post_gate_a`` to rerank `af hotspots`
+Used by ``agent_review.triggers.post_gate_a`` to rerank `blogflow article-hotspots`
 candidates so that an active publisher_account (any brand) downranks
 topics that share no product surface with the publisher's domain.
 """

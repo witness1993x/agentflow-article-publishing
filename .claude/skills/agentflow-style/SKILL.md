@@ -10,7 +10,7 @@ description: |
 
 # agentflow-style — learn or refresh the voice profile
 
-Wraps the `af learn-style` command. Use when the user wants to (re)build the style profile at `~/.agentflow/style_profile.yaml` from their own past articles.
+Wraps the `blogflow learn-style` command. Use when the user wants to (re)build the style profile at `~/.agentflow/style_profile.yaml` from their own past articles.
 
 ## Decide the mode from the user's message
 
@@ -27,23 +27,23 @@ From the project root (the venv is at `backend/.venv/`):
 ```bash
 cd /Users/witness/Desktop/experimental/medium\&blog_posting_agent/agentflow-article-publishing/backend
 source .venv/bin/activate
-PYTHONPATH=. af learn-style --file /path/to/a.md --file /path/to/b.docx --url https://example.com/post
+PYTHONPATH=. blogflow learn-style --file /path/to/a.md --file /path/to/b.docx --url https://example.com/post
 ```
 
 Other modes:
 
 ```bash
-PYTHONPATH=. af learn-style --dir /path/to/drafts_folder
-PYTHONPATH=. af learn-style --show
-PYTHONPATH=. af learn-style --recompute
-PYTHONPATH=. af learn-style --from-published
+PYTHONPATH=. blogflow learn-style --dir /path/to/drafts_folder
+PYTHONPATH=. blogflow learn-style --show
+PYTHONPATH=. blogflow learn-style --recompute
+PYTHONPATH=. blogflow learn-style --from-published
 ```
 
 Tip: `--file` and `--url` can repeat. Mix freely in one call.
 
 ## After the command succeeds
 
-Run `PYTHONPATH=. af learn-style --show` and summarise in 6–10 lines, pulling from the YAML output:
+Run `PYTHONPATH=. blogflow learn-style --show` and summarise in 6–10 lines, pulling from the YAML output:
 
 - `voice_principles` — 3 bullets.
 - `taboos` — the 3–5 words/phrases the user most wants to avoid.
@@ -60,7 +60,7 @@ Don't dump the raw YAML — distil.
 
 ## Error handling
 
-If `af learn-style` exits non-zero:
+If `blogflow learn-style` exits non-zero:
 
 ```bash
 tail -n 20 ~/.agentflow/logs/agentflow.log
@@ -74,9 +74,9 @@ After the profile is updated, suggest: "Run `/agentflow-hotspots` to scan for to
 
 ## MOCK_LLM note
 
-`MOCK_LLM=true af learn-style --file ...` ingests real files but routes LLM calls (per-article analyses + aggregation) through fixtures. Without `MOCK_LLM=true`, each new source triggers a real Moonshot/Claude analysis, then a final aggregation pass. Real-key run on 2 samples ≈ 20-30s.
+`MOCK_LLM=true blogflow learn-style --file ...` ingests real files but routes LLM calls (per-article analyses + aggregation) through fixtures. Without `MOCK_LLM=true`, each new source triggers a real Moonshot/Claude analysis, then a final aggregation pass. Real-key run on 2 samples ≈ 20-30s.
 
 ## NEVER
 
-- Never import `agentflow.agent_d0` directly. Use `af learn-style`.
+- Never import `agentflow.agent_d0` directly. Use `blogflow learn-style`.
 - Never write to `~/.agentflow/style_profile.yaml` by hand.

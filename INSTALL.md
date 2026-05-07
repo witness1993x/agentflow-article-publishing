@@ -74,7 +74,7 @@ The agent dispatches on `current_state`. Reference table for all states:
 | `incomplete_profile` | Profile lacks brand/voice/do/dont/product_facts/keyword_groups | `af topic-profile init -i --profile <id>` or `af topic-profile derive --profile <id>` | `init` |
 | `missing_chat_id` (B/C only) | `TELEGRAM_BOT_TOKEN` set but bot hasn't seen a `/start` yet | Send `/start` to your bot in Telegram (auto-captures `chat_id`) | `init` |
 | `daemon_not_running` (B/C only) | Heartbeat missing or > 5min stale | `af review-daemon &` (or systemd / launchd) | `init` |
-| `ready` | All checks pass | `af hotspots --gate-a-top-k 3` | `ready` |
+| `ready` | All checks pass | `blogflow article-hotspots --gate-a-top-k 3` | `ready` |
 
 Mode A operators (no `TELEGRAM_BOT_TOKEN`) skip the `missing_chat_id` and `daemon_not_running` states entirely. They land on `ready` straight from `incomplete_profile` resolution. The `ready` payload still surfaces `optional_next` describing how to upgrade to Mode B later.
 
@@ -119,14 +119,14 @@ Want to drive a full pipeline without any real API keys? One command:
 af bootstrap --mock --first-run    # writes MOCK_LLM=true, runs the agent loop
 ```
 
-After that, `af hotspots --json | af write … --auto-pick --json | af preview … | af publish --force-strip-images` all run end-to-end against deterministic fixtures. Nothing leaves your machine.
+After that, `blogflow article-hotspots --json | blogflow write … --auto-pick --json | blogflow preview … | blogflow publish --force-strip-images` all run end-to-end against deterministic fixtures. Nothing leaves your machine.
 
 ## Step 2 — operate
 
 Once `current_state == "ready"`:
 
 ```bash
-af hotspots --gate-a-top-k 3        # D1: today's topics
+blogflow article-hotspots --gate-a-top-k 3  # D1: today's article topics
 af write <hotspot_id> --auto-pick   # D2: skeleton + fill
 af preview <article_id>             # D3: platform-adapted versions
 af publish <article_id>             # D4: real publish (or mock)
@@ -140,18 +140,18 @@ If you want the daemon running 24/7 (Mode B/C), use the deploy bundle:
 
 ```bash
 # On your laptop
-bash scripts/build_deploy_bundle.sh ~/Desktop/agentflow-deploy.tar.gz
-scp ~/Desktop/agentflow-deploy.tar.gz user@vm:/tmp/
+bash scripts/build_deploy_bundle.sh ~/Desktop/blogflow-deploy.tar.gz
+scp ~/Desktop/blogflow-deploy.tar.gz user@vm:/tmp/
 
 # On the VM
 ssh user@vm
-sudo tar -xzf /tmp/agentflow-deploy.tar.gz -C /opt/
-sudo bash /opt/agentflow-deploy/deploy.sh
-sudo -u agentflow /opt/agentflow/backend/.venv/bin/af onboard
-sudo systemctl restart agentflow-review
+sudo tar -xzf /tmp/blogflow-deploy.tar.gz -C /opt/
+sudo bash /opt/blogflow-deploy/deploy.sh
+sudo -u blogflow /opt/blogflow/backend/.venv/bin/blogflow onboard
+sudo systemctl restart blogflow-review
 ```
 
-The deploy bundle excludes any local `.env` / `env_config*` / `*.key` / `*.pem` (sanity-guarded since v1.0.4); you fill `.env` on the VM via `af onboard`, not by SCP'ing it.
+The deploy bundle excludes any local `.env` / `env_config*` / `*.key` / `*.pem` (sanity-guarded since v1.0.4); you fill `.env` on the VM via `blogflow onboard`, not by SCP'ing it.
 
 See [`agentflow-deploy/INSTALL_LINUX.md`](agentflow-deploy/INSTALL_LINUX.md) for the systemd unit details.
 
@@ -163,7 +163,7 @@ See [`agentflow-deploy/INSTALL_LINUX.md`](agentflow-deploy/INSTALL_LINUX.md) for
 | `~/.agentflow/secrets/<service>.env` | operator | Per-service slice (overrides catch-all) |
 | `~/.agentflow/topic_profiles.yaml` | operator | Brand / voice / sources / keywords |
 | `~/.agentflow/style_profile.yaml` | `af learn-style` | Voice fingerprint from your past articles |
-| `~/.agentflow/hotspots/<date>.json` | `af hotspots` | Daily D1 scan output |
+| `~/.agentflow/hotspots/<date>.json` | `blogflow article-hotspots` | Daily D1 article-hotspots output |
 | `~/.agentflow/drafts/<article_id>/` | `af write/fill/edit` | Skeleton, draft.md, metadata, platform_versions |
 | `~/.agentflow/memory/events.jsonl` | every CLI mutation | Append-only event stream |
 | `~/.agentflow/review/` | review daemon | Heartbeat, pending-edit state, short-id index |

@@ -1,6 +1,6 @@
 # Gate B — Draft Article Review (Lark-first / TG fallback)
 
-**When fired:** after `af fill` completes (D2 finished, body has compliance
+**When fired:** after `blogflow fill` completes (D2 finished, body has compliance
 score). Draft is paused before image generation. Cannot be skipped — long-form
 review is mandatory per the social-content-review proposal (📝 long-form
 always requires human approval).
@@ -100,7 +100,7 @@ Input compatibility:
   (also accepted: `edit_text`, `prompt`, `feedback`, `text`).
 - If the operator @-mentions the bot later, OpenClaw must call
   `lark_apply_pending_edit` with `payload.text`. The backend consumes the
-  latest pending slot once and runs `af edit --post-review`.
+  latest pending slot once and runs `blogflow edit --post-review`.
 - Edit-spawning Lark commands are `dangerous=true`; the bridge must opt in
   with `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`.
 
@@ -117,11 +117,11 @@ Input compatibility:
 
 After ✏️ or 🔁, the bot enters a multi-turn flow:
 - ✏️ 编辑 → TG replies "回复想改的位置 (title / opening / closing / 第 N 段)
-  + 改写指令"; user replies; bot calls `af edit <article_id> --section <N>
+  + 改写指令"; user replies; bot calls `blogflow edit <article_id> --section <N>
   --command "<text>" --post-review` and re-posts an updated card. Lark either
   submits inline `payload.comment` directly or uses `lark_apply_pending_edit`
   for the @bot follow-up.
-- 🔁 重写 → bot calls `af fill <article_id>` again with the same
+- 🔁 重写 → bot calls `blogflow fill <article_id>` again with the same
   title/opening/closing indices but bumps a `rewrite_round` counter;
   after 2 rewrites, escalates to 🔴 (forces human edit, no further auto-rewrite).
 
@@ -142,8 +142,8 @@ Soft blockers (✅ enabled but warning shown):
 | User action | Backend effect |
 |---|---|
 | ✅ 通过 | metadata.status = `draft_approved`; gate_history append; daemon advances to Gate C |
-| ✏️ 编辑 | Multi-turn / inline edit; `af edit --post-review`; new version posted, ✅/🚫 again |
-| 🔁 重写/refill | `af fill` / `af fill --skeleton-only --auto-pick` re-run; rewrite_round++; if =2, escalate to manual |
+| ✏️ 编辑 | Multi-turn / inline edit; `blogflow edit --post-review`; new version posted, ✅/🚫 again |
+| 🔁 重写/refill | `blogflow fill` / `blogflow fill --skeleton-only --auto-pick` re-run; rewrite_round++; if =2, escalate to manual |
 | 🚫 拒绝 | metadata.status = `draft_rejected`; article archived; pipeline halts |
 | 📊 看 diff | Bot sends a unified diff against last reviewed version |
 | ⏰ 推迟 2h | Re-post in 2h |

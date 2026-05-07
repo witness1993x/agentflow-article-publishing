@@ -8,7 +8,7 @@ AgentFlow 文章发布框架（agentflow-article-publishing）的 Cursor / Claud
 |---|---|
 | `SKILL.md` | 触发后加载；包含硬规则、CLI-first 工作流和按需阅读入口 |
 | `references/` | 长参考文档、示例和复杂任务模板 |
-| `assets/` | YAML 模板；作为 `af topic-profile ... --from-file` 的参数输入 |
+| `assets/` | YAML 模板；作为 `blogflow topic-profile ... --from-file` 的参数输入 |
 
 包内不包含 `backend/agentflow/` 源码，也不包含 runtime 依赖。这样可以避免 harness 在执行偏离预期时修改实现代码，并降低安装负担。
 
@@ -20,13 +20,16 @@ AgentFlow 文章发布框架（agentflow-article-publishing）的 Cursor / Claud
 
 1. runtime repo：含 `backend/agentflow/` 和 `pyproject.toml`
 2. Python venv：`cd backend && python3 -m venv .venv && pip install -e .`
-3. `.env`：mock-only 至少需要 Telegram 相关配置和 `MOCK_LLM=true`
-4. `~/.agentflow/`：首次通过 `af review-init` / `af bootstrap` 创建
+3. `.env`：mock-only 需 `MOCK_LLM=true`；Lark-first 需
+   `AGENTFLOW_LARK_APP_PRIMARY=true`、OpenClaw event webhook、bridge token；
+   TG fallback 才需要 Telegram 配置
+4. `~/.agentflow/`：首次通过 `blogflow bootstrap` / `blogflow review-init` 创建
 
-OpenClaw/Cursor/Claude Code 是 harness，不需要为 skill 单独启动守护进程。`af review-daemon` 是 Telegram review 业务运行面，只有在实际跑 bot 时才需要。
+OpenClaw/Cursor/Claude Code 是 harness，不需要为 skill 单独启动守护进程。`blogflow review-daemon` 是业务运行面：Lark-first 时它内置 `/api/commands` bridge；Telegram 只是 fallback。
 
 ## 版本历史
 
+- v2.8：同步 Lark-first daemon-owned bridge：`blogflow review-daemon` 承接 OpenClaw `/api/commands` callback，不再把 `review-dashboard` 当主入口。
 - v2.7：把默认入口改为首次部署 / 初始化续跑；description 与正文 prompt 都先要求检查 runtime repo、venv、`.env`、`~/.agentflow/`。
 - v2.6：压缩 `SKILL.md` frontmatter description，保持 Cursor/OpenClaw 元数据轻量；确认标准包结构可直接分发。
 - v2.5：整理为标准 skill 包结构；新增 `references/` 与 `assets/`；明确 CLI-only、no-source、no-extra-daemon。

@@ -17,13 +17,16 @@ from agentflow.cli.commands import _emit_json, cli
 
 @cli.command(
     "review-daemon",
-    help="Run the Telegram review daemon (long-poll, callbacks, timeout sweeps).",
+    help=(
+        "Run the review daemon. Telegram mode long-polls TG; Lark-first mode "
+        "also embeds the /api/commands bridge for OpenClaw callbacks."
+    ),
 )
 @click.option(
     "--skip-preflight",
     is_flag=True,
     default=False,
-    help="Bypass the credential preflight check (af doctor) on startup.",
+    help="Bypass the credential preflight check (blogflow doctor) on startup.",
 )
 def review_daemon_cmd(skip_preflight: bool) -> None:
     from agentflow.agent_review import daemon
@@ -563,7 +566,7 @@ def review_list_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Cron: twice-daily auto hotspots scan (macOS launchctl)
+# Cron: twice-daily auto article-hotspots scan (macOS launchctl)
 # ---------------------------------------------------------------------------
 
 
@@ -572,17 +575,17 @@ _LAUNCHD_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.agentflow.review.hotspots</string>
+    <string>com.blogflow.review.article-hotspots</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>cd {backend_dir} &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; ./.venv/bin/af hotspots --filter ".*"</string>
+        <string>cd {backend_dir} &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; ./.venv/bin/blogflow article-hotspots --filter ".*"</string>
     </array>
     <key>StandardOutPath</key>
-    <string>{log_dir}/hotspots.stdout.log</string>
+    <string>{log_dir}/article-hotspots.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>{log_dir}/hotspots.stderr.log</string>
+    <string>{log_dir}/article-hotspots.stderr.log</string>
     <key>StartCalendarInterval</key>
     <array>
 {calendar_intervals}
@@ -595,9 +598,9 @@ _LAUNCHD_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 @cli.command(
     "review-cron-install",
     help=(
-        "Install a launchd plist that runs `af hotspots` at fixed times "
+        "Install a launchd plist that runs `blogflow article-hotspots` at fixed times "
         "daily. macOS-only. For Linux/Docker/sandbox deployments, set the "
-        "AGENTFLOW_HOTSPOTS_SCHEDULE env var instead — the daemon will "
+        "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE env var instead — the daemon will "
         "fire hotspots itself with no OS-level cron required."
     ),
 )
@@ -605,7 +608,7 @@ _LAUNCHD_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     "--times",
     default="09:00,18:00",
     show_default=True,
-    help="Comma-separated HH:MM (local time) — when to fire af hotspots.",
+    help="Comma-separated HH:MM (local time) — when to fire blogflow article-hotspots.",
 )
 def review_cron_install_cmd(times: str) -> None:
     import os as _os
@@ -616,12 +619,12 @@ def review_cron_install_cmd(times: str) -> None:
     if _platform.system() != "Darwin":
         raise click.ClickException(
             "review-cron-install is macOS-only (writes a launchd plist).\n"
-            "On Linux / Docker / sandbox: set AGENTFLOW_HOTSPOTS_SCHEDULE in\n"
+            "On Linux / Docker / sandbox: set BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE in\n"
             "your .env to the same comma-separated HH:MM list (e.g.\n"
-            "AGENTFLOW_HOTSPOTS_SCHEDULE=\"09:00,18:00\") and restart the\n"
-            "review daemon. The daemon's internal scheduler fires hotspots\n"
+            "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE=\"09:00,18:00\") and restart the\n"
+            "review daemon. The daemon's internal scheduler fires article hotspots\n"
             "with no systemd / cron required.\n"
-            "Status: af review-schedule-status"
+            "Status: blogflow review-schedule-status"
         )
 
     parts = [t.strip() for t in (times or "").split(",") if t.strip()]
@@ -642,7 +645,7 @@ def review_cron_install_cmd(times: str) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     plist_dir = Path.home() / "Library" / "LaunchAgents"
     plist_dir.mkdir(parents=True, exist_ok=True)
-    plist_path = plist_dir / "com.agentflow.review.hotspots.plist"
+    plist_path = plist_dir / "com.blogflow.review.article-hotspots.plist"
 
     cal_xml = "\n".join(
         f"        <dict><key>Hour</key><integer>{h}</integer>"
@@ -672,7 +675,7 @@ def review_cron_install_cmd(times: str) -> None:
     click.echo(f"installed: {plist_path}")
     click.echo(f"times:     {', '.join(t for t in parts)} (local)")
     click.echo(f"logs:      {log_dir}")
-    click.echo(f"check:     af review-cron-status")
+    click.echo(f"check:     blogflow review-cron-status")
 
 
 @cli.command(
@@ -683,7 +686,7 @@ def review_cron_uninstall_cmd() -> None:
     import subprocess
     from pathlib import Path
 
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.agentflow.review.hotspots.plist"
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.blogflow.review.article-hotspots.plist"
     if not plist_path.exists():
         click.echo("(no plist installed)")
         return
@@ -703,10 +706,10 @@ def review_cron_status_cmd() -> None:
     import subprocess
     from pathlib import Path
 
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.agentflow.review.hotspots.plist"
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.blogflow.review.article-hotspots.plist"
     click.echo(f"plist:    {plist_path} ({'present' if plist_path.exists() else 'missing'})")
     res = subprocess.run(
-        ["launchctl", "list", "com.agentflow.review.hotspots"],
+        ["launchctl", "list", "com.blogflow.review.article-hotspots"],
         capture_output=True, text=True, check=False,
     )
     if res.returncode == 0:
@@ -719,8 +722,8 @@ def review_cron_status_cmd() -> None:
 @cli.command(
     "review-schedule-status",
     help=(
-        "Show daemon-internal hotspots schedule (cross-OS). Driven by the "
-        "AGENTFLOW_HOTSPOTS_SCHEDULE env var; runs inside the review "
+        "Show daemon-internal article-hotspots schedule (cross-OS). Driven by the "
+        "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE env var; runs inside the review "
         "daemon's housekeeping tick — no systemd / launchd needed."
     ),
 )
@@ -734,10 +737,10 @@ def review_schedule_status_cmd(as_json: bool) -> None:
         click.echo(_json.dumps(snap, ensure_ascii=False, indent=2))
         return
     if not snap["enabled"]:
-        click.echo("schedule: DISABLED (AGENTFLOW_HOTSPOTS_SCHEDULE empty)")
-        click.echo("set AGENTFLOW_HOTSPOTS_SCHEDULE=\"09:00,18:00\" in .env to enable")
+        click.echo("schedule: DISABLED (BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE empty)")
+        click.echo("set BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE=\"09:00,18:00\" in .env to enable")
         return
-    click.echo(f"schedule: {snap['raw']}  (top_k={snap['top_k']})")
+    click.echo(f"schedule: {snap['raw']}  (top_k={snap['top_k']}, env={snap.get('env_var')})")
     click.echo(f"now:      {snap['now']}")
     for row in snap["slots"]:
         last = row["last_fired_at"] or "(never)"

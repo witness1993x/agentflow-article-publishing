@@ -1,16 +1,16 @@
 ---
 name: agentflow-hotspots
 description: |
-  Scan trending topics, present them, and help the user pick one hotspot + angle.
+  Scan article hotspots, present them, and help the user pick one article topic + angle.
 
-  TRIGGER: "/agentflow-hotspots", "af hotspots", "热点", "topic discovery", "Gate A", "选题", "today's topic".
+  TRIGGER: "/agentflow-hotspots", "blogflow article-hotspots", "文章热点搜索", "文章热点", "topic discovery", "Gate A", "选题", "today's article topic".
 
-  SKIP for: modifying the hotspots scoring algorithm (D1 internals are not skill orchestration); editing publisher_account.keyword_groups (topic_profile domain).
+  SKIP for: modifying the article-hotspots scoring algorithm (D1 internals are not skill orchestration); editing publisher_account.keyword_groups (topic_profile domain).
 ---
 
-# agentflow-hotspots — pick today's topic
+# agentflow-hotspots — pick today's article topic
 
-Wraps `af hotspots` and `af hotspot-show`. Goal: leave the user with one `<hotspot_id>` + `<angle_index>` chosen, then hand off to `agentflow-write`.
+Wraps `blogflow article-hotspots` and `blogflow article-hotspot-show`. Goal: leave the user with one `<hotspot_id>` + `<angle_index>` chosen, then hand off to `agentflow-write`.
 
 ## Step 0 — detect a topic intent in the user's message
 
@@ -33,20 +33,20 @@ Before profile-aware scans, resolve the profile id:
 ## Step 1 — scan
 
 Run the scan. It takes ~30s with the real LLM, <1s under `MOCK_LLM=true`.
-Before the scan, make sure the active topic profile is at least minimally usable. If `af topic-profile show --profile <id> --json` reports missing `publisher_account.brand`, `publisher_account.voice`, `publisher_account.output_language`, `publisher_account.product_facts`, `keyword_groups.core`, or `search_queries`, start the profile setup/update path before treating the scan as production-quality.
+Before the scan, make sure the active topic profile is at least minimally usable. If `blogflow topic-profile show --profile <id> --json` reports missing `publisher_account.brand`, `publisher_account.voice`, `publisher_account.output_language`, `publisher_account.product_facts`, `keyword_groups.core`, or `search_queries`, start the profile setup/update path before treating the scan as production-quality.
 
 **Broad scan**:
 
 ```bash
 cd /Users/witness/Desktop/experimental/medium\&blog_posting_agent/agentflow-article-publishing/backend
 source .venv/bin/activate
-PYTHONPATH=. af hotspots --profile <id> --json
+PYTHONPATH=. blogflow article-hotspots --profile <id> --json
 ```
 
 **Topic-targeted scan** (adds `--filter`):
 
 ```bash
-PYTHONPATH=. af hotspots --profile <id> --filter "MCP|agent orchestration" --json
+PYTHONPATH=. blogflow article-hotspots --profile <id> --filter "MCP|agent orchestration" --json
 ```
 
 The filter is a case-insensitive regex matched against each hotspot's `topic_one_liner`, suggested angle titles, and source reference snippets. Result's `filter.matched / filter.total` tells you how narrow it got. `filter.filtered_out_preview` gives a bounded preview of what was excluded, and `filter.boundary.level` tells you whether the filter is `too_narrow`, `narrow`, `balanced`, or `broad`.
@@ -54,8 +54,8 @@ The filter is a case-insensitive regex matched against each hotspot's `topic_one
 If the scan or TG panel surfaces `Config Suggestions`, review them through the CLI contract:
 
 ```bash
-af topic-profile review <suggestion_id> --json
-af topic-profile apply <suggestion_id> --json
+blogflow topic-profile review <suggestion_id> --json
+blogflow topic-profile apply <suggestion_id> --json
 ```
 
 If `matched == 0`, tell the user: "0 matched out of N. Widen the query?" — don't silently fall back to unfiltered results.
@@ -63,10 +63,10 @@ If `matched == 0`, tell the user: "0 matched out of N. Widen the query?" — don
 Capture stdout. If the JSON is large, redirect to a temp file and `Read` it:
 
 ```bash
-PYTHONPATH=. af hotspots --json > /tmp/af_hotspots.json
+PYTHONPATH=. blogflow article-hotspots --json > /tmp/article_hotspots.json
 ```
 
-Then `Read /tmp/af_hotspots.json`.
+Then `Read /tmp/article_hotspots.json`.
 
 ## Step 2 — present a numbered list
 
@@ -106,7 +106,7 @@ Ask literally: "Pick a number (1–N), 'write all', or 'skip' to stop."
 Pull the hotspot id from the list. Run:
 
 ```bash
-PYTHONPATH=. af hotspot-show <hotspot_id> --json
+PYTHONPATH=. blogflow article-hotspot-show <hotspot_id> --json
 ```
 
 From `suggested_angles[]`, enumerate:
@@ -129,12 +129,12 @@ If the user says "yes" / "go" / "do it", internally transition into the `agentfl
 
 ## Error handling
 
-- If no hotspots file exists yet (first run), `af hotspots` will create one. If it returns an empty list, tell the user to check `~/.agentflow/sources.yaml` and `logs/agentflow.log`.
+- If no hotspots file exists yet (first run), `blogflow article-hotspots` will create one. If it returns an empty list, tell the user to check `~/.agentflow/sources.yaml` and `logs/agentflow.log`.
 - On non-zero exit: `tail -n 20 ~/.agentflow/logs/agentflow.log` and surface to user.
 
 ## State side-effects
 
-`af hotspots` writes `~/.agentflow/hotspots/<YYYY-MM-DD>.json`. Running it twice in the same day overwrites the daily batch. Search-result archives live separately under `~/.agentflow/search_results/` so later AI runs can trace historical recall inputs. Hotspot scans may also surface profile config suggestions; review/apply those through `af topic-profile` or `/suggestions` rather than editing YAML directly.
+`blogflow article-hotspots` writes `~/.agentflow/hotspots/<YYYY-MM-DD>.json`. Running it twice in the same day overwrites the daily batch. Search-result archives live separately under `~/.agentflow/search_results/` so later AI runs can trace historical recall inputs. Article hotspot scans may also surface profile config suggestions; review/apply those through `blogflow topic-profile` or `/suggestions` rather than editing YAML directly.
 
 ## Downstream contract: source_references
 
@@ -148,4 +148,4 @@ Each hotspot record carries a `source_references[]` array (author / URL / text_s
 
 ## MOCK_LLM
 
-`MOCK_LLM=true af hotspots --json` returns 5 deterministic fixture hotspots. Good for skill demos.
+`MOCK_LLM=true blogflow article-hotspots --json` returns 5 deterministic fixture article hotspots. Good for skill demos.

@@ -1927,7 +1927,7 @@ def _populate_command_registry() -> None:
     )
     _register_command(
         "scan", group="Bootstrap", auth_bucket="system",
-        summary="Trigger hotspots scan",
+        summary="Trigger article hotspots scan",
         handler=_handle_scan,
     )
 
@@ -2610,7 +2610,7 @@ def _handle_message(update: dict[str, Any]) -> None:
                     tg_client.send_message(
                         chat_id,
                         _render.escape_md2(
-                            "❌ /jobs 查询失败 (af review-cron-status 错)"
+                            "❌ /jobs 查询失败 (blogflow review-cron-status 错)"
                         ),
                         parse_mode="MarkdownV2",
                     )
@@ -2626,7 +2626,7 @@ def _handle_message(update: dict[str, Any]) -> None:
                 header = (
                     "⏰ Cron 定时任务 (launchd)"
                     if installed
-                    else "⏰ 无 cron 定时任务 (用 `af review-cron-install --times \"09:00,18:00\"` 装)"
+                    else "⏰ 无 cron 定时任务 (用 `blogflow review-cron-install --times \"09:00,18:00\"` 装)"
                 )
                 # cap raw output to keep TG messages short.
                 snippet = "\n".join(raw.splitlines()[:20])[:1500]
@@ -3241,7 +3241,7 @@ def _route(
     if gate == "A" and action == "reject_all":
         # Hotspots haven't become articles yet, so there's no article_id to
         # transition. Instead we flag every hotspot in the batch with
-        # ``status="rejected_batch"`` so the next ``af hotspots`` scan skips
+        # ``status="rejected_batch"`` so the next article-hotspots scan skips
         # them. Errors here MUST NOT crash the daemon — we degrade to an
         # audit-only ack so the user still gets feedback.
         batch_path = entry.get("batch_path")
@@ -4349,6 +4349,49 @@ def _route(
 _STOP = threading.Event()
 
 
+def _bool_env(name: str) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _lark_app_primary() -> bool:
+    return _bool_env("AGENTFLOW_LARK_APP_PRIMARY")
+
+
+def _embedded_bridge_enabled() -> bool:
+    return _lark_app_primary() or _bool_env("AGENTFLOW_REVIEW_DAEMON_BRIDGE_ENABLED")
+
+
+def _start_embedded_bridge_if_enabled() -> None:
+    """Run the agent bridge API inside review-daemon for Lark/OpenClaw.
+
+    Lark card callbacks need `/api/commands`. Historically that endpoint lived
+    only in `blogflow review-dashboard`, which made Lark-first deployments
+    require a second process. The daemon is the review orchestrator, so in
+    Lark-first mode it owns this bridge too.
+    """
+    if not _embedded_bridge_enabled():
+        return
+    host = os.environ.get("AGENTFLOW_REVIEW_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    raw_port = os.environ.get("AGENTFLOW_REVIEW_BRIDGE_PORT", "7860").strip() or "7860"
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 7860
+
+    def _run() -> None:
+        try:
+            import uvicorn
+            from agentflow.agent_review.web import create_app
+
+            uvicorn.run(create_app(), host=host, port=port, log_level="info")
+        except Exception as err:  # pragma: no cover - startup failure is logged
+            _log.warning("embedded agent bridge failed: %s", err, exc_info=True)
+
+    threading.Thread(target=_run, daemon=True, name="agentflow-bridge-api").start()
+    _log.info("embedded agent bridge API starting on http://%s:%s", host, port)
+
+
 def _notify_spawn_failure(
     label: str,
     target_id: str,
@@ -4543,7 +4586,7 @@ def _spawn_publish_ready(article_id: str) -> None:
 
 
 def _spawn_hotspots(top_k: int = 5) -> None:
-    """Run `af hotspots` in a background thread.
+    """Run `blogflow article-hotspots` in a background thread.
 
     The CLI auto-triggers `post_gate_a` on completion (existing behaviour),
     so this fn just shells out and surfaces failure via _notify_spawn_failure.
@@ -4555,7 +4598,7 @@ def _spawn_hotspots(top_k: int = 5) -> None:
             from agentflow.agent_review.triggers import _af_argv
             try:
                 result = subprocess.run(
-                    _af_argv("hotspots", "--gate-a-top-k", str(top_k)),
+                    _af_argv("article-hotspots", "--gate-a-top-k", str(top_k)),
                     env=os.environ.copy(),
                     check=False,
                     capture_output=True,
@@ -4563,18 +4606,18 @@ def _spawn_hotspots(top_k: int = 5) -> None:
                     timeout=300,
                 )
             except subprocess.TimeoutExpired:
-                _notify_spawn_failure("hotspots", "manual_scan", None, "timeout 300s")
+                _notify_spawn_failure("article-hotspots", "manual_scan", None, "timeout 300s")
                 return
             if result.returncode != 0:
                 _notify_spawn_failure(
-                    "hotspots",
+                    "article-hotspots",
                     "manual_scan",
                     result.returncode,
                     (result.stderr or "").strip(),
                 )
         except Exception as err:  # pragma: no cover
-            _log.warning("hotspots subprocess crashed: %s", err)
-            _notify_spawn_failure("hotspots", "manual_scan", None, str(err))
+            _log.warning("article-hotspots subprocess crashed: %s", err)
+            _notify_spawn_failure("article-hotspots", "manual_scan", None, str(err))
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -5032,24 +5075,35 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
                 "to bypass."
             )
 
+    _start_embedded_bridge_if_enabled()
+
     interval = poll_interval if poll_interval is not None else float(
         os.environ.get("TELEGRAM_POLL_INTERVAL_SECONDS", "5")
     )
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    me = tg_client.get_me()
-    _log.info("review daemon started for @%s", me.get("username"))
-    chat_id = get_review_chat_id()
-    configure_bot_menu(chat_id)
-    if chat_id is None:
-        _log.warning(
-            "no TELEGRAM_REVIEW_CHAT_ID configured — send /start to @%s "
-            "in Telegram to capture it",
-            me.get("username"),
-        )
+    telegram_enabled = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
+    if telegram_enabled:
+        me = tg_client.get_me()
+        _log.info("review daemon started for @%s", me.get("username"))
+        chat_id = get_review_chat_id()
+        configure_bot_menu(chat_id)
+        if chat_id is None:
+            _log.warning(
+                "no TELEGRAM_REVIEW_CHAT_ID configured — send /start to @%s "
+                "in Telegram to capture it",
+                me.get("username"),
+            )
+        else:
+            _log.info("review chat_id=%s", chat_id)
+    elif _lark_app_primary():
+        _log.info("review daemon started in Lark-first mode (Telegram polling disabled)")
     else:
-        _log.info("review chat_id=%s", chat_id)
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN is not set and AGENTFLOW_LARK_APP_PRIMARY is not true. "
+            "Set one review surface or run `blogflow doctor` for details."
+        )
 
     # Surface non-fatal warnings BEFORE we start consuming updates so the
     # operator sees them immediately. Keep these best-effort — a TG hiccup
@@ -5065,6 +5119,35 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
 
     while not _STOP.is_set():
         _write_heartbeat()
+        if not telegram_enabled:
+            now = time.monotonic()
+            if now - last_gc > 60:
+                removed = _sid.gc()
+                if removed:
+                    _log.info("short_id GC removed %d expired entries", removed)
+                last_gc = now
+            if now - last_timeout_scan > 60:
+                _scan_timeouts()
+                try:
+                    fired = _drain_deferred_reposts()
+                    if fired:
+                        _log.info("drained %d deferred reposts", fired)
+                except Exception as err:  # pragma: no cover
+                    _log.warning("deferred repost drain failed: %s", err)
+                try:
+                    from agentflow.agent_review import schedule as _schedule
+                    fired_slots = _schedule.fire_due(_spawn_hotspots)
+                    if fired_slots:
+                        _log.info(
+                            "scheduled hotspots fired for slots: %s",
+                            ", ".join(fired_slots),
+                        )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("scheduled article-hotspots scan failed: %s", err)
+                last_timeout_scan = now
+            time.sleep(interval)
+            continue
+
         try:
             updates = tg_client.get_updates(offset=offset, timeout=25)
         except Exception as err:
@@ -5100,7 +5183,7 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
                 _log.warning("deferred repost drain failed: %s", err)
             # v1.0.17: cross-OS scheduled hotspots. Replaces the macOS-only
             # launchctl path that left Linux deployments with no working
-            # twice-daily scan. AGENTFLOW_HOTSPOTS_SCHEDULE="09:00,18:00"
+            # twice-daily scan. BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE="09:00,18:00"
             # (or any HH:MM list) opts in.
             try:
                 from agentflow.agent_review import schedule as _schedule
@@ -5111,7 +5194,7 @@ def run(*, poll_interval: float | None = None, skip_preflight: bool = False) -> 
                         ", ".join(fired_slots),
                     )
             except Exception as err:  # pragma: no cover
-                _log.warning("scheduled hotspots scan failed: %s", err)
+                _log.warning("scheduled article-hotspots scan failed: %s", err)
             last_timeout_scan = now
 
         if not updates:
@@ -5476,7 +5559,7 @@ def _scan_timeouts() -> None:
                 **({"io_error": io_err} if io_err else {}),
             })
             _safe_send(
-                "⏰ Gate A 24h 未审 → 整批自动拒绝（重新跑 `af hotspots` 可恢复）\n\n"
+                "⏰ Gate A 24h 未审 → 整批自动拒绝（重新跑 `blogflow article-hotspots` 可恢复）\n\n"
                 f"`{batch_md}`"
             )
             ga_entry["second_action_taken_at"] = datetime.now(timezone.utc).isoformat()
