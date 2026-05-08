@@ -2912,6 +2912,12 @@ def _handle_chrome_defer(
     article_id: str | None = None,
     hours: float | None = None,
 ) -> dict[str, Any]:
+    """Defer the article's *current* gate by ``hours``. Writes a real entry
+    into the deferred-repost store (same path TG ``/defer`` uses); the daemon
+    sweeper drains it on schedule and re-emits the gate card via
+    ``triggers.post_gate_b`` / ``post_gate_c`` (which already dual-emit on
+    both TG + Lark surfaces — design (b), no schema change required).
+    """
     response = _empty_response()
     deny = _chrome_unauthorized("chrome_defer", operator)
     if deny is not None:
@@ -2933,8 +2939,8 @@ def _handle_chrome_defer(
             template="red",
         )
         return response
-    # Re-use generic _handle_defer's ack-only behaviour. Gate inferred from
-    # current state for telemetry symmetry with the TG slash command.
+    # Resolve the article's current gate. Defer is only valid in
+    # *_pending_review states (mirrors TG ``_slash_defer`` semantics).
     try:
         cur = review_state.current_state(aid)
     except Exception:
@@ -2944,7 +2950,51 @@ def _handle_chrome_defer(
         STATE_IMAGE_PENDING_REVIEW: "C",
         STATE_CHANNEL_PENDING_REVIEW: "D",
     }
-    gate = gate_for_state.get(str(cur or ""), "?")
+    gate = gate_for_state.get(str(cur or ""))
+    if gate is None:
+        response["side_effects"].append("wrong_state")
+        response["reply_card"] = _make_card(
+            title="❌ /defer 状态错误",
+            body=f"`/defer` 仅对 *_pending_review 生效, 当前 state=`{cur}`",
+            template="red",
+        )
+        _telemetry(
+            event_kind="message",
+            action="chrome_defer",
+            article_id=aid,
+            operator=operator,
+            outcome="wrong_state",
+            extra={"hours": float(hours), "state": str(cur)},
+        )
+        return response
+    # Wire to the real deferred-repost store (same one TG ``/defer`` and the
+    # ``lark_defer`` button feed). Import locally to avoid a hard import-time
+    # dep on daemon.py.
+    try:
+        from agentflow.agent_review import daemon as _daemon_mod
+        _daemon_mod._schedule_deferred_repost(
+            gate=gate,
+            article_id=aid,
+            batch_path=None,
+            hours=float(hours),
+            source_sid=f"lark_chrome:{operator.get('open_id') or '?'}",
+        )
+    except Exception as err:
+        response["side_effects"].append("schedule_failed")
+        response["reply_card"] = _make_card(
+            title="❌ defer 调度失败",
+            body=str(err)[:300],
+            template="red",
+        )
+        _telemetry(
+            event_kind="message",
+            action="chrome_defer",
+            article_id=aid,
+            operator=operator,
+            outcome="schedule_failed",
+            extra={"hours": float(hours), "gate": gate, "error": str(err)[:200]},
+        )
+        return response
     try:
         append_memory_event(
             "lark_chrome_defer",
@@ -2959,8 +3009,10 @@ def _handle_chrome_defer(
         _log.warning("chrome_defer audit append failed", exc_info=True)
     response["side_effects"].append("chrome_defer_applied")
     response["reply_card"] = _make_card(
-        title=f"⏰ Gate {gate} 已延后",
-        body=f"`{aid}` 已 defer `{hours}h`。",
+        title=f"⏰ Gate {gate} 已推迟 {hours}h",
+        body=(
+            f"`{aid}` Gate {gate} 已推迟 `{hours}h`，到时会重新推卡。"
+        ),
         template="grey",
     )
     _telemetry(
