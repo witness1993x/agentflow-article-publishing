@@ -3383,10 +3383,19 @@ def _authorize_or_deny(
     article_id: str | None,
     event_kind: str,
 ) -> dict[str, Any] | None:
-    """Return a deny response if the operator lacks the required action verb,
-    or ``None`` to let the caller proceed. No-op when the action has no
-    auth requirement registered (e.g. card_action vocab outside the gate
-    matrix), keeping behaviour open-by-default for unmapped actions."""
+    """LEGACY: kept for backwards compatibility with code outside this module.
+
+    All in-module handlers were migrated to :func:`_authorize_or_deny_v2` in
+    Phase 2 closure (L-4). New handlers MUST use ``_authorize_or_deny_v2`` —
+    the legacy ``is_lark_authorized`` path silently allows traffic when the
+    ``lark_auth.json`` file is empty AND no ``LARK_OPERATOR_OPEN_ID`` env is
+    set, which is unsafe for Phase 2 deployments where any bridge-token
+    holder could otherwise fire arbitrary callbacks.
+
+    This function will be removed in Phase 3 along with the rest of the TG
+    path. Until then, leave it importable so external code (e.g. legacy
+    tests, third-party adapters) doesn't break unexpectedly.
+    """
     required = _LARK_ACTION_REQ.get(action)
     if required is None:
         return None
@@ -3758,7 +3767,7 @@ def _route_message_intent(
         )
         return response
 
-    deny = _authorize_or_deny(
+    deny = _authorize_or_deny_v2(
         action=intent,
         operator=operator,
         article_id=article_id,
@@ -3802,7 +3811,7 @@ def _route_advance(
         cur = None
 
     if cur == STATE_DRAFT_PENDING_REVIEW:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="approve_b", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -3812,7 +3821,7 @@ def _route_advance(
             article_id=article_id, operator=operator, payload=payload or {}
         )
     if cur == STATE_IMAGE_PENDING_REVIEW:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="gate_c_approve", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -3824,7 +3833,7 @@ def _route_advance(
     if cur == STATE_CHANNEL_PENDING_REVIEW:
         return _make_advance_help(article_id, "Gate D 需要你先选择平台再 ✅ 确认发布")
     if cur == STATE_DRAFTING_LOCKED_HUMAN:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="locked_critique", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -4064,7 +4073,7 @@ def handle_event(
         )
         return response
 
-    deny = _authorize_or_deny(
+    deny = _authorize_or_deny_v2(
         action=str(action),
         operator=operator,
         article_id=article_id,

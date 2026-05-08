@@ -227,7 +227,10 @@ class HandleSuggestionApplyTests(_SuggestionTestCase):
         self.assertEqual(card["header"]["template"], "green")
 
     def test_handle_suggestion_apply_unauthorized_open_id_returns_deny_card(self) -> None:
-        # No lark_operators entry → fail-closed deny.
+        # auth.json exists with empty lark_operators → fail-closed deny.
+        # (post-L-4: file-absent fail-opens, so we must explicitly seed an
+        # empty configuration to exercise the fail-closed branch.)
+        _write_lark_operator(self.home, "ou_other_admin", ["*"])
         with patch(
             "agentflow.shared.topic_profile_lifecycle.apply_suggestion"
         ) as mock_apply:

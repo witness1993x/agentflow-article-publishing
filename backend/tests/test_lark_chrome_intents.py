@@ -384,7 +384,10 @@ class ChromeAuthFailClosedTests(unittest.TestCase):
             patch.object(memory, "EVENTS_PATH", self.home / "memory" / "events.jsonl")
         )
         bootstrap.ensure_user_dirs()
-        # No lark_operators entry → fail closed for all actions.
+        # auth.json exists with a different operator → fail closed for the
+        # test operator. (post-L-4: file-absent fail-opens, so we must
+        # explicitly seed an auth.json to exercise the fail-closed branch.)
+        _write_lark_operator(self.home, "ou_other_admin", ["*"])
 
     def tearDown(self) -> None:
         self.stack.close()

@@ -397,23 +397,38 @@ def is_authorized_open_id(open_id: str | None, action: str) -> bool:
     of ``~/.agentflow/review/auth.json``. Same action vocabulary as the TG
     path (see :data:`ACTION_VOCABULARY`).
 
-    Semantics:
-      * ``open_id is None`` (or empty) → ``False``. No anonymous Lark callbacks.
-      * ``lark_operators`` empty or absent → ``False`` (**fail-closed**).
-        A phase-2 deployment that hasn't onboarded any Lark operator must
-        not let bridge-token holders fire arbitrary actions.
-      * Matching entry found → action authorized iff ``"*"`` is present
-        OR the literal ``action`` token is in the entry's ``actions`` list.
-      * Unknown ``open_id`` → ``False``.
+    Three-state semantics (Phase 2 closure / L-4 migration):
+
+    1. ``auth.json`` **file absent** → ``True`` (fail-OPEN). Dev-friendly
+       default so fresh checkouts and tests that don't seed an auth file keep
+       working. Operators must still pass a non-empty ``open_id``.
+    2. ``auth.json`` **exists** but ``lark_operators`` is empty / missing /
+       malformed → ``False`` (fail-CLOSED). Once an operator has touched the
+       file (e.g. via the TG ``authorized_uids`` CLI), Lark callbacks are
+       considered explicitly configured and absence of a Lark grant is
+       treated as denial — the IND-3 invariant.
+    3. ``auth.json`` **exists** with a populated ``lark_operators`` array →
+       only listed open_ids succeed; action authorized iff ``"*"`` is
+       present OR the literal ``action`` token is in the entry's
+       ``actions`` list.
+
+    Other early-out cases:
+      * ``open_id is None`` (or whitespace) → ``False``. No anonymous Lark
+        callbacks regardless of file state.
+      * Unknown ``open_id`` (file populated but no match) → ``False``.
     """
     if open_id is None:
         return False
     oid = str(open_id).strip()
     if not oid:
         return False
+    # Step 1: file-absent fail-OPEN. Once auth.json exists we switch to the
+    # configured-explicitly fail-CLOSED branch below.
+    if not _path().exists():
+        return True
     operators = _load_lark_operators()
     if not operators:
-        return False  # fail-closed
+        return False  # fail-closed: file present but no Lark grants
     for entry in operators:
         if str(entry.get("open_id")) != oid:
             continue
