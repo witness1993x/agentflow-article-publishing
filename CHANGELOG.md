@@ -14,14 +14,30 @@ surface** rather than runtime code parity.
 
 ## [Unreleased]
 
-- _no changes yet_
+### L-5 doctor --fresh no-TG validation
+
+- Phase 2's last open item closed inside pytest. New subprocess-isolated
+  test `tests/test_l5_doctor_no_tg.py` (3 cases) installs a `meta_path`
+  finder that blocks `tg_client` BEFORE click loads, then invokes
+  `blogflow doctor --fresh` via `CliRunner` with `TELEGRAM_BOT_TOKEN`
+  cleared (and force-emptied to defeat `_load_dotenv_once` re-fill from
+  `backend/.env`). Asserts exit 0, "TELEGRAM_BOT_TOKEN not set" in the
+  matrix, and no `ImportError`/`Traceback` leak — proves the doctor
+  command is Phase 3 deletion-tolerant in both legacy and
+  `AGENTFLOW_LARK_APP_PRIMARY=true` modes, and in `--json` mode.
+- Test suite: 330 → 333 passing (3 new). Two pre-existing
+  `LarkReviewCardTemplateTests` failures pointing at
+  `.cursor/skills/agentflow-open-claw-v2/SKILL.md` are unrelated (they
+  predate this change and belong to the still-pending OpenClaw skill
+  v3.0 content refresh).
 
 ## [1.2.1] — 2026-05-08 — Phase 2 closure (L-2 / L-3 / L-4)
 
 > Closes the remaining Phase 2 follow-ups identified during the v1.2.0
 > e2e verification. After this release, **all of Phase 2's audit-trail,
-> auth-hardening, and write-back gaps are resolved**. Only L-5 remains
-> (`blogflow doctor --fresh` manual verify, outside pytest scope).
+> auth-hardening, and write-back gaps are resolved**. L-5 (`blogflow
+> doctor --fresh` no-TG validation) is then sealed in `[Unreleased]` via
+> an in-pytest subprocess test.
 > Test suite: 308 → 330 passing (22 new across L-2/L-3/L-4).
 
 ### L-2 Profile yaml writeback (`_handle_profile_advance` completion)
