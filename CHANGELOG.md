@@ -16,6 +16,96 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.2.1] — 2026-05-08 — Phase 2 closure (L-2 / L-3 / L-4)
+
+> Closes the remaining Phase 2 follow-ups identified during the v1.2.0
+> e2e verification. After this release, **all of Phase 2's audit-trail,
+> auth-hardening, and write-back gaps are resolved**. Only L-5 remains
+> (`blogflow doctor --fresh` manual verify, outside pytest scope).
+> Test suite: 308 → 330 passing (22 new across L-2/L-3/L-4).
+
+### L-2 Profile yaml writeback (`_handle_profile_advance` completion)
+
+- Completion branch of `_handle_profile_advance` now mutates
+  `~/.agentflow/topic_profiles.yaml` via `build_patch_from_answers` +
+  `upsert_profile(replace_lists=False, source="lark_profile_advance:<sid>")`.
+  Previously answers stayed in `session["collected"]` and never reached
+  the on-disk profile.
+- Added `_PROFILE_FIELD_TO_SLOT` translation: dotted missing-field keys
+  (`publisher_account.brand`, `keyword_groups.core`, etc.) → friendly
+  slots that `build_patch_from_answers` understands. Non-trivial rename:
+  `keyword_groups.core` → `core_terms`.
+- Added `_split_profile_terms`-style separator policy for list-valued
+  slots (`do`, `dont`, `product_facts`, `default_tags`, `core_terms`,
+  `search_queries`, `avoid_terms`): splits on ASCII / 中文 comma,
+  semicolon, 、, newline + bullet/dash strip.
+- Best-effort: writeback failures log + surface warning in the success
+  card body, but don't block `release_session_lark` or
+  `notify.profile_setup_done` emission. D1 scan never gated on
+  yaml-write hiccups.
+- Tests: `test_l2_profile_yaml_writeback.py` (7 tests).
+
+### L-3 chrome_defer + lark_defer button real scheduling
+
+- `_handle_chrome_defer` ("推迟 <id> <h>") was ack-only — wrote audit
+  memory but never called `_schedule_deferred_repost`. Now wires to the
+  real store at `~/.agentflow/review/deferred_reposts.json`. The daemon
+  poll loop drains via `_drain_deferred_reposts` → `triggers.post_gate_*`
+  which already dual-emits on TG + Lark surfaces (no schema change
+  required).
+- Validates current state is `*_pending_review` (mirrors TG `/defer`
+  semantics) and emits `wrong_state` error otherwise.
+- **Latent bug fix (follow-up commit)**: `_handle_defer` (the per-card
+  `lark_defer` BUTTON used by Gate A/B/C/D `推迟` buttons) was also
+  ack-only — same bug. Same `_schedule_deferred_repost` wiring
+  applied. This was masked by the v1.2.0 e2e test not exercising
+  the defer path.
+- Tests: `test_l3_chrome_defer_wiring.py` (10 tests covering both
+  chrome path and button path).
+
+### L-4 Legacy `_authorize_or_deny` migration to v2 fail-closed
+
+- Migrated 5 inline callsites of legacy `_authorize_or_deny` (which
+  used fail-OPEN `is_lark_authorized`) to `_authorize_or_deny_v2`
+  (fail-CLOSED via `is_authorized_open_id`). Discovery: although
+  ~30 handlers were initially scoped, all per-handler auth is
+  centrally dispatched at `handle_event` line 4067 + 4 router
+  helpers — migrating those 5 covers all Gate B/C/D/L/A handlers.
+- **3-state `auth.json` semantics** in `is_authorized_open_id`:
+  - File ABSENT → fail-OPEN (dev-friendly default; preserves existing
+    tests that don't seed an auth.json)
+  - File present, `lark_operators` empty/missing/malformed → fail-CLOSED
+    (operator explicitly chose the closed model)
+  - File present, populated → strict lookup; `"*"` wildcard supported
+- Legacy `_authorize_or_deny` preserved as importable compat surface
+  with deprecation docstring (Phase 3 will remove).
+- 4 pre-existing fail-closed tests rewrote fixtures to seed `auth.json`
+  (`test_lark_callback`, `test_lark_chrome_intents`, `test_lark_profile_advance`,
+  `test_lark_suggestions`). Without those nudges they would have
+  passed under the new file-absent fail-open default.
+- Tests: `test_l4_auth_migration.py` (5 tests).
+
+### Production deploy notes
+
+- **`LARK_OPERATOR_OPEN_ID` env-var bypass** no longer works for
+  in-module handlers post-L-4 migration. Operators must be migrated
+  to the `auth.json::lark_operators` JSON entry. The legacy
+  `is_lark_authorized` remains active for any external callers — but
+  no in-module handler hits it now.
+- Recommendation: `agentflow-deploy/deploy.sh` should auto-create
+  `auth.json` with `{"lark_operators": []}` on fresh installs to flip
+  the gate to fail-closed by default. Otherwise the file-absent
+  fail-open semantics will accept ANY `open_id` from the bridge.
+  Update `agentflow-deploy/SECURITY.md` to document the 3-state
+  semantic.
+
+### Build / artifacts
+
+- `backend/pyproject.toml` 1.2.0 → 1.2.1
+- New deploy bundle: `blogflow-lark-deploy-v1.2.1.tar.gz`
+- OpenClaw skill bundle (no schema delta from v3.0):
+  `dist/agentflow-open-claw-v3.0.zip`
+
 ## [1.2.0] — 2026-05-07 — TG → Lark parity (`lark-parity` branch)
 
 > Phase 1 of the BlogFlow Lark-only roadmap. Brings the Lark review
