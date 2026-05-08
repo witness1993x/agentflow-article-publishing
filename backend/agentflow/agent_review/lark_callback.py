@@ -2198,6 +2198,79 @@ def _question_text_for(field: str) -> str:
     return f"请输入 `{field}` 的值。"
 
 
+# Map: dotted-key (used in Lark missing_fields[] / collected[]) → friendly
+# slot name (used by ``build_patch_from_answers``). The friendly slots are
+# the keys ``build_patch_from_answers`` reads from the ``answers`` dict:
+# brand / voice / output_language / do / dont / product_facts / core_terms
+# / search_queries / avoid_terms. The dotted keys come from
+# ``profile_missing_fields`` and the ``_PROFILE_FIELD_QUESTIONS`` table.
+_PROFILE_FIELD_TO_SLOT: dict[str, str] = {
+    "publisher_account.brand": "brand",
+    "publisher_account.voice": "voice",
+    "publisher_account.output_language": "output_language",
+    "publisher_account.product_facts": "product_facts",
+    "publisher_account.do": "do",
+    "publisher_account.dont": "dont",
+    "publisher_account.default_tags": "default_tags",
+    "keyword_groups.core": "core_terms",
+    "search_queries": "search_queries",
+    "avoid_terms": "avoid_terms",
+}
+
+
+# Friendly slots that should be parsed as a list. ``build_patch_from_answers``
+# routes these through ``_flatten_terms`` which keeps a single string as a
+# single-item list — so we must pre-split comma/newline-separated free-form
+# operator answers before handing them off.
+_LIST_VALUED_SLOTS: frozenset[str] = frozenset(
+    {
+        "do",
+        "dont",
+        "product_facts",
+        "default_tags",
+        "core_terms",
+        "search_queries",
+        "avoid_terms",
+    }
+)
+
+
+def _split_profile_terms(raw: str) -> list[str]:
+    """Split a free-form operator answer into a list of terms.
+
+    Mirrors TG's ``daemon._split_profile_terms`` separator policy: comma
+    (ASCII + 中文), semicolon (ASCII + 中文), enumeration comma 、, newline.
+    Strips per-line bullet/leading dash whitespace.
+    """
+    text = (
+        str(raw or "")
+        .replace("；", "\n")
+        .replace(";", "\n")
+        .replace("、", "\n")
+        .replace(",", "\n")
+        .replace("，", "\n")
+    )
+    lines = [line.strip(" -\t") for line in text.splitlines()]
+    return [line for line in lines if line]
+
+
+def _collected_to_slot_dict(collected: dict[str, Any]) -> dict[str, Any]:
+    """Translate dotted-key answers to a friendly-slot ``answers`` dict.
+
+    Unknown dotted keys pass through unchanged so a future field addition
+    doesn't silently drop the answer. List-valued slots receive a
+    comma/newline split if the operator submitted a single string blob.
+    """
+    out: dict[str, Any] = {}
+    for key, value in (collected or {}).items():
+        slot = _PROFILE_FIELD_TO_SLOT.get(str(key), str(key))
+        if slot in _LIST_VALUED_SLOTS and isinstance(value, str):
+            out[slot] = _split_profile_terms(value)
+        else:
+            out[slot] = value
+    return out
+
+
 def _session_id_from_path(session_path: str) -> str:
     """Extract the session id from a session JSON path.
 
@@ -2466,6 +2539,46 @@ def _handle_profile_advance(
     # No more questions — apply answers + release + notify.
     completed_fields = sorted((session.get("collected") or {}).keys())
 
+    # Writeback: translate dotted-key collected[] → friendly-slot answers
+    # dict, build the profile patch, and persist it to topic_profiles.yaml.
+    # Failures are non-fatal — the session must still be released and the
+    # downstream notify event must still emit so the rest of the pipeline
+    # (D1 scan, etc.) is not blocked. The card body surfaces the warning.
+    writeback_warning: str | None = None
+    writeback_field_count: int | None = None
+    try:
+        from agentflow.shared.topic_profile_lifecycle import (
+            build_patch_from_answers,
+            seed_profile,
+            upsert_profile,
+            user_profile_bootstrap_state,
+        )
+
+        target_profile_id = str(session.get("profile_id") or profile_id or "").strip()
+        if not target_profile_id:
+            raise ValueError("session has no profile_id; cannot write back")
+        slot_answers = _collected_to_slot_dict(session.get("collected") or {})
+        existing = user_profile_bootstrap_state(target_profile_id).get("current_profile")
+        if not isinstance(existing, dict):
+            existing = seed_profile(target_profile_id)
+        patch = build_patch_from_answers(
+            target_profile_id,
+            slot_answers,
+            existing_profile=existing,
+        )
+        upsert_profile(
+            target_profile_id,
+            patch,
+            replace_lists=False,
+            source=f"lark_profile_advance:{session_id}",
+        )
+        writeback_field_count = len(completed_fields)
+    except Exception as err:
+        _log.warning("profile yaml writeback failed", exc_info=True)
+        writeback_warning = (
+            f"答案已保存，但 profile 写回失败: {str(err)[:200]}"
+        )
+
     try:
         release_session_lark(session_id, status="completed")
     except Exception:  # pragma: no cover — release best-effort
@@ -2489,12 +2602,20 @@ def _handle_profile_advance(
         _log.warning("notify.profile_setup_done emit failed", exc_info=True)
 
     response["side_effects"].append("profile_advance_completed")
+    if writeback_warning is None:
+        response["side_effects"].append("profile_yaml_written")
+    else:
+        response["side_effects"].append("profile_yaml_writeback_failed")
     body_lines = [
         f"Profile `{session.get('profile_id') or profile_id}` 已补全 "
         f"{len(completed_fields)} 项。",
     ]
     if completed_fields:
         body_lines.append("已收集字段：" + "、".join(f"`{f}`" for f in completed_fields))
+    if writeback_warning is None and writeback_field_count is not None:
+        body_lines.append(f"✓ profile 已更新 {writeback_field_count} 个字段")
+    elif writeback_warning is not None:
+        body_lines.append(writeback_warning)
     response["reply_card"] = _make_card(
         title="✅ Profile setup 完成",
         body="\n".join(body_lines),
