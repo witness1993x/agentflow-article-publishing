@@ -94,19 +94,6 @@ def render_learning_review_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _post_to_tg(markdown: str) -> None:
-    if not os.environ.get("TELEGRAM_BOT_TOKEN", "").strip():
-        raise click.ClickException("TG is not configured: TELEGRAM_BOT_TOKEN is not set.")
-    from agentflow.agent_review import daemon, tg_client
-
-    chat_id = daemon.get_review_chat_id()
-    if chat_id is None:
-        raise click.ClickException(
-            "TG is not configured: set TELEGRAM_REVIEW_CHAT_ID or run the review bot /start flow."
-        )
-    tg_client.send_long_text(chat_id, markdown, parse_mode=None)
-
-
 @cli.command(
     "learning-review",
     help="Weekly learning review for suggestions, publish history, memory, and style state.",
@@ -119,22 +106,13 @@ def _post_to_tg(markdown: str) -> None:
     help="Review window for history/memory: Nd (e.g. 7d) or 'all'.",
 )
 @click.option("--json", "as_json", is_flag=True, default=False)
-@click.option(
-    "--post-tg",
-    is_flag=True,
-    default=False,
-    help="Post the Markdown report to the configured Telegram review chat.",
-)
-def learning_review(since: str, as_json: bool, post_tg: bool) -> None:
+def learning_review(since: str, as_json: bool) -> None:
     try:
         report = build_learning_review(since=since)
     except ValueError as err:
         raise click.UsageError(str(err)) from err
 
     markdown = render_learning_review_markdown(report)
-    if post_tg:
-        _post_to_tg(markdown)
-
     if as_json:
         _emit_json(report)
         return

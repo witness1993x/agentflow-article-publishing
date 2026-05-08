@@ -35,27 +35,6 @@ def review_daemon_cmd(skip_preflight: bool) -> None:
 
 
 @cli.command(
-    "review-init",
-    help="One-shot: print bot info + current chat_id resolution.",
-)
-def review_init_cmd() -> None:
-    from agentflow.agent_review import daemon, tg_client
-
-    me = tg_client.get_me()
-    click.echo(f"bot:                @{me.get('username')}")
-    click.echo(f"bot id:             {me.get('id')}")
-    chat_id = daemon.get_review_chat_id()
-    if chat_id is None:
-        click.echo("review chat_id:     (not configured)")
-        click.echo(
-            "next:               send /start to the bot in Telegram, then start "
-            "`af review-daemon` to capture chat_id automatically."
-        )
-    else:
-        click.echo(f"review chat_id:     {chat_id}")
-
-
-@cli.command(
     "review-status",
     help="Show gate_history + current state for an article.",
 )
@@ -948,11 +927,10 @@ def _fmt_metric(s: dict[str, Any] | None, *keys: str) -> str:
 )
 @click.argument("article_id")
 @click.option("--json", "as_json", is_flag=True, default=False)
-@click.option("--tg", is_flag=True, default=False, help="Post snapshot card to TG.")
 @click.option("--all", "fetch_all", is_flag=True, default=False,
               help="Probe all platforms in history including failed ones.")
 def review_publish_stats_cmd(
-    article_id: str, as_json: bool, tg: bool, fetch_all: bool
+    article_id: str, as_json: bool, fetch_all: bool
 ) -> None:
     from datetime import datetime, timezone
     import json as _json
@@ -1027,23 +1005,3 @@ def review_publish_stats_cmd(
                 f"{str(st.get('fetched_at') or '')[:19]}"
             )
 
-    if tg:
-        try:
-            from agentflow.agent_review import daemon as _d, render, tg_client
-            chat_id = _d.get_review_chat_id()
-            if chat_id is not None:
-                title = meta.get("title") or "(untitled)"
-                lines = [f"📊 *Stats snapshot*  ·  `{render.escape_md2(article_id)}`",
-                         f"*{render.escape_md2(title)}*", ""]
-                for plat, st in fetched.items():
-                    if st is None:
-                        lines.append(f"  • {render.escape_md2(plat)}: _skipped_"); continue
-                    lines.append(
-                        f"  • {render.escape_md2(plat)}: "
-                        f"{render.escape_md2(_fmt_metric(st,'claps','likes','retweets'))} / "
-                        f"{render.escape_md2(_fmt_metric(st,'responses','comments','replies'))}  "
-                        f"\\({render.escape_md2(str(st.get('scrape_status') or '?'))}\\)"
-                    )
-                tg_client.send_message(chat_id, "\n".join(lines))
-        except Exception as err:
-            click.echo(f"(tg post failed: {err})")
