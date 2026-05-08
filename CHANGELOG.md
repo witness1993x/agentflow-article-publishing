@@ -14,7 +14,20 @@ surface** rather than runtime code parity.
 
 ## [Unreleased]
 
-### L-5 doctor --fresh no-TG validation
+- _no changes yet_
+
+## [1.2.2] — 2026-05-08 — Phase 2 truly final (L-5 + skill v3.0 path fix)
+
+> Seals Phase 2 by closing L-5 inside pytest **and** repairing the two
+> repo-root-relative paths in `LarkReviewCardTemplateTests` so the full
+> suite runs green from `backend/` as cwd. After this tag, every Phase 2
+> ID (L-1…L-5) has automated coverage. Phase 3 (delete `tg_client.py`,
+> `render.py`, ~1500 lines of TG handlers in `daemon.py`) remains the
+> only outstanding item.
+> Test suite: 330 (1.2.1) → 333 passing (+3 from L-5; 2 stale failures
+> resolved without test-count delta).
+
+### L-5 doctor --fresh no-TG validation (closes Phase 2 §6.2 acceptance)
 
 - Phase 2's last open item closed inside pytest. New subprocess-isolated
   test `tests/test_l5_doctor_no_tg.py` (3 cases) installs a `meta_path`
@@ -25,11 +38,19 @@ surface** rather than runtime code parity.
   matrix, and no `ImportError`/`Traceback` leak — proves the doctor
   command is Phase 3 deletion-tolerant in both legacy and
   `AGENTFLOW_LARK_APP_PRIMARY=true` modes, and in `--json` mode.
-- Test suite: 330 → 333 passing (3 new). Two pre-existing
-  `LarkReviewCardTemplateTests` failures pointing at
-  `.cursor/skills/agentflow-open-claw-v2/SKILL.md` are unrelated (they
-  predate this change and belong to the still-pending OpenClaw skill
-  v3.0 content refresh).
+- `docs/BLOGFLOW_TG_TO_LARK_PARITY.md §11.5` L-5 row → ✅.
+
+### LarkReviewCardTemplateTests path fix
+
+- `test_lark_first_flow_reference_documents_daemon_owned_bridge` and
+  `test_openclaw_skill_reference_points_to_lark_first_flow` were reading
+  `docs/flows/...` and `.cursor/skills/...` via bare relative paths,
+  which only resolve when pytest is invoked from the repo root. Pytest
+  in this repo runs with cwd = `backend/`, so they failed every run.
+- Fixed by rooting the paths at `Path(__file__).resolve().parents[2]`
+  (the repo root) — the same idiom the sibling `test_template_covers_all_review_cards_buttons_and_inputs`
+  test in this class already uses for `parents[1]`. The skill content
+  itself was already v3.0-shaped; only the test plumbing was wrong.
 
 ## [1.2.1] — 2026-05-08 — Phase 2 closure (L-2 / L-3 / L-4)
 
