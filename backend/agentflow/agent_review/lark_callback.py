@@ -913,13 +913,70 @@ def _handle_gate_a_expand(
 def _handle_defer(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Generic defer — operator put the decision on hold. No state mutation."""
+    """Defer the gate by N hours via the deferred-repost store.
+
+    Mirrors `_handle_chrome_defer` (L-3) but for the per-card `lark_defer`
+    button. Writes a real entry to ~/.agentflow/review/deferred_reposts.json
+    so the daemon sweeper re-emits the gate card on schedule. Without this,
+    the button was ack-only — operators saw '已延后' but the card never
+    reposted (latent bug discovered during L-3 implementation).
+
+    payload.gate (required): "A" | "B" | "C" | "D"
+    payload.hours (default 4): re-post the gate card after this many hours
+    """
     response = _empty_response()
-    gate = str(payload.get("gate") or "")
+    gate = str(payload.get("gate") or "").strip()
+    if gate not in {"A", "B", "C", "D"}:
+        response["side_effects"].append("bad_gate")
+        response["reply_card"] = _make_card(
+            title="❌ defer 参数错误",
+            body=f"gate 必须是 A/B/C/D，收到: `{gate}`",
+            template="red",
+        )
+        return response
+    try:
+        hours = float(payload.get("hours") or 4)
+    except (TypeError, ValueError):
+        hours = 4.0
+    if hours <= 0:
+        response["side_effects"].append("bad_hours")
+        response["reply_card"] = _make_card(
+            title="❌ defer hours 参数错",
+            body=f"hours 必须为正数: `{hours}`",
+            template="red",
+        )
+        return response
+    # Wire to the real deferred-repost store (same one TG /defer and
+    # chrome_defer feed). Lazy import to keep daemon out of module-load chain.
+    try:
+        from agentflow.agent_review import daemon as _daemon_mod
+        _daemon_mod._schedule_deferred_repost(
+            gate=gate,
+            article_id=article_id,
+            batch_path=None,
+            hours=hours,
+            source_sid=f"lark_button:{operator.get('open_id') or '?'}",
+        )
+    except Exception as err:
+        response["side_effects"].append("schedule_failed")
+        response["reply_card"] = _make_card(
+            title="❌ defer 调度失败",
+            body=str(err)[:300],
+            template="red",
+        )
+        _telemetry(
+            event_kind="card_action",
+            action="defer",
+            article_id=article_id,
+            operator=operator,
+            outcome="schedule_failed",
+            extra={"hours": hours, "gate": gate, "error": str(err)[:200]},
+        )
+        return response
     response["side_effects"].append("deferred")
     response["reply_card"] = _make_card(
-        title=f"Gate {gate or '?'} 已延后",
-        body=f"`{article_id}` 决定延后，可稍后再处理。",
+        title=f"⏰ Gate {gate} 已推迟 {hours}h",
+        body=f"`{article_id}` Gate {gate} 已推迟 `{hours}h`，到时会重新推卡。",
         template="grey",
     )
     _telemetry(
@@ -928,7 +985,7 @@ def _handle_defer(
         article_id=article_id,
         operator=operator,
         outcome="ok",
-        extra={"gate": gate},
+        extra={"gate": gate, "hours": hours},
     )
     return response
 

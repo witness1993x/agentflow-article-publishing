@@ -269,5 +269,54 @@ class ChromeDeferDelegationTests(_ChromeDeferTestCase):
         self.assertTrue(str(kwargs["source_sid"]).startswith("lark_chrome:"))
 
 
+class LarkDeferButtonWritesToStoreTests(_ChromeDeferTestCase):
+    """Coverage for the parallel `lark_defer` button path — the per-card 推迟
+    button on Gate A/B/C/D. L-3 follow-up: this used to be ack-only too.
+    """
+
+    def test_lark_defer_button_writes_to_deferred_store(self) -> None:
+        _seed_article(
+            self.home, "art_btn_b",
+            state=review_state.STATE_DRAFT_PENDING_REVIEW,
+        )
+        res = lark_callback._handle_defer(
+            article_id="art_btn_b",
+            operator=_OPERATOR,
+            payload={"gate": "B", "hours": 2},
+        )
+        self.assertIn("deferred", res["side_effects"])
+        self.assertNotIn("schedule_failed", res["side_effects"])
+        self.assertTrue(self._store_path().exists())
+        scheduled = json.loads(self._store_path().read_text(encoding="utf-8"))
+        self.assertEqual(len(scheduled), 1)
+        entry = scheduled[0]
+        self.assertEqual(entry["gate"], "B")
+        self.assertEqual(entry["article_id"], "art_btn_b")
+        self.assertAlmostEqual(entry["hours"], 2.0)
+        self.assertTrue(entry["source_short_id"].startswith("lark_button:"))
+
+    def test_lark_defer_button_rejects_invalid_gate(self) -> None:
+        res = lark_callback._handle_defer(
+            article_id="art_x",
+            operator=_OPERATOR,
+            payload={"gate": "Z", "hours": 4},
+        )
+        self.assertIn("bad_gate", res["side_effects"])
+        self.assertFalse(self._store_path().exists())
+
+    def test_lark_defer_button_default_hours_is_4(self) -> None:
+        _seed_article(
+            self.home, "art_btn_default",
+            state=review_state.STATE_IMAGE_PENDING_REVIEW,
+        )
+        lark_callback._handle_defer(
+            article_id="art_btn_default",
+            operator=_OPERATOR,
+            payload={"gate": "C"},  # no hours
+        )
+        scheduled = json.loads(self._store_path().read_text(encoding="utf-8"))
+        self.assertAlmostEqual(scheduled[0]["hours"], 4.0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
