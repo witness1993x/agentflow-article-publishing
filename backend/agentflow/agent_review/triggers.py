@@ -35,33 +35,12 @@ from agentflow.shared.logger import get_logger
 _log = get_logger("agent_review.triggers")
 
 
-# L-1 (Phase 2 closure): lazy / deletion-tolerant tg_client.
-# In Lark-only deployments, tg_client.py may be removed (Phase 3) or its
-# transitive dep `requests` may be absent. The 29 tg_client.* callsites in
-# this module are all gated by `chat_id is not None` (which is None when
-# `_tg_configured()` is False), so they don't execute in Lark-only mode.
-# The import here just needs to tolerate absence at module-load time.
-#
-# When the SDK is unreachable, we expose a deny-stub: callsites that
-# accidentally bypass the chat_id guard will RAISE (loudly), not silently
-# no-op. This way bugs are visible instead of producing cards into the void.
-class _TgClientUnavailable:
-    """Sentinel for 'tg_client SDK absent'. Any attribute access raises."""
-
-    def __getattr__(self, name: str) -> Any:
-        def _denied(*args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError(
-                f"tg_client.{name} called in Lark-only deployment "
-                "where the TG SDK is unavailable. Upstream chat_id "
-                "guard is missing or not enforced."
-            )
-        return _denied
-
-
-try:
-    from agentflow.agent_review import tg_client  # noqa: F401
-except ImportError:  # pragma: no cover — exercised by test_no_tg_runtime.py
-    tg_client = _TgClientUnavailable()  # type: ignore[assignment]
+# Phase 3 Wave D: tg_client.py is deleted. The TG sentinel + lazy import
+# scaffolding from Phase 2 (L-1) is no longer needed; nothing in this
+# module imports tg_client. ``_tg_configured()`` is preserved as a
+# back-compat predicate (returns False everywhere now that the env var
+# isn't read by any production path), so legacy callers that branch on
+# "is TG live?" simply never enter the TG path.
 
 
 def _tg_configured() -> bool:

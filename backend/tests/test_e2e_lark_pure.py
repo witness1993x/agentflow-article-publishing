@@ -46,19 +46,6 @@ _OPERATOR = {
 }
 
 
-_TG_FN_NAMES = (
-    "send_message",
-    "send_photo",
-    "send_document",
-    "send_long_text",
-    "answer_callback_query",
-    "edit_message_reply_markup",
-    "edit_message_text",
-    "get_me",
-    "get_updates",
-)
-
-
 def _seed_lark_operator(home: Path) -> None:
     """Seed both auth files so ``is_authorized_open_id`` and
     ``is_lark_authorized`` both grant ``ou_e2e_alice`` full access."""
@@ -179,24 +166,13 @@ class LarkPureE2ETests(unittest.TestCase):
             )
         )
 
-        # 5. The TG independence canary — every outbound TG call detonates.
+        # Phase 3 Wave D: tg_client.py is deleted, so no TG outbound function
+        # can be invoked at all — the Phase 2 canary that patched each
+        # tg_client.* with a detonating sentinel is now redundant. The
+        # independence assertion below ("tg_violations == []") is satisfied
+        # by construction, and we keep the empty list around for
+        # back-compat with assertions later in this test.
         self.tg_violations: list[tuple[str, tuple, dict]] = []
-
-        def _make_sentinel(fn_name: str):
-            def _no_tg(*args, **kwargs):
-                self.tg_violations.append((fn_name, args, kwargs))
-                raise AssertionError(
-                    f"TG call leaked into Lark-only path: "
-                    f"tg_client.{fn_name}({args!r}, {kwargs!r})"
-                )
-            return _no_tg
-
-        from agentflow.agent_review import tg_client
-        for name in _TG_FN_NAMES:
-            if hasattr(tg_client, name):
-                self.stack.enter_context(
-                    patch.object(tg_client, name, new=_make_sentinel(name))
-                )
 
     def tearDown(self) -> None:
         self.stack.close()
