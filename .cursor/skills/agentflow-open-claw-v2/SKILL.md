@@ -92,7 +92,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.2.0.tar.gz` 及更新版本配合。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.0.tar.gz` 及更新版本配合。**v1.3.0 (Phase 3) 起 Telegram surface 已彻底删除**——daemon、CLI、SDK 都不再有 TG 路径,`AGENTFLOW_LARK_APP_PRIMARY=true` + Lark 事件 webhook 是 daemon 启动的唯一前提,缺了就 SystemExit。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
 
 - `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
 - `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）
@@ -105,7 +105,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 v2.9 的 "Lark Card Rendering" 段（`@larksuite/openclaw-lark` 集成约定）继续生效；v3.0 没改 listener / 卡片渲染 / 按钮回调的 wiring，只是新卡的 schema 多了。
 
-Lark-only 部署支持：v1.2.0 daemon 在 `TELEGRAM_BOT_TOKEN` 不存在时也能起来；`auth.json` 的 `lark_operators` 段是 fail-closed 白名单（先 `blogflow review-auth-add-lark <open_id> --actions '*'`，否则 chrome / suggestion / profile_advance 等新 handler 会 deny）。
+Lark-only 部署：v1.3.0 起 daemon **强制** Lark-only —— `TELEGRAM_BOT_TOKEN` 即便 set 也无效（无 SDK），缺 `AGENTFLOW_LARK_APP_PRIMARY=true` 直接 SystemExit。`auth.json` 的 `lark_operators` 段是 fail-closed 白名单（先 `blogflow review-auth-add-lark <open_id> --actions '*'`，否则 chrome / suggestion / profile_advance 等新 handler 会 deny）。
 
 ## Required Init Flows (MUST follow)
 

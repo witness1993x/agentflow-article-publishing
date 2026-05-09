@@ -16,6 +16,101 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.0] — 2026-05-10 — Phase 3 — Telegram surface removed
+
+> The user's original 痛点 ("上下文太多导致 daemon 判定一直会走 tg bot")
+> is now structurally impossible: the Telegram poll loop, dispatch chain,
+> and SDK file are all deleted. AgentFlow runs Lark-first by construction.
+> daemon.py shrinks from 5634 → 1748 lines (-69%). 30 TG-runtime tests
+> retired in favor of the Lark-first suite.
+> Test suite: 333 (1.2.2) → 303 passing clean (-30 deleted, +0 failures).
+
+### Wave A — CLI surface (commit `d717afa`)
+
+Removed CLI entry points that were TG-only with no Lark counterpart:
+
+- `blogflow review-init` — printed bot info via `tg_client.get_me()`
+  and the captured chat_id. Lark uses `open_id`; deployment health is
+  covered by `blogflow doctor`.
+- `blogflow review-publish-stats --tg` — posted stats card to TG.
+- `blogflow learning-review --post-tg` and `_post_to_tg` helper —
+  posted the markdown report to TG. Report stays CLI-only.
+
+### Wave B — `triggers.py` (commit `4db98d4`)
+
+29 `tg_client.*` callsites stripped. 7 TWINNED functions had `_emit_lark_*_card`
+siblings already wired (post_gate_a / post_gate_b / post_gate_c / post_gate_d /
+post_profile_setup_prompt / post_locked_takeover / post_image_gate_picker) —
+the TG halves were deleted; Lark cards now fire unconditionally with
+`telegram_message_id=None`. The 7 TG-ONLY publish/notification functions
+(post_critique, mark_published, post_publish_ready, post_dispatch_preview,
+post_publish_dispatch, post_publish_retry, post_publish_digest) had their
+TG sends removed but the surrounding state writes / audit trail /
+pending_edits registration / lark_webhook fan-outs preserved. Net diff:
+-235 lines.
+
+### Wave C — `daemon.py` poll loop + handlers (commit `24a6e9c`)
+
+`daemon.py` shrinks from 5634 → 1748 lines (-69%). Removed:
+
+- `_handle_message`, `_handle_callback`, `_route` + `_ACTION_REQ` map
+  (the entire TG poll-loop dispatch chain — ~3300 lines).
+- `_populate_command_registry`, `_register_command`, `_resolve_command`,
+  `_dispatch_v104_command`, `_COMMAND_REGISTRY` global.
+- All TG slash handlers: `_handle_onboard`, `_handle_doctor`, `_handle_scan`,
+  `_handle_profile*`, `_handle_keyword*`, `_handle_style*`, `_handle_intent*`,
+  `_handle_prefs*`, `_handle_report`, `_handle_v103_passthrough`,
+  `_handle_restart_daemon`, `_handle_pending_confirm_reply`.
+- Helpers: `_send_status_summary`, `_send_queue_summary`, `_send_audit_tail`,
+  `_send_auth_debug`, `_slash_skip`, `_slash_publish_mark`, `_build_help_text`.
+- TG poll loop branch in `run()` (`get_updates` polling).
+- `tg_client` lazy import + sentinel inside `daemon.py`.
+- Residual TG side-channel calls inside surviving helpers (timeout sweeper,
+  downtime warning, mock-mode warning, deferred Gate A repost ping). They
+  log only now; Lark fan-out happens via `lark_webhook` where applicable.
+
+Behavior change: `run()` raises `SystemExit` if `AGENTFLOW_LARK_APP_PRIMARY`
+is not truthy. Operators must opt into Lark-first mode explicitly.
+
+Kept (Lark or shared callers): `get_review_chat_id`, `set_review_chat_id`,
+`configure_bot_menu` (no-op stub for back-compat callers/tests),
+`_slash_defer`, `_audit`, `_audit_slash`, all state / timeout / hotspot /
+image-gate primitives, the embedded bridge wiring, and the Lark-only
+bookkeeping main loop (heartbeat + GC + timeout sweep + deferred-repost
+drain + scheduled hotspots).
+
+### Wave D — file deletions + test cleanup (commits `3166ccd` + `6875963`)
+
+- **Deleted** `backend/agentflow/agent_review/tg_client.py` (330 lines, the
+  entire TG REST client wrapper).
+- `triggers.py`: removed `_TgClientUnavailable` sentinel + the lazy
+  `try/except ImportError` import scaffolding (62 lines). `_tg_configured()`
+  preserved as a back-compat predicate that returns False in practice.
+- `preflight.py`:
+  - `check_telegram` no longer probes the SDK; reports env-var status only.
+  - `critical_for_review_daemon` returns `[check_lark_app_primary()]`
+    unconditionally; legacy TG fallback branch deleted.
+- `tests/test_no_tg_runtime.py`: rewritten — Phase 2 L-1 sentinel/import-
+  fallback regression test is moot. New file asserts that `tg_client` and
+  `_TgClientUnavailable` symbols are absent at module level (guard against
+  re-introduction) and that `_emit_lark_review_card` is still present.
+- `tests/test_e2e_lark_pure.py`: Phase 2 canary that patched every
+  `tg_client.*` with a detonating sentinel is now redundant. The
+  `tg_violations` list is preserved (always empty) for back-compat; the
+  `_TG_FN_NAMES` tuple is deleted.
+- `tests/test_v02_workflows.py`: 30 TG-runtime tests deleted (1079-line
+  diff), including all of `TgMenuV103Tests`, `MarkdownV2EscapeRegressionTests`,
+  and `TopicFitHardGateTests` whole-class deletions, plus targeted method
+  removals across `TopicProfileIntentTests`, `LarkReviewCardTemplateTests`,
+  `V016BatchTests`, `LocalMockPipelineTests`, `MediumWorkflowTests`.
+
+Note: `render.py` (802 lines, TG-format Markdown V2 rendering) is still
+on disk. Its outputs (`sid` registration, `body_doc` Markdown export)
+feed `triggers.py` paths that haven't been refactored to talk to the
+`_sid` module directly. Refactor + deletion is deferred to the v1.3.x
+maintenance line; v1.3.0 ships with `render.py` intact but its TG-Markdown
+text/keyboard outputs become unused locals in `triggers.py`.
+
 ## [1.2.2] — 2026-05-08 — Phase 2 truly final (L-5 + skill v3.0 path fix)
 
 > Seals Phase 2 by closing L-5 inside pytest **and** repairing the two
