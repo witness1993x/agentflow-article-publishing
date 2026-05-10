@@ -16,6 +16,47 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.6] — 2026-05-11 — Profile flow Lark-event regressions fixed
+
+> User reported: "现在好像没有触发和保存 profile" — Wave C left two
+> seams in `daemon.py` as no-op TG-removal stubs that never got
+> rewired to emit Lark events. The Lark-callback path
+> (`lark_callback._handle_profile_advance`) was always intact, but
+> CLI-driven profile applies + the secondary daemon-side advance
+> path (preserved for backward-compat with tests) had no operator
+> visibility under Mode A.
+
+### `_send_profile_setup_question` now emits a Lark event card
+
+- Wave C left it as `return None` with a comment "Lark profile-advance
+  card flow in lark_callback.py is the live path; this helper is
+  preserved only as a no-op". Correct that the lark_callback path is
+  the live one for *button-driven* advance, but this daemon-side
+  helper is what `_maybe_handle_profile_session_reply` calls when an
+  answer arrives via a different surface (and what tests still hit).
+  Now calls `triggers._emit_lark_profile_question_card(...)` with the
+  current step's prompt, question_field, index/total — so the skill
+  agent sees the next question card and can render it to Lark.
+
+### `_spawn_apply_profile_session` now emits Lark notify events
+
+- Success → `notify.profile_setup_done` with profile_id + session_id
+  + mode (init/update). Same event shape lark_callback already emits
+  on its own apply path, so the skill agent's downstream handling
+  doesn't need to discriminate between sources.
+- Failure → `notify.profile_setup_failed` with error tail.
+- Crash → same failure event with `crash: <err>` prefix.
+- Pre-fix behavior was log-only — operator on Lark saw nothing
+  after triggering a CLI-driven profile setup, even though the apply
+  ran in the background.
+- Also dropped the `if chat_id is None: return` early-return guard:
+  in Mode A chat_id is always None and the apply should still run +
+  emit notify events into the queue.
+
+### Tests
+
+- 297/297 still passing — no test changes.
+
 ## [1.3.5] — 2026-05-11 — SKILL.md webhook framing rewrite
 
 > Closes a UX bug observed in the wild: even after v1.3.4 made the
