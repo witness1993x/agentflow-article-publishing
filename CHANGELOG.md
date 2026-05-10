@@ -16,6 +16,35 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.4] — 2026-05-11 — Skill self-contained for cloud-computer ops
+
+> Closes a hole in v1.3.3: SKILL.md *referenced* `docs/CLOUD_COMPUTER_DEPLOY.md`
+> but skill agents on a constrained cloud computer only see the skill
+> bundle, not the deploy tarball's docs. Ops guidance is now bundled
+> AND inlined in SKILL.md so the skill agent can guide a fresh install
+> without external lookups.
+
+### `references/CLOUD_COMPUTER_DEPLOY.md` bundled into skill
+
+- The 8-step runbook is now copied into the skill bundle's references/
+  alongside `lark_review_cards.md`. Skill agents read both directly from
+  the package — no filesystem access to the deploy tarball needed.
+
+### SKILL.md §"Cloud-Computer First-Time Deploy"
+
+- New top-level section that inlines a condensed 8-step deploy flow
+  (Python → pip → install → .env → doctor → smoke-test → daemon → tail
+  loop → end-to-end verification). Plus a 5-row "stuck symptom →
+  direct line" troubleshooting table.
+- §"Default Entry: First Deployment" gains a Step-0 deployment-form
+  detector: managed install (form A: backend/.venv/bin/blogflow exists)
+  vs cloud computer (form B: ~/.local/bin/blogflow exists, no venv) vs
+  empty machine (form C). Skill agent picks the right walkthrough.
+
+### Tests
+
+- 297/297 still passing (no test changes).
+
 ## [1.3.3] — 2026-05-11 — Deliverable mode complete (smoke test + runbook)
 
 > Closes the cloud-computer deployment loop. The Agent-Lark Window
