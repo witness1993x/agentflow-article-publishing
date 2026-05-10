@@ -396,12 +396,21 @@ def check_review_chat_id() -> CheckResult:
 
 
 def check_lark_app_primary() -> CheckResult:
-    """Synthetic check: Lark-first review cards must use event webhook."""
+    """Synthetic check: Lark-first review cards reach an agent via either an
+    HTTP webhook (POST mode) or a local on-disk queue tailed by an in-process
+    agent harness like OpenClaw with a mounted Lark window (file mode).
+    Either is acceptable; both can coexist via ``AGENTFLOW_AGENT_EVENT_MODE=both``.
+    """
     primary = _bool_env("AGENTFLOW_LARK_APP_PRIMARY")
     event_url = _env_present("AGENTFLOW_AGENT_EVENT_WEBHOOK_URL")
     auth = _env_present("AGENTFLOW_AGENT_EVENT_AUTH_HEADER")
     legacy_webhook = _env_present("LARK_WEBHOOK_URL")
     app_hint = _env_present("LARK_APP_ID", "LARK_APP_SECRET", "LARK_TARGET_CHAT_ID")
+    mode_raw = (os.environ.get("AGENTFLOW_AGENT_EVENT_MODE") or "").strip().lower()
+    if mode_raw in {"webhook", "file", "both"}:
+        effective_mode = mode_raw
+    else:
+        effective_mode = "webhook" if event_url else "file"
 
     cr = CheckResult(name="Lark App primary", env_var="AGENTFLOW_LARK_APP_PRIMARY")
     cr.extra = {
@@ -409,27 +418,43 @@ def check_lark_app_primary() -> CheckResult:
         "event_webhook_configured": bool(event_url),
         "event_auth_header_configured": bool(auth),
         "legacy_custom_bot_configured": bool(legacy_webhook),
+        "agent_event_mode": effective_mode,
     }
 
     if primary:
         cr.present = True
-        if not event_url:
-            cr.valid = False
-            cr.message = (
-                "AGENTFLOW_LARK_APP_PRIMARY=true but "
-                "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL is not set; review.*_card "
-                "events cannot reach OpenClaw"
-            )
-            return cr
         cr.valid = True
-        cr.message = "review.*_card events enabled"
+        if effective_mode == "webhook":
+            if not event_url:
+                # Forced webhook mode but no URL → real failure.
+                cr.valid = False
+                cr.message = (
+                    "AGENTFLOW_AGENT_EVENT_MODE=webhook but "
+                    "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL is not set; review.*_card "
+                    "events have nowhere to go"
+                )
+                return cr
+            cr.message = (
+                "review.*_card events enabled (webhook → OpenClaw)"
+            )
+            if not auth:
+                cr.message += "; AGENTFLOW_AGENT_EVENT_AUTH_HEADER not set"
+        elif effective_mode == "file":
+            cr.message = (
+                "review.*_card events enabled (file queue → "
+                "~/.agentflow/agent_events/queue.jsonl); the OpenClaw skill "
+                "agent should tail this file and push to Lark via the "
+                "mounted Lark window — see SKILL.md §\"Agent-Lark window mode\""
+            )
+        else:  # both
+            cr.message = "review.*_card events enabled (webhook + file queue)"
+            if event_url and not auth:
+                cr.message += "; AGENTFLOW_AGENT_EVENT_AUTH_HEADER not set"
         if legacy_webhook:
             cr.message += (
                 "; LARK_WEBHOOK_URL is also set, so old Custom Bot digest cards "
                 "may still appear as fallback/status messages"
             )
-        if not auth:
-            cr.message += "; AGENTFLOW_AGENT_EVENT_AUTH_HEADER not set"
         return cr
 
     if event_url or app_hint:
@@ -442,7 +467,7 @@ def check_lark_app_primary() -> CheckResult:
         )
         return cr
 
-    cr.message = "not enabled; Telegram/legacy Custom Bot path is active"
+    cr.message = "not enabled; legacy Custom Bot path is active (Phase 3 removed TG)"
     return cr
 
 

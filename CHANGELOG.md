@@ -16,6 +16,61 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.2] — 2026-05-11 — Agent-Lark Window mode (no-webhook deploy)
+
+> Targets the constrained-cloud-computer scenario where the operator
+> can install Python (after a `get-pip.py` --user dance) but cannot
+> stand up an HTTP listener for the OpenClaw bridge. The daemon now has
+> a "file queue" delivery mode for `review.*_card` / `notify.*` events
+> — the OpenClaw skill agent tails the queue and pushes Lark cards via
+> its already-mounted Lark window, no inbound webhook required.
+
+### `agent_bridge.emit_agent_event` gains a file-queue fallback
+
+- New env var `AGENTFLOW_AGENT_EVENT_MODE` ∈ {`webhook`, `file`, `both`}.
+  Auto-resolves to `webhook` if `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` is set,
+  else `file`.
+- `file` mode appends each envelope as one JSON line to
+  `~/.agentflow/agent_events/queue.jsonl`. Append-only, audit-friendly.
+- Webhook mode unchanged. `both` is a migration aid.
+
+### `preflight.check_lark_app_primary` no longer fails on missing webhook
+
+- v1.3.1 returned `valid=False` if `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`
+  wasn't set. v1.3.2 detects file-queue fallback and reports
+  `valid=True` with a message pointing operators at SKILL.md §"Agent-Lark
+  Window mode". Forced `AGENTFLOW_AGENT_EVENT_MODE=webhook` without a
+  URL still fails (real config error).
+
+### New CLI: `blogflow lark-cli-emit` + `blogflow agent-events-tail`
+
+- `lark-cli-emit` injects a Lark callback (`lark_gate_b_approve`,
+  `lark_message`, etc.) directly into `lark_callback.handle_event` via
+  CLI — no `/api/commands` HTTP server needed. Used by the Agent-Lark
+  Window flow when an operator clicks a Lark button: the OpenClaw skill
+  agent shells out to this command to forward the callback into the
+  daemon.
+- `agent-events-tail` streams the on-disk queue. Supports `--follow` for
+  long-running tails and `--from-start` for replay.
+
+### SKILL.md `agentflow-open-claw-v2`
+
+- New §"Lark Card Rendering — 两种部署模式" section. Mode A
+  (Agent-Lark Window, file queue) is documented as the recommended path
+  for cloud-computer / OpenClaw-with-mounted-Lark-window deployments.
+  Mode B (legacy webhook) is preserved for traditional HTTP server
+  setups. Includes a Python pseudocode tail loop, cursor handling, and
+  the new CLI helpers.
+- Removed the stale "TG fallback" advice — Phase 3 (v1.3.0) deleted
+  Telegram. Constrained environments must use Mode A.
+
+### Tests
+
+- `test_lark_primary_preflight_fails_without_event_webhook` replaced by
+  two finer-grained tests: one for the file-queue fallback, one for
+  `MODE=webhook` without a URL still failing.
+- Test suite: 295 → 297 passing (+2).
+
 ## [1.3.1] — 2026-05-10 — render.py removed + timeout-sweeper regression fix
 
 > v1.3.0 left `render.py` (802 lines, TG-Markdown + inline-keyboard

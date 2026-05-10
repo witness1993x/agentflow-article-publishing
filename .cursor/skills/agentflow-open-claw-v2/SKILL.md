@@ -92,7 +92,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.1.tar.gz` 及更新版本配合。**v1.3.0 (Phase 3) 起 Telegram surface 已彻底删除**——daemon、CLI、SDK 都不再有 TG 路径,`AGENTFLOW_LARK_APP_PRIMARY=true` + Lark 事件 webhook 是 daemon 启动的唯一前提,缺了就 SystemExit。v1.3.1 进一步删了 render.py（TG-Markdown 渲染器, 802 行）+ 修了 timeout sweeper 在 v1.3.0 残留的死代码 bug（_safe_send 永返 False 导致 timeout_state 永不 mark, 每 60s 重复 fire audit log）。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.2.tar.gz` 及更新版本配合。**v1.3.0 (Phase 3) 起 Telegram surface 已彻底删除**——daemon、CLI、SDK 都不再有 TG 路径,`AGENTFLOW_LARK_APP_PRIMARY=true` 是 daemon 启动的硬性前提,缺了 SystemExit。v1.3.1 删了 render.py（TG-Markdown 渲染器, 802 行）+ 修了 timeout sweeper 死代码 bug。**v1.3.2 加了 Agent-Lark Window 部署模式**——无 webhook,daemon 把事件写到 `~/.agentflow/agent_events/queue.jsonl`,skill agent 自己 tail 文件 + 用挂载的 Lark 窗口直接推卡片,完全适合云电脑 / 受限环境(详见下方"两种部署模式")。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
 
 - `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
 - `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）
@@ -127,9 +127,72 @@ Lark-only 部署：v1.3.0 起 daemon **强制** Lark-only —— `TELEGRAM_BOT_T
 
 **If user / cloud agent 跳过 init 步骤直接进 runtime**（如 sed `.env`），skill 应**主动指出**："你跳过了 framework 自带的 init 路径；先回去跑 `blogflow bootstrap` 或 `blogflow onboard` 再继续。" 不要默认放行。
 
-## Lark Card Rendering（`@larksuite/openclaw-lark` 已装时强制走的路径）
+## Lark Card Rendering — 两种部署模式 (v1.3.2+)
 
-如果当前 OpenClaw 实例装了官方 `@larksuite/openclaw-lark`（`openclaw plugin ls` 能看到 `openclaw-lark`），那 Gate A/B/C/D 推群**只有一条合法链路**：
+AgentFlow daemon 把 `review.*_card` / `notify.*` 事件**emit 到外部** ——具体出口由部署形态决定。两种模式都是合法的,**先按你的环境二选一**:
+
+| 模式 | 用在哪 | 由 daemon 怎么 emit | 由 agent 怎么消费 |
+|---|---|---|---|
+| **Agent-Lark Window 模式** (推荐云电脑场景) | 云电脑 / 受限环境,daemon + OpenClaw skill agent 同机,agent 已挂 Lark 窗口 | 写到 `~/.agentflow/agent_events/queue.jsonl` (一行一个 envelope) | OpenClaw skill agent **自己** tail 这个文件,按 `lark_review_cards.md` 渲卡,**通过已挂载的 Lark 窗口/MCP 直接推到群** |
+| **Webhook 模式** | OpenClaw 跑在独立 HTTP 服务器 (传统部署) | POST 到 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` | OpenClaw event listener 接 POST,渲卡,调 `sendCardFeishu` |
+
+**判断规则**: `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 设了走 webhook,没设默认走 file queue。可用 `AGENTFLOW_AGENT_EVENT_MODE=file|webhook|both` 强制。`blogflow doctor` 的"Lark App primary"行会显示当前 mode。
+
+---
+
+### 模式 A: Agent-Lark Window (无 webhook,云电脑首选)
+
+**前提确认**:
+- daemon 跑在本地（同机器）。`blogflow review-daemon` 起来了(可以先 `blogflow doctor` 验)。
+- 当前 agent harness (OpenClaw / Cursor / Claude Code) **有 mounted Lark 窗口**——能直接发 Lark 消息(通过 Lark MCP 工具 / openclaw-lark 插件 / 内置 Lark client)。这是 `@bot init` 之类已经能跟你聊天的能力。
+- `.env`: `AGENTFLOW_LARK_APP_PRIMARY=true`,`AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` **不**设 (或显式 `AGENTFLOW_AGENT_EVENT_MODE=file`)。
+
+**Agent 的运行循环 (你 — skill 持有方 — 必须这么做)**:
+
+1. **Tail 队列**: `~/.agentflow/agent_events/queue.jsonl` 是 daemon 写出的 append-only 事件流,一行一条 JSON envelope。Agent 持续 tail 文件(用 file watch / poll 间隔 ≤ 2s 都可)。**首次启动时把整个文件从 offset 0 读完**,以补回 daemon 已写但还没消费的事件;之后只 follow tail。
+2. **维护一个 cursor**: 持久化"已消费到第 N 行"到 `~/.agentflow/agent_events/.cursor.json` (内容例: `{"offset_bytes": 12384}`)。崩溃恢复时从 cursor 继续。**禁止丢事件**——队列文件是唯一审计源。
+3. **逐条解析 envelope**: 每行是一个 JSON,字段见 `agentflow/shared/agent_bridge.py::emit_agent_event`,核心字段 `event_type` (e.g. `review.gate_a_card`, `notify.hotspots_digest`)、`article_id`、`payload`。
+4. **按事件类型分派**:
+   - `review.*_card` → 按 `backend/agentflow/agent_review/templates/lark_review_cards.md` 渲一张交互卡(buttons + payload 字段一一对齐) → **通过 mounted Lark 窗口推到 review 群**。每个 button 的 `value` 字段必须含 `action` + `article_id` + 该卡指定的 `payload` 子字段。
+   - `notify.*` → 渲染成纯播报(无 button),也走 mounted Lark 推群。**绝对不要**把 `notify.hotspots_digest` 伪装成 Gate A 交互卡。
+5. **按钮回调**: 用户点 Lark 卡片按钮时,Lark 会把交互事件投递给 agent 的 Lark 窗口(通过 openclaw-lark 的 `dispatchFeishuPluginInteractiveHandler` 或 Lark MCP 的 button-click 事件)。Agent 取出 `value.action` 等字段,**就地调本地 CLI**:
+   ```bash
+   blogflow lark-cli-emit \
+     --command lark_gate_b_approve \
+     --article-id <aid> \
+     --operator-open-id <ou_xxx> \
+     --payload '{"comment":""}'
+   ```
+   (CLI helper 把 command 直接喂给 daemon 的 lark_callback handler。如果你的 OpenClaw 还有 `/api/commands` HTTP bridge,也可以走那条;但 file 模式下**不强制**起 HTTP server,直接 CLI 即可。)
+6. **@bot 自由文本**: 用户 `@bot <文本>` → agent 收到 → 调 `blogflow lark-cli-emit --command lark_message --params '{"text":"...","operator_open_id":"...","chat_id":"..."}'` → 把返回的 `data.reply_card` 渲到群。**禁止 agent 自行编回复**。
+
+**实操示例 (Python pseudocode,任何能开 file watch 的 agent 都能改)**:
+```python
+import json, time
+from pathlib import Path
+queue = Path.home() / ".agentflow" / "agent_events" / "queue.jsonl"
+cursor = Path.home() / ".agentflow" / "agent_events" / ".cursor.json"
+offset = json.loads(cursor.read_text() or "{}").get("offset_bytes", 0)
+while True:
+    if queue.exists() and queue.stat().st_size > offset:
+        with queue.open("r", encoding="utf-8") as fh:
+            fh.seek(offset)
+            for line in fh:
+                envelope = json.loads(line)
+                # → render & push to Lark via mounted window
+                push_to_lark_window(envelope)
+            offset = fh.tell()
+        cursor.write_text(json.dumps({"offset_bytes": offset}))
+    time.sleep(1)
+```
+
+**这就是为什么云电脑能跑**: daemon 在本地,event 落地到本地文件,agent 在同一台机器里 tail。**不需要任何外部 HTTP listener,不需要 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`,不需要打通 Lark → 你的服务器的反向通路**。Lark 推按钮事件这条路,完全由 agent 已经有的 Lark 窗口能力承接。
+
+---
+
+### 模式 B: Webhook (传统 OpenClaw HTTP 服务器部署)
+
+如果当前 OpenClaw 实例装了官方 `@larksuite/openclaw-lark`（`openclaw plugin ls` 能看到 `openclaw-lark`)且作为独立 HTTP server 跑,那 Gate A/B/C/D 推群走这条链路:
 
 ```
 AgentFlow daemon  ──(POST event envelope)──►  OpenClaw event listener
@@ -176,7 +239,7 @@ curl -X POST http://localhost:<openclaw-port>/agentflow/events \
 # 反例：群里看到纯文本 / 看到 401 / 看到 422 都说明配错了
 ```
 
-如果短期 plugin handler 还没补完、BEE 暂时只能转发文本到群，**必须明确告诉 user**："飞书交互卡片需要 openclaw-lark plugin 实现 event listener，尚未完成；当前只是 fallback 播报，要走完整 Gate 请用 TG `@CSPostContentAuditBot` 审核。" 不要假装一切正常。
+如果短期 plugin handler 还没补完、HTTP listener 暂时只能转发文本到群，**必须明确告诉 user**："飞书交互卡片需要 openclaw-lark plugin 实现 event listener，尚未完成；当前只是 fallback 播报。" 不要假装一切正常。**不要再提 TG fallback —— v1.3.0 起 Telegram 路径已删,没有 TG 可退**;受限环境优先切到模式 A (file queue)。
 
 ## Anti-patterns (NEVER do these)
 

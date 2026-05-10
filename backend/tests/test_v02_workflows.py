@@ -2444,7 +2444,10 @@ class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
         self.assertIsNone(result.valid)
         self.assertIn("legacy notification paths", result.message)
 
-    def test_lark_primary_preflight_fails_without_event_webhook(self) -> None:
+    def test_lark_primary_without_webhook_falls_back_to_file_queue(self) -> None:
+        """v1.3.2+: AGENTFLOW_LARK_APP_PRIMARY=true with no webhook URL now
+        defaults to Agent-Lark Window mode (file queue) instead of failing.
+        Preflight reports success + points operators at SKILL.md."""
         from agentflow.agent_review import preflight
 
         with patch.dict(
@@ -2452,13 +2455,33 @@ class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
             {
                 "AGENTFLOW_LARK_APP_PRIMARY": "true",
                 "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL": "",
+                "AGENTFLOW_AGENT_EVENT_MODE": "",
+            },
+            clear=False,
+        ):
+            result = preflight.check_lark_app_primary()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.extra.get("agent_event_mode"), "file")
+        self.assertIn("file queue", result.message)
+
+    def test_lark_primary_forced_webhook_without_url_fails(self) -> None:
+        """Forced webhook mode without a URL is still a real failure."""
+        from agentflow.agent_review import preflight
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_LARK_APP_PRIMARY": "true",
+                "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL": "",
+                "AGENTFLOW_AGENT_EVENT_MODE": "webhook",
             },
             clear=False,
         ):
             result = preflight.check_lark_app_primary()
 
         self.assertFalse(result.ok)
-        self.assertIn("review.*_card events cannot reach OpenClaw", result.message)
+        self.assertIn("AGENTFLOW_AGENT_EVENT_WEBHOOK_URL is not set", result.message)
 
     def test_review_daemon_embeds_bridge_for_lark_primary(self) -> None:
         with patch.dict(
