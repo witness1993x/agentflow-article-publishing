@@ -153,6 +153,92 @@ def agent_events_tail_cmd(follow: bool, from_start: bool) -> None:
 
 
 @cli.command(
+    "agent-events-emit-test",
+    help=(
+        "Emit a synthetic review.gate_a_card event into the queue / webhook "
+        "for end-to-end smoke verification. Use after install to confirm the "
+        "Agent-Lark Window chain is wired (queue.jsonl appears, skill agent "
+        "renders the card to Lark). Idempotent — each invocation appends one "
+        "event; tail with `blogflow agent-events-tail -f` in another terminal."
+    ),
+)
+@click.option(
+    "--event-type", default="review.gate_a_card", show_default=True,
+    help="Event type to fake. Defaults to a Gate A topic batch card.",
+)
+@click.option(
+    "--article-id", default="hs_smoke_test_001", show_default=True,
+    help="Synthetic article id; ignored when the event_type doesn't bind to one.",
+)
+def agent_events_emit_test_cmd(event_type: str, article_id: str) -> None:
+    """Smoke-test the daemon → agent fan-out without spinning up real article state."""
+    from agentflow.shared.agent_bridge import (
+        emit_agent_event,
+        _event_mode,
+        _queue_path,
+        _event_webhook_url,
+    )
+
+    fake_payload = {
+        "card_kind": "review",
+        "gate": "A",
+        "short_id": "smoke01",
+        "batch_path": "/tmp/smoke-test-batch.json",
+        "publisher_brand": "AgentFlow Smoke Test",
+        "target_series": "operator-verification",
+        "candidates": [
+            {
+                "topic_one_liner": "Smoke test candidate — please ignore",
+                "score": 0.42,
+                "source": "smoke-test",
+                "hotspot_id": "hs_smoke_test_001",
+                "red_flags": [],
+                "keywords": [],
+            }
+        ],
+        "smoke_test": True,
+    }
+
+    mode = _event_mode()
+    queue_before_size = _queue_path().stat().st_size if _queue_path().exists() else 0
+
+    emit_agent_event(
+        source="cli.smoke_test",
+        event_type=event_type,
+        article_id=article_id,
+        payload=fake_payload,
+    )
+
+    queue_after_size = _queue_path().stat().st_size if _queue_path().exists() else 0
+    delta = queue_after_size - queue_before_size
+
+    click.echo(f"emit mode:           {mode}")
+    if mode in {"file", "both"}:
+        if delta > 0:
+            click.echo(f"queue file:          {_queue_path()}")
+            click.echo(f"queue grew by:       {delta} bytes (one envelope appended)")
+            click.echo("✓ file-queue path verified")
+        else:
+            click.echo(f"queue file:          {_queue_path()}")
+            click.echo("✗ queue did NOT grow — check ~/.agentflow permissions / disk space")
+    if mode in {"webhook", "both"}:
+        url = _event_webhook_url()
+        if url:
+            click.echo(f"webhook target:      {url}")
+            click.echo(
+                "(check daemon logs / your OpenClaw listener for the POST receipt — "
+                "this CLI is best-effort and won't surface non-2xx responses)"
+            )
+        else:
+            click.echo("✗ AGENTFLOW_AGENT_EVENT_MODE=webhook but URL unset")
+    click.echo(
+        "\nnext: tail with `blogflow agent-events-tail -f` to see the JSON, then "
+        "verify the skill agent renders it to Lark per SKILL.md "
+        "§\"Agent-Lark Window mode\"."
+    )
+
+
+@cli.command(
     "review-daemon",
     help=(
         "Run the review daemon. Telegram mode long-polls TG; Lark-first mode "

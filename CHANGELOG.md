@@ -16,6 +16,48 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.3] — 2026-05-11 — Deliverable mode complete (smoke test + runbook)
+
+> Closes the cloud-computer deployment loop. The Agent-Lark Window
+> architecture from v1.3.2 is now operator-runnable end-to-end without
+> consulting source code: smoke-test command, single-page runbook, and
+> the card schema reference is bundled inside the skill itself.
+
+### `blogflow agent-events-emit-test`
+
+- New CLI: emits a synthetic `review.gate_a_card` event into the queue
+  / webhook for end-to-end smoke verification. Reports the active mode
+  (file / webhook / both), the queue path, and the byte delta after the
+  append. Used as the final verification step in
+  `docs/CLOUD_COMPUTER_DEPLOY.md` step 5.
+
+### Card schema bundled into skill
+
+- `.cursor/skills/agentflow-open-claw-v2/references/lark_review_cards.md`
+  is now a copy of `backend/agentflow/agent_review/templates/lark_review_cards.md`
+  (308 lines). The skill agent no longer needs filesystem access to
+  the deploy backend tree to render cards correctly. SKILL.md updated
+  to reference the bundled path.
+
+### `docs/CLOUD_COMPUTER_DEPLOY.md`
+
+- Single-page operator runbook (≈250 lines) covering the full
+  no-sudo / no-Docker / no-webhook deploy: get-pip.py user-install →
+  unpack tarball → pip install --user -e . → .env config → doctor →
+  smoke-test → daemon foreground / nohup / systemd-user → skill agent
+  side-loop verification. Plus three appendices: portable Python
+  fallback, air-gapped wheel install, and dual-write `MODE=both` mode.
+
+### SKILL.md
+
+- §"模式 A: Agent-Lark Window" prerequisites bullet now points at
+  `docs/CLOUD_COMPUTER_DEPLOY.md` for the end-to-end install steps and
+  at `blogflow agent-events-emit-test` for the one-line smoke probe.
+
+### Tests
+
+- 297/297 still passing (no test changes — pure delivery additions).
+
 ## [1.3.2] — 2026-05-11 — Agent-Lark Window mode (no-webhook deploy)
 
 > Targets the constrained-cloud-computer scenario where the operator
