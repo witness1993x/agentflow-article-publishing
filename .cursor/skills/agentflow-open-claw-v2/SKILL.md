@@ -13,7 +13,7 @@ description: AgentFlow article-publishing OpenClaw skill. Default entry is first
 - `references/`：长文档、模板、示例，按需读取。
 - `assets/`：可作为 `blogflow topic-profile ... --from-file` 参数传入的 YAML 模板。
 
-包内不放 `backend/agentflow/` 源码。OpenClaw/Cursor/Claude Code 是 skill / agent harness；它们加载本 skill 后通过 `blogflow` CLI（`mediaflow` 同入口别名）或 AgentFlow bridge 操作 runtime。Lark-first 部署的业务主进程是 `blogflow review-daemon`：它负责 heartbeat、timeout、定时 article-hotspots，并在 `AGENTFLOW_LARK_APP_PRIMARY=true` 时内置 `/api/commands` bridge。不要再要求单独启动 `blogflow review-dashboard` 来承接 Lark 按钮 callback。
+包内不放 `backend/agentflow/` 源码。OpenClaw/Cursor/Claude Code 是 skill / agent harness;它们加载本 skill 后通过 `blogflow` CLI 操作 runtime。Lark-first 部署的业务主进程是 `blogflow review-daemon`,负责 heartbeat / timeout / 定时 article-hotspots / 把 review 事件写到 `~/.agentflow/agent_events/queue.jsonl`(默认 Mode A 文件队列)。**不要要求单独启动 `blogflow review-dashboard` 或配置 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`** —— 这两条都是历史路径。Lark 按钮 callback 的回流由 skill agent 调 `blogflow lark-cli-emit` CLI 直接喂给 daemon,无需 HTTP server 中转。
 
 ## Default Entry: First Deployment
 
@@ -114,7 +114,7 @@ description: AgentFlow article-publishing OpenClaw skill. Default entry is first
 
 - **Pipeline**: D0 风格 → D1 hotspots → Gate A 选题 → D2 写作 → Gate B 草稿 → D2.5 image → Gate C 封面 → Gate D 渠道 → D3 preview → D4 publish → D4.5 mark/stats
 - **State machine**: 14 STATE_* (`backend/agentflow/agent_review/state.py`)。**不是 5 个**——5-state "approved/skeleton/draft/preview/published" 模型已陈旧
-- **入口**: `blogflow` CLI（`mediaflow` 同入口别名，旧 `af` 仅 legacy）+ Lark App / OpenClaw bridge (`lark_*` commands, event webhook) + Telegram fallback bot (prefix A/B/C/D + PD/I/L/PR/P/S) + Claude/Cursor skills
+- **入口**: `blogflow` CLI(主入口) + Lark App / OpenClaw skill agent (Mode A 文件队列 / Mode B webhook,默认 Mode A) + Claude/Cursor skills。TG bot 已在 Phase 3 (v1.3.0) 删除。
 - **存储**: `~/.agentflow/` 用户数据；`backend/agentflow/` 框架 (brand-neutral)
 
 ## 3 条 hard rules
@@ -156,7 +156,7 @@ To **actually run** AgentFlow you need:
 
 1. **Runtime repo** (`agentflow-framework-{YYYYMMDD}-slim.zip`，含 `backend/agentflow/` 全部 Python 代码 + `pyproject.toml`)
 2. **Python venv** (`cd backend && python3 -m venv .venv && pip install -e .`)
-3. **`.env`** (mock-only 需 `MOCK_LLM=true`；TG fallback 需 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_REVIEW_CHAT_ID`；Lark-first 需 `AGENTFLOW_LARK_APP_PRIMARY=true`、OpenClaw event webhook、bridge token 和 daemon bridge host/port；real-key 加 LLM/embedding/Atlas 等)
+3. **`.env`** — 唯一**必填**变量是 `AGENTFLOW_LARK_APP_PRIMARY=true` + 至少 1 个 LLM key (`ANTHROPIC_API_KEY` 或 `MOONSHOT_API_KEY`) + 1 个 embedding (`JINA_API_KEY` 或 `OPENAI_API_KEY`) + `ATLASCLOUD_API_KEY`(image-gate)。云电脑 / OpenClaw 已挂 Lark 窗口的场景 **不需要** 配 webhook URL / bridge token / dashboard 端口 —— daemon 默认走文件队列,这些都不存在。`MOCK_LLM=true` 跳过 LLM key 走假数据(仅 demo)。
 4. **`~/.agentflow/`** 数据目录（首次跑 `blogflow review-init` 自动创建）
 
 Skill 仅在 LLM/agent 思考"在这个 repo 里要做什么"时被加载。**没有 repo，skill 也"无 act 可做"**。
@@ -168,13 +168,13 @@ Before this skill provides useful guidance, the following must exist on disk:
 | Path | 用途 | 缺失影响 |
 |---|---|---|
 | `<repo>/backend/agentflow/` | 框架代码 | 完全无法运行；先 unzip slim |
-| `<repo>/backend/.venv/bin/blogflow` | CLI 入口 | 任何 `blogflow *` 命令都失败；先 `pip install -e .` |
-| `<repo>/backend/.env` | 凭据 | TG/Lark/LLM bridge 不会 connect；先 cp template + 用 onboard/bootstrap 补齐 |
+| `<repo>/backend/.venv/bin/blogflow` 或 `~/.local/bin/blogflow` | CLI 入口 | 任何 `blogflow *` 命令都失败；formats A 走 `pip install -e .`,form B 走 `pip install --user -e .` |
+| `<repo>/backend/.env` | 凭据 | LLM / Lark App primary 不会 connect；先 cp template + 填 LLM/embedding/Atlas key,加 `AGENTFLOW_LARK_APP_PRIMARY=true` |
 | `~/.agentflow/review/last_heartbeat.json` | daemon 心跳 | `blogflow doctor` 第 13 项报 stale；先 `blogflow review-daemon` 起来 |
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.4.tar.gz` 及更新版本配合。**v1.3.0 起 Telegram surface 已彻底删除**;v1.3.1 删 render.py + 修 timeout sweeper bug;**v1.3.2 加了 Agent-Lark Window 模式**(无 webhook,daemon 写文件队列 + skill agent tail + 挂载 Lark 窗口推卡);v1.3.3 补齐运维交付物(smoke-test CLI、卡片 schema 内置 `references/lark_review_cards.md`、单页云电脑部署 runbook);v1.3.4 把 runbook 也搬进 `references/CLOUD_COMPUTER_DEPLOY.md` + 在本 SKILL.md 加了浓缩 8 步 §"Cloud-Computer First-Time Deploy",skill agent 引导部署不再需要打开外部文件。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.5.tar.gz` 及更新版本配合。**v1.3.0 起 Telegram surface 已彻底删除**;v1.3.1 删 render.py + 修 timeout sweeper bug;**v1.3.2 加了 Agent-Lark Window 模式**(无 webhook,daemon 写文件队列 + skill agent tail + 挂载 Lark 窗口推卡);v1.3.3 补齐运维交付物(smoke-test CLI、卡片 schema 内置、云电脑部署 runbook);v1.3.4 把 runbook 也搬进 `references/CLOUD_COMPUTER_DEPLOY.md`;v1.3.5 重写 SKILL.md 的部署模式 framing —— Mode A (文件队列) 是 **默认且唯一** 应该问 user 的路径,Mode B (webhook) 退到 advanced 章节,skill agent 在云电脑/同机部署下**绝不能**问 user 索要 webhook URL / auth header / bridge token / dashboard 端口(详见 anti-pattern #11)。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
 
 - `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
 - `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）
@@ -202,34 +202,34 @@ Lark-only 部署：v1.3.0 起 daemon **强制** Lark-only —— `TELEGRAM_BOT_T
 | Profile derive | `blogflow topic-profile derive --profile <id>` | 手填 keyword_groups / do / dont |
 | Style 导入 | `blogflow learn-from-handle <handle> --profile <id>` | 手编 `~/.agentflow/style_profile.yaml` |
 | TG bot 首次 chat_id 绑定 | TG 发 `/start`（daemon 自动 capture） | 手编 `~/.agentflow/review/config.json` |
-| Lark App 主路径 | 配 `AGENTFLOW_LARK_APP_PRIMARY=true`、`AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 指向 OpenClaw、`AGENTFLOW_AGENT_BRIDGE_TOKEN`、`AGENTFLOW_REVIEW_BRIDGE_PORT`；写操作需 `AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true`；启动 `blogflow review-daemon` | 继续扩 Custom Bot webhook、把 Lark 当 TG 镜像、或另起 `review-dashboard` 当主 callback |
+| Lark App 主路径(默认 = Agent-Lark Window 模式) | `AGENTFLOW_LARK_APP_PRIMARY=true` + LLM/embedding/Atlas key,启 `blogflow review-daemon`。**不要**问 user 索要 webhook URL / bridge token / dashboard 端口 —— 默认文件队列模式根本不用这些 | 把 Lark 当 TG 镜像、扩 Custom Bot webhook、另起 `review-dashboard`、强行让 user 配 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` |
 | Daemon 启动 | `blogflow review-daemon` (前台 / systemd / launchd) | `python -m agentflow.cli.commands review-daemon` |
 | Cron 定时 | `blogflow review-cron-install --times "..."` | 手写 launchd plist / systemd timer unit |
 | 健康度自检 | `blogflow doctor` (13 probe + cache) | grep `~/.agentflow/review/last_heartbeat.json` 自己写逻辑 |
 
 **If user / cloud agent 跳过 init 步骤直接进 runtime**（如 sed `.env`），skill 应**主动指出**："你跳过了 framework 自带的 init 路径；先回去跑 `blogflow bootstrap` 或 `blogflow onboard` 再继续。" 不要默认放行。
 
-## Lark Card Rendering — 两种部署模式 (v1.3.2+)
+## Lark Card Rendering — Agent-Lark Window 模式 (v1.3.2+ 默认)
 
-AgentFlow daemon 把 `review.*_card` / `notify.*` 事件**emit 到外部** ——具体出口由部署形态决定。两种模式都是合法的,**先按你的环境二选一**:
+> **TL;DR for skill agent**: 在 OpenClaw / Cursor / Claude Code(已挂 Lark 窗口的任何 agent harness)上,daemon 把 review/notify 事件写到 `~/.agentflow/agent_events/queue.jsonl`,**你**(skill agent)tail 这个文件,按 `references/lark_review_cards.md` 渲卡,通过你已经挂的 Lark 窗口推到群。**不需要任何 webhook 配置,不需要 review-dashboard,不需要 bridge token,不需要 auth header**。这一切都是 daemon 的 *默认行为* —— user 不需要做任何额外的桥接配置,你也不该问他要这些。
 
-| 模式 | 用在哪 | 由 daemon 怎么 emit | 由 agent 怎么消费 |
-|---|---|---|---|
-| **Agent-Lark Window 模式** (推荐云电脑场景) | 云电脑 / 受限环境,daemon + OpenClaw skill agent 同机,agent 已挂 Lark 窗口 | 写到 `~/.agentflow/agent_events/queue.jsonl` (一行一个 envelope) | OpenClaw skill agent **自己** tail 这个文件,按 `lark_review_cards.md` 渲卡,**通过已挂载的 Lark 窗口/MCP 直接推到群** |
-| **Webhook 模式** | OpenClaw 跑在独立 HTTP 服务器 (传统部署) | POST 到 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` | OpenClaw event listener 接 POST,渲卡,调 `sendCardFeishu` |
+AgentFlow daemon 把 `review.*_card` / `notify.*` 事件 emit 到 `~/.agentflow/agent_events/queue.jsonl`(append-only JSONL,一行一个 envelope)。daemon 默认就走这条路,无需任何 env var 启用。`blogflow doctor` 的"Lark App primary"行会显示 `agent_event_mode: file`。
 
-**判断规则**: `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 设了走 webhook,没设默认走 file queue。可用 `AGENTFLOW_AGENT_EVENT_MODE=file|webhook|both` 强制。`blogflow doctor` 的"Lark App primary"行会显示当前 mode。
+> Mode B (Webhook,把事件 POST 到外部 HTTP server) 只用于"OpenClaw 跑在另一台独立服务器、daemon 跑在本机"的传统部署。云电脑 / OpenClaw 在同一台机子的场景**绝不要走** Mode B —— 见本文件末尾 §"Mode B (advanced):Webhook" 段,默认情况下 skill agent 不需要打开它。
 
 ---
 
-### 模式 A: Agent-Lark Window (无 webhook,云电脑首选)
+### 前提确认 (Agent-Lark Window 模式)
 
-**前提确认**:
-- daemon 跑在本地（同机器）。`blogflow review-daemon` 起来了(可以先 `blogflow doctor` 验)。
-- 当前 agent harness (OpenClaw / Cursor / Claude Code) **有 mounted Lark 窗口**——能直接发 Lark 消息(通过 Lark MCP 工具 / openclaw-lark 插件 / 内置 Lark client)。这是 `@bot init` 之类已经能跟你聊天的能力。
-- `.env`: `AGENTFLOW_LARK_APP_PRIMARY=true`,`AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` **不**设 (或显式 `AGENTFLOW_AGENT_EVENT_MODE=file`)。
-- 完整运维步骤(从云电脑无 sudo 装 Python 一路到起 daemon)看 `references/CLOUD_COMPUTER_DEPLOY.md`(skill 内置,无需文件系统访问 deploy tarball);浓缩 8 步流程在本文件 §"Cloud-Computer First-Time Deploy"。
-- **Smoke 验证一键命令**: `blogflow agent-events-emit-test` —— 投一个假的 Gate A 事件到队列,你的 tail 循环能看到就证明 daemon→agent 链路通了。
+只需要 3 件事就位:
+
+- daemon 跑在本机。`blogflow review-daemon` 起来了(`blogflow doctor` 可验)。
+- 当前 agent harness 有 **mounted Lark 窗口** —— 能直接发 Lark 消息(Lark MCP 工具 / openclaw-lark 插件 / 内置 Lark client 任一)。如果你能 `@bot 你好` 跟用户对话,这条就算满足。
+- `.env`: 只需 `AGENTFLOW_LARK_APP_PRIMARY=true` + 至少一组 LLM/embedding/Atlas key。**不需要** webhook URL / auth header / bridge token / dashboard 端口 —— 这些在 Mode A 下根本不存在。
+
+**完整运维步骤** 见 `references/CLOUD_COMPUTER_DEPLOY.md`(skill 内置);浓缩 8 步在本文件 §"Cloud-Computer First-Time Deploy"。
+
+**Smoke 验证**: `blogflow agent-events-emit-test` 投一个假的 Gate A 事件,你的 tail 循环 ~2s 内吃到 → 链路通。
 
 **Agent 的运行循环 (你 — skill 持有方 — 必须这么做)**:
 
@@ -274,9 +274,13 @@ while True:
 
 ---
 
-### 模式 B: Webhook (传统 OpenClaw HTTP 服务器部署)
+### Mode B (advanced):Webhook 部署 — 多数 skill agent 不该走这条
 
-如果当前 OpenClaw 实例装了官方 `@larksuite/openclaw-lark`（`openclaw plugin ls` 能看到 `openclaw-lark`)且作为独立 HTTP server 跑,那 Gate A/B/C/D 推群走这条链路:
+> **触发条件**: OpenClaw 跑在与 daemon **不同**的机器(独立 HTTP server)上,且你能配置 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 指向那台 server。如果你不确定是不是这种情况,**它就不是** —— 默认 Mode A。
+>
+> **不要在云电脑/同机部署场景下问 user 索要 webhook URL / auth header / bridge token。** 那些都是 Mode B 的 artifact,Mode A 不存在。问了等于把内部 bug 暴露给 user。
+
+如果你确实在 Mode B 场景(daemon 跑在 server X,OpenClaw 跑在 server Y),Gate A/B/C/D 推群走这条链路:
 
 ```
 AgentFlow daemon  ──(POST event envelope)──►  OpenClaw event listener
@@ -337,9 +341,10 @@ curl -X POST http://localhost:<openclaw-port>/agentflow/events \
 8. ❌ **TG 含未 escape MarkdownV2 chars 不传 `parse_mode=None`** — `_ * [ ] ( ) ~ ` > # + - = | { } . !` 全是 reserved；要么调 `_render.escape_md2(...)`，要么 `parse_mode=None`
 9. ❌ **编辑 follow-up 不做一次性消费** — TG `pending_edits.take()` / Lark `lark_pending_edit_consumed` 都必须防止同一槽位被重复消息复用
 10. ❌ **`_write_heartbeat` 包外 try-except 之外** — 心跳 best-effort，磁盘满 / 权限错不能让 poll loop 崩；任何 IO 失败都 swallow
-11. ❌ **`AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 指向 AgentFlow 自己的 `/api/commands`** — 这是端口配错。该 URL 只能指向 OpenClaw 侧自己实现的 event listener（如 `/agentflow/events`）。前者只认 command 格式，envelope 格式必返 422，导致 BEE 退化成纯文本推群、按钮全丢。详见上文"Lark Card Rendering"段。
-12. ❌ **openclaw-lark 已装但 BEE 仍用纯文本播报扫描结果** — 看到 `openclaw-lark` 在 plugin 列表，必须按 `lark_review_cards.md` 渲 interactive card；纯文本是契约违反，会让 user 失去所有 Gate 按钮。BEE 在 listener 没接好之前**禁止默认开 fallback 模式**，必须先告知 user "卡片渲染未实现，请走 TG"。
-13. ❌ **信任 LLM 输出无人审 fact-check** — D2 fill 在 product_facts 之外可能编造：历史事件 / 数据点 / 时间戳 / 产品发布 / 漏洞日期 / 引用人物。skill 应主动提示 user "section X 引用了 'Q1 DuckDB 漏洞'，product_facts 没声明，请核实事实或加 source URL"。任何**未 grounded** 的具体数字 / 日期 / 公司名都是潜在 hallucination。
+11. ❌ **在云电脑 / 同机部署场景下问 user 索要 `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` / `AGENTFLOW_AGENT_EVENT_AUTH_HEADER` / `AGENTFLOW_AGENT_BRIDGE_TOKEN` / `review-dashboard` 端口** — 这些全是 Mode B (传统 webhook) 的 artifact,Mode A (默认,文件队列) 下根本不存在。问了等于把内部 bug 暴露给 user,他会困惑"这些值要写啥"。Mode A 下的桥接是 **零配置** 的:`AGENTFLOW_LARK_APP_PRIMARY=true` + 你 tail 文件 + 你推 Lark 窗口 = 完事。
+12. ❌ **`AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` 指向 AgentFlow 自己的 `/api/commands`** (仅 Mode B) — 这是端口配错。该 URL 只能指向 OpenClaw 侧自己实现的 event listener。Mode B 详情见 §"Mode B (advanced)" 段。
+13. ❌ **openclaw-lark / Lark 窗口已装但仍用纯文本播报扫描结果** — 看到 `openclaw-lark` 在 plugin 列表(或你已经在挂载的 Lark 窗口里能发消息),必须按 `references/lark_review_cards.md` 渲 interactive card;纯文本是契约违反,会让 user 失去所有 Gate 按钮。tail / listener 没接好之前**禁止默认开 fallback 模式**,要明告 user "卡片渲染未实现"。**不要再提 TG fallback —— v1.3.0 起 Telegram 路径已删,没有 TG 可退**。
+14. ❌ **信任 LLM 输出无人审 fact-check** — D2 fill 在 product_facts 之外可能编造：历史事件 / 数据点 / 时间戳 / 产品发布 / 漏洞日期 / 引用人物。skill 应主动提示 user "section X 引用了 'Q1 DuckDB 漏洞'，product_facts 没声明，请核实事实或加 source URL"。任何**未 grounded** 的具体数字 / 日期 / 公司名都是潜在 hallucination。
 
 **Detection**：跑 `blogflow doctor` 13 项 probe；grep `_log.warning` / `_audit kind=spawn_failure`；看 `~/.agentflow/review/audit.jsonl` 末 50 条；任何 silent failure 都应主动 surface。新增：D2 输出后 grep 每节 `compliance_score < 0.85` 必 flag；taboo_violations 非空必处理；具体数字/日期/公司名不在 product_facts 必人审。
 

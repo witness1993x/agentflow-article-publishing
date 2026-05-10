@@ -16,6 +16,57 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.5] — 2026-05-11 — SKILL.md webhook framing rewrite
+
+> Closes a UX bug observed in the wild: even after v1.3.4 made the
+> skill self-contained, the cloud-computer agent was still asking
+> users for `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`, `AGENTFLOW_AGENT_EVENT_AUTH_HEADER`,
+> `AGENTFLOW_AGENT_BRIDGE_TOKEN`, "review-dashboard 怎么起",
+> "Lark callback 到 bridge 再到 daemon 的闭环" — i.e. all the Mode B
+> webhook concepts that don't exist in the file-queue path. The skill
+> framed Mode A and Mode B as equally valid choices, so the agent
+> would happily walk users through Mode B prerequisites that have no
+> meaning in Mode A.
+
+### What changed in `SKILL.md`
+
+- §"Lark Card Rendering" rewritten so Mode A (Agent-Lark Window /
+  file queue) is THE default and described first; opening TL;DR
+  bullet explicitly says "no webhook, no review-dashboard, no
+  bridge token, no auth header — these are Mode A non-issues, do
+  not ask the user about them."
+- Mode B section retitled "Mode B (advanced):Webhook 部署 — 多数 skill
+  agent 不该走这条" with a trigger condition: "OpenClaw runs on a
+  *different* machine from daemon AND you can configure a real
+  webhook URL pointing at it. If you're not sure, it's not." Default
+  remains Mode A.
+- Anti-pattern #11 added: "On cloud-computer / same-host deploy, do
+  NOT ask the user for `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` /
+  `AGENTFLOW_AGENT_EVENT_AUTH_HEADER` / `AGENTFLOW_AGENT_BRIDGE_TOKEN`
+  / review-dashboard port. These are Mode B artifacts — Mode A is
+  zero-config." Existing #11/#12/#13 shifted to #12/#13/#14.
+- §"Required Runtime" `.env` row rewritten: only required vars are
+  `AGENTFLOW_LARK_APP_PRIMARY=true` + at least one LLM/embedding/Atlas
+  key. Webhook / bridge / dashboard mentions removed.
+- §"Required Init Flows" "Lark App 主路径" row rewritten: drops the
+  webhook URL / bridge token / dashboard port requirements; adds
+  "Don't push these on the user" to the NEVER column.
+- Package-contract paragraph rewritten: review-daemon writes to the
+  file queue by default; Lark button callback flows back via
+  `blogflow lark-cli-emit` CLI, no HTTP bridge required.
+- `Repo facts` "入口" line: TG bot reference removed (Phase 3 deleted
+  it); webhook reference replaced with Mode A/B language.
+
+### Bundled artifacts unchanged
+
+- Skill bundle file count (12) and contents (`lark_review_cards.md`,
+  `CLOUD_COMPUTER_DEPLOY.md`) unchanged from v1.3.4 — only SKILL.md
+  text edits.
+
+### Tests
+
+- 297/297 still passing — no test changes.
+
 ## [1.3.4] — 2026-05-11 — Skill self-contained for cloud-computer ops
 
 > Closes a hole in v1.3.3: SKILL.md *referenced* `docs/CLOUD_COMPUTER_DEPLOY.md`
