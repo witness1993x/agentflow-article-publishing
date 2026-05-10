@@ -16,6 +16,82 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.11] — 2026-05-11 — Recall-source observability + auto-prune dead handles
+
+> Live `blogflow article-hotspots` against the real ChainStream profile
+> exposed the operational reality: 65/65 high-weight Twitter KOL handles
+> came back 402 Payment Required (Twitter free tier can't pull
+> per-user timelines), profile_search returned 0 hits across all 5
+> queries, no Brave queries ran (no API key), no RSS ran (default off).
+> Final pool: 0 hotspots. Every downstream filter / threshold / fallback
+> mechanism was being asked to work miracles on an empty input.
+>
+> This release adds the missing observability + cleanup tools so the
+> operator can see and fix the source layer without spelunking logs.
+
+### `~/.agentflow/review/source_health.json` (emitted automatically)
+
+- Every `blogflow article-hotspots` run now writes this file at end of
+  scan. Captures:
+  - `hotspot_count` in the run
+  - `per_source_signal_counts`: how many signals each source kind
+    contributed (twitter, hn, brave, rss, etc.)
+  - `twitter_handles.total_probed` + `by_status` (alive /
+    payment_required / not_found / forbidden / unauthorized /
+    rate_limited / other) + `dead` list with each handle + http code
+- Source: new `_HANDLE_HEALTH` snapshot captured in
+  `agent_d1/collectors/twitter.py::_fetch_real_sync`, drained at end
+  of scan by `agent_d1/main.py::_emit_source_health`.
+- Best-effort: failures here never block the scan.
+
+### New CLI: `blogflow source-doctor`
+
+- Reads `source_health.json`, surfaces per-source signal yield + Twitter
+  handle health table.
+- `--fix-block`: edits `sources.yaml` in place to set
+  `weight: blocked` on dead handles. Writes a `.bak` of the original.
+- Block policy:
+  - **Always blocks**: `not_found` (404 / dead account), `forbidden`,
+    `unauthorized` — these can't recover.
+  - **Opt-in via `--include-rate-limited`**: 429s (may be transient).
+  - **Opt-in via `--include-payment-required`**: 402s. Default OFF
+    because a paid Twitter tier would restore them; if the operator
+    doesn't have a paid tier, pass the flag to stop wasting scan
+    time + log noise on these handles.
+- Adds an inline note: `[auto-blocked by source-doctor; was <status>]`
+  so the audit trail is visible in the yaml.
+- Idempotent — re-running on already-blocked handles is a no-op.
+
+### `.env.template` recommendations updated
+
+- `AGENTFLOW_TWITTER_SEARCH_ENABLED` now defaults to `true` in the
+  template (was `false`). Twitter keyword search bypasses the
+  per-user-timeline 402 wall — much cheaper way to use Twitter than
+  KOL pulls.
+- `AGENTFLOW_BRAVE_SEARCH_ENABLED` now defaults to `true` in the
+  template (was `false`). Brave Web Search is the recall-pool
+  insurance policy for niche profiles where HN + Twitter both fail
+  to surface enough domain content.
+- Added a §"v1.3.11 — `blogflow source-doctor`" hint section calling
+  out the post-scan diagnostics flow.
+
+### `check_recall_sources_enabled` fix
+
+- v1.3.9 introduced this check but referenced the wrong env var name
+  (`BRAVE_SEARCH_API_KEY` — code actually reads `BRAVE_API_KEY`).
+  Fixed; doctor extras now correctly reflect `brave_api_key_set`.
+
+### Tests
+
+- 297/297 still passing — all new code is additive.
+
+### Real-world demo
+
+- Live ran on `~/.agentflow` against the chainstream profile, captured
+  in `docs/PRODUCTION_WALKTHROUGH.md` continuation. 65 dead handles
+  identified + tested `source-doctor --fix-block` successfully (then
+  reverted to leave the operator's actual config untouched).
+
 ## [1.3.10] — 2026-05-11 — Gate B/C silent-emit P0 + production walkthrough
 
 > Caught while doing a live end-to-end dry-run of the v1.3.9 pipeline:

@@ -239,6 +239,142 @@ def agent_events_emit_test_cmd(event_type: str, article_id: str) -> None:
 
 
 @cli.command(
+    "source-doctor",
+    help=(
+        "Diagnose recall sources after the last `blogflow article-hotspots` "
+        "run. Reads ~/.agentflow/review/source_health.json (written "
+        "automatically at the end of every scan, v1.3.11+) and reports per-"
+        "source signal counts + Twitter KOL handle health (alive / "
+        "payment_required / not_found / etc.). With --fix-block, edits "
+        "sources.yaml in place to mark dead handles `weight: blocked` so "
+        "they stop poisoning future scans with 402/404 noise."
+    ),
+)
+@click.option(
+    "--fix-block", is_flag=True, default=False,
+    help="Edit sources.yaml: set weight=blocked on handles that came back "
+    "not_found / forbidden / unauthorized. 402 payment_required and 429 "
+    "rate_limited are NOT touched by default (could come back on a paid "
+    "tier or transient rate limit) — pass --include-payment-required / "
+    "--include-rate-limited to block those too.",
+)
+@click.option("--include-rate-limited", is_flag=True, default=False,
+              help="Treat 429 rate_limited as blockable too (default: skip — could be transient).")
+@click.option("--include-payment-required", is_flag=True, default=False,
+              help="Treat 402 payment_required as blockable. Use when you "
+              "DON'T have a paid Twitter tier and want to stop wasting scan "
+              "time + log noise on these handles.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def source_doctor_cmd(
+    fix_block: bool,
+    include_rate_limited: bool,
+    include_payment_required: bool,
+    as_json: bool,
+) -> None:
+    """Surface recall-source health + optionally prune dead handles."""
+    import yaml  # type: ignore[import-untyped]
+    from agentflow.shared.bootstrap import agentflow_home
+
+    home = agentflow_home()
+    health_path = home / "review" / "source_health.json"
+    if not health_path.exists():
+        raise click.ClickException(
+            f"{health_path} not found. Run `blogflow article-hotspots --profile <id>` "
+            "at least once (v1.3.11+) so the scan emits this file."
+        )
+    snapshot = json.loads(health_path.read_text(encoding="utf-8"))
+
+    if as_json:
+        _emit_json(snapshot)
+        return
+
+    click.echo(f"Source health (from {snapshot.get('generated_at', '?')})")
+    click.echo("-" * 60)
+    click.echo(f"  hotspots in run:   {snapshot.get('hotspot_count')}")
+    per_src = snapshot.get("per_source_signal_counts") or {}
+    if per_src:
+        click.echo("  signals per source:")
+        for src, n in sorted(per_src.items(), key=lambda kv: -kv[1]):
+            click.echo(f"    • {src:<24} {n:>4}")
+    else:
+        click.echo("  signals per source: (none — scan returned 0 hotspots)")
+    click.echo()
+    tw = snapshot.get("twitter_handles") or {}
+    click.echo(
+        f"Twitter KOL probe: {tw.get('total_probed', 0)} handles attempted"
+    )
+    for status, n in (tw.get("by_status") or {}).items():
+        icon = "✓" if status == "alive" else "✗"
+        click.echo(f"  {icon} {status:<22} {n:>3}")
+    dead = tw.get("dead") or []
+    if dead:
+        click.echo()
+        click.echo(f"Dead handles ({len(dead)}):")
+        for d in dead:
+            click.echo(
+                f"  - @{d['handle']:<24} status={d['status']:<18} "
+                f"http={d.get('http_code') or '-'}"
+            )
+
+    if not fix_block:
+        click.echo()
+        click.echo(
+            "Hint: rerun with --fix-block to set weight=blocked on the "
+            "not_found / forbidden / unauthorized handles (402 payment_"
+            "required are kept — they might come back on a paid tier)."
+        )
+        return
+
+    # ---- --fix-block path: edit sources.yaml ----
+    blockable = {"not_found", "forbidden", "unauthorized"}
+    if include_rate_limited:
+        blockable.add("rate_limited")
+    if include_payment_required:
+        blockable.add("payment_required")
+    to_block = {d["handle"].lower() for d in dead if d["status"] in blockable}
+    if not to_block:
+        click.echo("\nNothing to block (no not_found/forbidden/unauthorized handles).")
+        return
+
+    sources_path = home / "sources.yaml"
+    if not sources_path.exists():
+        raise click.ClickException(f"{sources_path} not found")
+    raw = sources_path.read_text(encoding="utf-8")
+    sources = yaml.safe_load(raw) or {}
+    kols = sources.get("twitter_kols") or []
+    if not isinstance(kols, list):
+        raise click.ClickException("sources.yaml::twitter_kols is not a list")
+
+    edited = 0
+    for entry in kols:
+        if not isinstance(entry, dict):
+            continue
+        handle = str(entry.get("handle") or "").lstrip("@").lower().strip()
+        if handle in to_block and entry.get("weight") != "blocked":
+            entry["weight"] = "blocked"
+            entry.setdefault("note", "")
+            if "auto-blocked" not in str(entry["note"]):
+                entry["note"] = (
+                    (entry["note"] + " ") if entry["note"] else ""
+                ) + f"[auto-blocked by source-doctor; was {next(d['status'] for d in dead if d['handle'].lower()==handle)}]"
+            edited += 1
+
+    if edited == 0:
+        click.echo("\nNothing to edit (handles may already be blocked).")
+        return
+
+    backup_path = sources_path.with_suffix(".yaml.bak")
+    backup_path.write_text(raw, encoding="utf-8")
+    sources_path.write_text(
+        yaml.dump(sources, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    click.echo(f"\n✓ Marked {edited} handles weight=blocked in {sources_path}")
+    click.echo(f"  Backup: {backup_path}")
+    click.echo("  Next scan will skip these. Re-run source-doctor to re-validate.")
+
+
+@cli.command(
     "review-daemon",
     help=(
         "Run the review daemon. Telegram mode long-polls TG; Lark-first mode "

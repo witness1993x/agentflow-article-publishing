@@ -85,9 +85,58 @@ def _mock_tweets(handle: str, max_results: int) -> list[RawSignal]:
 # ---------------------------------------------------------------------------
 
 
+# v1.3.11: per-handle health state captured during the scan. Drives
+# ~/.agentflow/review/source_health.json emission + `blogflow source-doctor`.
+# Cleared at the start of each fetch_real_sync run; consumed at the end of
+# the article-hotspots scan.
+_HANDLE_HEALTH: dict[str, dict] = {}
+
+
+def pop_handle_health() -> dict[str, dict]:
+    """Return + clear the captured per-handle health snapshot from the most
+    recent fetch. Called by agent_d1.main after merge to embed in the run's
+    source_health.json. Keyed by normalized handle (no @ prefix)."""
+    global _HANDLE_HEALTH
+    snap = _HANDLE_HEALTH
+    _HANDLE_HEALTH = {}
+    return snap
+
+
+def _classify_http_error(err: Exception) -> tuple[str, int | None]:
+    """Map a tweepy exception to a (status_kind, http_code) tuple.
+
+    status_kind ∈ {payment_required, unauthorized, forbidden, rate_limited,
+                    not_found, network, other}. Used by source-doctor to
+    auto-classify dead handles."""
+    msg = str(err)
+    # tweepy.errors expose the HTTP status in the message like
+    # "402 Payment Required" or "429 Too Many Requests".
+    for code, kind in (
+        (402, "payment_required"),
+        (401, "unauthorized"),
+        (403, "forbidden"),
+        (429, "rate_limited"),
+        (404, "not_found"),
+    ):
+        if f"{code} " in msg:
+            return kind, code
+    if "Forbidden" in msg:
+        return "forbidden", 403
+    if "Unauthorized" in msg:
+        return "unauthorized", 401
+    if "NotFound" in msg or "not found" in msg.lower():
+        return "not_found", 404
+    if "TooManyRequests" in msg or "rate limit" in msg.lower():
+        return "rate_limited", 429
+    return "other", None
+
+
 def _fetch_real_sync(
     kol_handles: list[str], max_results_per_kol: int
 ) -> list[RawSignal]:
+    global _HANDLE_HEALTH
+    _HANDLE_HEALTH = {}
+
     try:
         import tweepy  # type: ignore
     except ImportError:
@@ -108,6 +157,7 @@ def _fetch_real_sync(
             user = getattr(user_resp, "data", None)
             if user is None:
                 _log.warning("Twitter user not found: %s", clean)
+                _HANDLE_HEALTH[clean] = {"status": "not_found", "http_code": 404}
                 continue
             user_id = user.id
 
@@ -117,6 +167,7 @@ def _fetch_real_sync(
                 tweet_fields=["created_at", "public_metrics"],
             )
             tweets = getattr(tweets_resp, "data", None) or []
+            count = 0
             for tw in tweets:
                 metrics = getattr(tw, "public_metrics", {}) or {}
                 created = getattr(tw, "created_at", None)
@@ -139,8 +190,20 @@ def _fetch_real_sync(
                         raw_metadata={"handle": clean},
                     )
                 )
+                count += 1
+            _HANDLE_HEALTH[clean] = {
+                "status": "alive",
+                "http_code": 200,
+                "tweets_fetched": count,
+            }
         except Exception as err:  # pragma: no cover - network
             _log.warning("Twitter fetch failed for %s: %s", clean, err)
+            kind, code = _classify_http_error(err)
+            _HANDLE_HEALTH[clean] = {
+                "status": kind,
+                "http_code": code,
+                "error_tail": str(err)[:200],
+            }
             continue
 
     return signals

@@ -684,7 +684,7 @@ def check_recall_sources_enabled() -> CheckResult:
     cr.extra = {
         "brave_search_query_count": len(brave_queries),
         "brave_search_enabled": brave_enabled,
-        "brave_search_api_key_set": bool(_env_present("BRAVE_SEARCH_API_KEY")),
+        "brave_api_key_set": bool(_env_present("BRAVE_API_KEY")),
         "twitter_search_query_count": len(twitter_queries),
         "twitter_search_enabled": twitter_enabled,
         "twitter_bearer_set": bool(_env_present("TWITTER_BEARER_TOKEN")),
