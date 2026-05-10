@@ -141,6 +141,7 @@ def _emit_lark_gate_a_card(
     target_series: str,
     candidates: list[dict[str, Any]],
     telegram_message_id: Any | None = None,
+    gate_warning: dict[str, Any] | None = None,
 ) -> None:
     """Ask the Lark App/OpenClaw renderer to draw an actionable Gate A card.
 
@@ -201,6 +202,7 @@ def _emit_lark_gate_a_card(
                     ),
                 ],
                 "telegram_message_id": telegram_message_id,
+                "gate_warning": dict(gate_warning) if gate_warning else None,
             },
         )
     except Exception:  # pragma: no cover - payload shaping is best-effort
@@ -960,27 +962,76 @@ def post_gate_a(
         )
     except (TypeError, ValueError):
         hard_threshold = 0.10
+    soft_floor_fallback: dict[str, Any] | None = None
     if hard_threshold > 0 and pub and fit_by_id:
         before = len(hotspots)
-        hotspots = [
+        eligible = [
             h for h in hotspots
             if fit_by_id.get(id(h), 0.0) >= hard_threshold
         ]
-        dropped = before - len(hotspots)
-        if dropped:
-            _log.warning(
-                "topic-fit hard gate dropped %d/%d hotspots below threshold %.3f",
-                dropped, before, hard_threshold,
+        if eligible:
+            # Normal path: at least one hotspot cleared the hard gate.
+            dropped = before - len(eligible)
+            if dropped:
+                _log.warning(
+                    "topic-fit hard gate dropped %d/%d hotspots below threshold %.3f",
+                    dropped, before, hard_threshold,
+                )
+            hotspots = eligible
+        else:
+            # v1.3.7: Soft-floor fallback. Hard gate would drop EVERYTHING —
+            # instead of silently skipping Gate A and leaving the operator
+            # staring at "0 matched / too_narrow" with no card, keep the
+            # least-bad candidates above a softer floor and post Gate A
+            # with a gate_warning banner. Every kept candidate auto-picks
+            # up a ``low_topic_fit`` red flag downstream (line ~1038).
+            # Operators see something + know to be skeptical, rather than
+            # nothing + confusion. Disabled when AGENTFLOW_TOPIC_FIT_SOFT_
+            # FLOOR=0 (then we fall back to the old silent-skip behavior).
+            try:
+                soft_floor = float(
+                    os.environ.get("AGENTFLOW_TOPIC_FIT_SOFT_FLOOR", "0.02") or "0.02"
+                )
+            except (TypeError, ValueError):
+                soft_floor = 0.02
+            soft_floor = max(0.0, soft_floor)
+            soft_eligible = (
+                [
+                    h for h in hotspots
+                    if fit_by_id.get(id(h), 0.0) >= soft_floor
+                ]
+                if soft_floor > 0
+                else []
             )
-        if not hotspots:
+            if not soft_eligible:
+                _log.warning(
+                    "topic-fit hard gate (%.3f) + soft floor (%.3f) both empty: "
+                    "0/%d hotspots cleared. Today's signals genuinely don't "
+                    "match the active publisher's domain — skipping Gate A.",
+                    hard_threshold, soft_floor, before,
+                )
+                return None
             _log.warning(
-                "topic-fit hard gate eliminated ALL hotspots — "
-                "either AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=%.3f is too strict, "
-                "or today's upstream signals genuinely don't match the "
-                "active publisher's domain. Skipping Gate A.",
-                hard_threshold,
+                "topic-fit hard gate (%.3f) eliminated all %d hotspots; "
+                "falling back to soft floor (%.3f) with %d candidates, all "
+                "marked low_topic_fit. Operator review required — today's "
+                "upstream signals are off-domain.",
+                hard_threshold, before, soft_floor, len(soft_eligible),
             )
-            return None
+            hotspots = soft_eligible
+            soft_floor_fallback = {
+                "kind": "soft_floor_fit_fallback",
+                "hard_threshold": hard_threshold,
+                "soft_floor": soft_floor,
+                "candidates_kept": len(soft_eligible),
+                "candidates_seen": before,
+                "message": (
+                    "今日 hotspot 信号与本 publisher 主题偏离;每条候选 fit<"
+                    f"{hard_threshold:.2f}。已用 soft floor ({soft_floor:.2f}) "
+                    "兜底,候选都带 low_topic_fit 红旗——请重点核对是否真的能写,"
+                    "或直接全拒后明天再扫。"
+                ),
+            }
 
     # Composite weight: how much to lean into topic-publisher fit vs raw
     # freshness. Defaults to 0.6 (60% fit / 40% freshness). Tighter brand
@@ -1071,6 +1122,7 @@ def post_gate_a(
         target_series=target_series,
         candidates=candidates,
         telegram_message_id=None,
+        gate_warning=soft_floor_fallback,
     )
 
     # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).

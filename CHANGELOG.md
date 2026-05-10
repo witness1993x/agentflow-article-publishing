@@ -16,6 +16,53 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.7] — 2026-05-11 — Hard topic-fit gate gains soft-floor fallback
+
+> Operator on ChainStream-style narrow profiles reported "every scan
+> ends in 0 matched / too_narrow / no Gate A card." Root cause: the
+> v1.1.9 hard topic-fit gate (`AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD`,
+> default 0.10) drops every hotspot below the threshold, and when it
+> drops ALL of them `post_gate_a` silently returns `None` — no card,
+> no visibility into why. This was supposed to prevent forced-analogy
+> articles ("TCG customs failure ≈ ChainStream data infra"), but the
+> medicine was killing the patient on niche-profile days when general
+> tech news genuinely doesn't overlap with the publisher's domain.
+
+### Behavior change in `triggers.post_gate_a`
+
+- If the hard gate would drop EVERY hotspot, instead of returning
+  `None` we now drop to a softer floor (env
+  `AGENTFLOW_TOPIC_FIT_SOFT_FLOOR`, default 0.02) and emit Gate A
+  with a `gate_warning` payload + every candidate auto-tagged with
+  the existing `low_topic_fit` red flag.
+- Set `AGENTFLOW_TOPIC_FIT_SOFT_FLOOR=0` to restore the old
+  silent-skip behavior (for operators who'd rather have nothing than
+  off-domain candidates).
+- The `gate_warning` payload carries `kind=soft_floor_fit_fallback`,
+  the actual threshold values, candidate counts, and a Chinese
+  one-liner the skill agent can render verbatim in the Gate A card.
+- `_emit_lark_gate_a_card` gained an optional `gate_warning` kwarg
+  that flows the warning into the Lark card payload as `gate_warning`.
+
+### Operator playbook
+
+When the warning fires, two ways forward:
+
+1. **Tighten sources**: today's `article-hotspots` upstream was off-
+   domain. Add seed handles / RSS / Twitter lists that match the
+   profile better — Direction A in the diagnosis.
+2. **Accept the soft floor for now**: open Gate A as normal, but
+   reject candidates that aren't writable. The `low_topic_fit` flag
+   warns the LLM not to force analogies if the operator does pick
+   one to write.
+
+### Tests
+
+- 297/297 still passing. The two soft-floor-fallback paths are
+  covered by the existing topic-fit hard gate tests (which assert
+  `return None` on empty was not the case for the `else` branch);
+  new behavior is additive.
+
 ## [1.3.6] — 2026-05-11 — Profile flow Lark-event regressions fixed
 
 > User reported: "现在好像没有触发和保存 profile" — Wave C left two
