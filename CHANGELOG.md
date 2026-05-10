@@ -16,6 +16,63 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.9] — 2026-05-11 — Doctor catches the "sources configured but ENABLED off" footgun
+
+> Real root cause uncovered while investigating the ChainStream
+> too_narrow / 0-matched recall reports. `sources.yaml` had 9
+> brave_search + 6 twitter_search ChainStream-aligned queries
+> seeded (since v1.1.9). Both `AGENTFLOW_BRAVE_SEARCH_ENABLED` and
+> `AGENTFLOW_TWITTER_SEARCH_ENABLED` were off (default), so the
+> collectors silently returned empty lists at line 142-143 / 180-181
+> of `agent_d1/main.py`. Recall pool collapsed to HN Algolia,
+> couldn't surface ChainStream-domain content, triggered every
+> downstream symptom: too_narrow boundary, v1.3.7 soft-floor
+> fallback, v1.3.8 streak ticker. **All four symptoms had one root
+> cause: a missed env flag the operator could not see**.
+
+### New preflight check: `check_recall_sources_enabled`
+
+- Parses `~/.agentflow/sources.yaml`, counts live (non-blocked)
+  `brave_search` / `twitter_search` entries.
+- Cross-references env flags `AGENTFLOW_BRAVE_SEARCH_ENABLED` /
+  `AGENTFLOW_TWITTER_SEARCH_ENABLED`.
+- Cross-references API keys `BRAVE_SEARCH_API_KEY` /
+  `TWITTER_BEARER_TOKEN`.
+- Emits row in `blogflow doctor`:
+  - ✗ when queries configured but ENABLED flag off → "Recall pool
+    will collapse to HN Algolia only — set the missing env flag(s)
+    in .env to actually run these queries."
+  - ✓ when at least one extra recall source is active → "extra
+    recall sources active: brave=N, twitter=M"
+  - · (info) when no brave/twitter entries are in sources.yaml at
+    all (operator consciously skipped)
+- Added between `check_hotspots_mock_leak` and `check_telegram` in
+  `all_checks()` so it surfaces near the top of the doctor matrix.
+
+### Why this matters
+
+The whole "ChainStream 0-matched" thread (v1.3.6 → v1.3.7 → v1.3.8)
+was treating symptoms because the diagnostic surface didn't show
+this misconfig. With v1.3.9 the operator would have seen at first
+`blogflow doctor` run:
+
+```
+✗ Recall sources enabled    brave_search has 9 live queries but
+                             AGENTFLOW_BRAVE_SEARCH_ENABLED is not
+                             true; twitter_search has 6 live queries
+                             but AGENTFLOW_TWITTER_SEARCH_ENABLED is
+                             not true. Recall pool will collapse to
+                             HN Algolia only...
+```
+
+— and gone straight to the fix instead of debugging through
+filter→profile→threshold layers.
+
+### Tests
+
+- 297/297 still passing. The new check is additive in `all_checks()`
+  and doesn't gate any readiness assertion (doctor is non-strict).
+
 ## [1.3.8] — 2026-05-11 — Direction A: consecutive soft-floor-fallback detection
 
 > Pairs with v1.3.7. Once Gate A starts emitting `gate_warning` daily,

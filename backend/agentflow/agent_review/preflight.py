@@ -629,11 +629,102 @@ def check_hotspots_mock_leak() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
+def check_recall_sources_enabled() -> CheckResult:
+    """v1.3.9: surface the easiest signal-misalignment footgun — sources.yaml
+    has ``brave_search`` / ``twitter_search`` entries configured but the
+    corresponding ``AGENTFLOW_*_SEARCH_ENABLED`` env flag is off, so the
+    collectors never run. Operators write decent queries thinking they'll
+    fire; daemon silently skips them; recall pool collapses to HN Algolia
+    only; profile filter reports ``too_narrow``; v1.3.7 falls back to
+    soft-floor; v1.3.8 ticks the misalignment streak — all symptoms of
+    one missed env flag.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    cr = CheckResult(name="Recall sources enabled", env_var=None)
+    sources_path = agentflow_home() / "sources.yaml"
+    if not sources_path.exists():
+        cr.message = "~/.agentflow/sources.yaml missing — using built-in defaults"
+        return cr
+    try:
+        sources = yaml.safe_load(sources_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as err:
+        cr.valid = False
+        cr.message = f"sources.yaml parse failed: {err}"
+        return cr
+    if not isinstance(sources, dict):
+        cr.message = "sources.yaml has unexpected shape (not a mapping)"
+        return cr
+
+    findings: list[str] = []
+    brave_queries = [
+        q for q in (sources.get("brave_search") or [])
+        if isinstance(q, dict) and (q.get("query") or "").strip()
+        and str(q.get("weight") or "").lower() != "blocked"
+    ]
+    brave_enabled = _bool_env("AGENTFLOW_BRAVE_SEARCH_ENABLED")
+    if brave_queries and not brave_enabled:
+        findings.append(
+            f"brave_search has {len(brave_queries)} live queries but "
+            "AGENTFLOW_BRAVE_SEARCH_ENABLED is not true"
+        )
+
+    twitter_queries = [
+        q for q in (sources.get("twitter_search") or [])
+        if isinstance(q, dict) and (q.get("query") or "").strip()
+        and str(q.get("weight") or "").lower() != "blocked"
+    ]
+    twitter_enabled = _bool_env("AGENTFLOW_TWITTER_SEARCH_ENABLED")
+    if twitter_queries and not twitter_enabled:
+        findings.append(
+            f"twitter_search has {len(twitter_queries)} live queries but "
+            "AGENTFLOW_TWITTER_SEARCH_ENABLED is not true"
+        )
+
+    cr.extra = {
+        "brave_search_query_count": len(brave_queries),
+        "brave_search_enabled": brave_enabled,
+        "brave_search_api_key_set": bool(_env_present("BRAVE_SEARCH_API_KEY")),
+        "twitter_search_query_count": len(twitter_queries),
+        "twitter_search_enabled": twitter_enabled,
+        "twitter_bearer_set": bool(_env_present("TWITTER_BEARER_TOKEN")),
+    }
+
+    if findings:
+        cr.valid = False
+        cr.present = True
+        cr.message = (
+            "; ".join(findings)
+            + ". Recall pool will collapse to HN Algolia only — set "
+            "the missing env flag(s) in .env to actually run these queries."
+        )
+        return cr
+
+    # No misconfig detected. Either everything is on, or sources.yaml has
+    # no brave/twitter entries (in which case operators consciously skipped).
+    actives: list[str] = []
+    if brave_queries and brave_enabled:
+        actives.append(f"brave={len(brave_queries)}")
+    if twitter_queries and twitter_enabled:
+        actives.append(f"twitter={len(twitter_queries)}")
+    if actives:
+        cr.valid = True
+        cr.present = True
+        cr.message = "extra recall sources active: " + ", ".join(actives)
+    else:
+        cr.message = (
+            "HN Algolia is the only recall source (no brave_search / "
+            "twitter_search queries in sources.yaml)"
+        )
+    return cr
+
+
 def all_checks(*, fresh: bool = False) -> list[CheckResult]:
     return [
         check_mock_mode(),
         check_active_profile_thinness(),
         check_hotspots_mock_leak(),
+        check_recall_sources_enabled(),
         check_telegram(fresh=fresh),
         check_review_chat_id(),
         check_lark_app_primary(),
