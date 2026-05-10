@@ -16,6 +16,54 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.10] — 2026-05-11 — Gate B/C silent-emit P0 + production walkthrough
+
+> Caught while doing a live end-to-end dry-run of the v1.3.9 pipeline:
+> Gate B and Gate C Lark review cards never emit in production. The
+> `check_gate_b()` / `check_gate_c()` helpers return `(lines, int)`
+> where `int` is a blocker count, but the corresponding
+> `_emit_lark_gate_b_card` / `_emit_lark_gate_c_card` builders did
+> `list(blockers)` → TypeError on the int. Worse: the entire emit
+> + side fanout sat under a single outer `try/except` logging at
+> INFO with the misleading message "Lark draft fan-out skipped".
+> Result: every Gate B / C emit silently failed; operator never
+> saw the cards; log line lied about the cause. This regressed in
+> Phase 3 when TG was removed (TG previously surfaced the same data
+> via its own emit path which didn't crash on int blockers).
+
+### `_normalize_blockers` + `_blocker_count` helpers (triggers.py)
+
+- Accept `int | str | list | None` and emit `list[str]`.
+- Used by both Gate B and Gate C card builders.
+- New `blocker_count: int` field in the payload so skill agents
+  can render a numeric badge without parsing the list.
+
+### Split main emit from side fanout (`post_gate_b`)
+
+- Pre-fix: one `try/except` wrapped `_emit_lark_gate_b_card` AND
+  `lark_webhook.notify_draft_ready`. Either failure logged at
+  INFO with "Lark draft fan-out skipped".
+- Post-fix: two separate `try/except` blocks. Main emit failure
+  now logs at WARNING with the explicit message "Gate B Lark
+  review-card emit FAILED for X — operators will not see this
+  draft in Lark". Side fan-out (Custom Bot notify) stays at INFO.
+- `post_gate_c` follows the same shape now.
+
+### `docs/PRODUCTION_WALKTHROUGH.md` (new)
+
+- End-to-end captured walkthrough of v1.3.10 in mock mode:
+  doctor → smoke test → Gate A → Gate B → Gate C → Gate D → publish,
+  with real queue event payloads + skill-agent `lark-cli-emit`
+  commands captured live (not pseudocode).
+- Includes the Profile setup multi-turn flow (v1.3.6 path).
+- Closes with the "Phase 3 silent-emit regression" class summary
+  and an audit grep recipe to find any remaining silent-broken
+  sites in `triggers.py`.
+
+### Tests
+
+- 297/297 still passing.
+
 ## [1.3.9] — 2026-05-11 — Doctor catches the "sources configured but ENABLED off" footgun
 
 > Real root cause uncovered while investigating the ChainStream

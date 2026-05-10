@@ -209,6 +209,37 @@ def _emit_lark_gate_a_card(
         _log.warning("Lark Gate A card payload build failed", exc_info=True)
 
 
+def _normalize_blockers(blockers: Any) -> list[str]:
+    """Accept blockers as int (count from check_gate_*) or list[str] (legacy
+    expanded form). Always emit list[str] in the card payload. v1.3.10
+    fixes a long-standing P0 where check_gate_b returns (lines, int) but
+    the card builder did `list(int)` → TypeError → silently swallowed by
+    the outer try/except as "Lark draft fan-out skipped"."""
+    if blockers is None:
+        return []
+    if isinstance(blockers, int):
+        if blockers <= 0:
+            return []
+        return [f"{blockers} unresolved blocker{'s' if blockers != 1 else ''}"]
+    if isinstance(blockers, str):
+        return [blockers] if blockers else []
+    try:
+        return [str(b) for b in blockers if str(b).strip()]
+    except TypeError:
+        return [str(blockers)]
+
+
+def _blocker_count(blockers: Any) -> int:
+    if blockers is None:
+        return 0
+    if isinstance(blockers, int):
+        return max(0, blockers)
+    try:
+        return len([b for b in blockers if str(b).strip()])
+    except TypeError:
+        return 0
+
+
 def _emit_lark_gate_b_card(
     *,
     article_id: str,
@@ -222,7 +253,7 @@ def _emit_lark_gate_b_card(
     compliance_score: float,
     tags: list[str],
     self_check_lines: list[str],
-    blockers: list[str],
+    blockers: Any,  # int count from check_gate_b OR list[str] expanded form
     opening_excerpt: str,
     draft_md: str,
     mirror_url: str | None,
@@ -245,7 +276,8 @@ def _emit_lark_gate_b_card(
             "compliance_score": compliance_score,
             "tags": list(tags),
             "self_check_lines": list(self_check_lines),
-            "blockers": list(blockers),
+            "blockers": _normalize_blockers(blockers),
+            "blocker_count": _blocker_count(blockers),
             "opening_excerpt": (opening_excerpt or "")[:600],
             "draft_excerpt": (draft_md or "")[:4000],
             "draft_length": len(draft_md or ""),
@@ -316,7 +348,7 @@ def _emit_lark_gate_c_card(
     cover_size: str,
     overlay_status: str,
     self_check_lines: list[str],
-    blockers: list[str],
+    blockers: Any,  # int from check_gate_c OR list[str] expanded form
     telegram_message_id: Any | None = None,
 ) -> None:
     _emit_lark_review_card(
@@ -332,7 +364,8 @@ def _emit_lark_gate_c_card(
             "cover_size": cover_size,
             "brand_overlay_status": overlay_status,
             "self_check_lines": list(self_check_lines),
-            "blockers": list(blockers),
+            "blockers": _normalize_blockers(blockers),
+            "blocker_count": _blocker_count(blockers),
             "actions": [
                 _lark_action("✅ 通过", "lark_gate_c_approve", article_id),
                 _lark_action("🚫 跳过/拒绝配图", "lark_gate_c_skip", article_id),
@@ -1510,30 +1543,35 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     body_doc = _export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
 
-    # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
-    # actionable — Gate B operations stay on TG. Gated by
-    # AGENTFLOW_LARK_DRAFT_FANOUT (default off). Best-effort.
+    # v1.3.10: split the main Lark review-card emit from the optional
+    # lark_webhook fan-out. Previously both shared one try/except which
+    # silently swallowed _emit_lark_gate_b_card failures (e.g. the
+    # `blockers: int → list(int)` TypeError) under the misleading
+    # "Lark draft fan-out skipped" log message — operators never saw
+    # Gate B cards in Lark after Phase 3 and didn't know why.
+    audit_summary: str | None = None
+    audit_meta = meta.get("structure_audit") or {}
+    if isinstance(audit_meta, dict):
+        verdict = audit_meta.get("verdict")
+        try:
+            score = float(audit_meta.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if verdict and verdict not in {"skipped", "pass", None}:
+            audit_summary = f"audit={verdict} ({score:.2f})"
+    mirror_template = os.environ.get(
+        "AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE", ""
+    ).strip()
+    mirror_url: str | None = None
+    if mirror_template:
+        try:
+            mirror_url = mirror_template.format(article_id=article_id)
+        except (KeyError, IndexError, ValueError):
+            mirror_url = None
+
+    # Main Gate B review-card emit. Failures here are operator-visible
+    # bugs — log at WARNING with a clear marker so they aren't lost.
     try:
-        from agentflow.shared import lark_webhook
-        audit_summary: str | None = None
-        audit_meta = meta.get("structure_audit") or {}
-        if isinstance(audit_meta, dict):
-            verdict = audit_meta.get("verdict")
-            try:
-                score = float(audit_meta.get("score") or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            if verdict and verdict not in {"skipped", "pass", None}:
-                audit_summary = f"audit={verdict} ({score:.2f})"
-        mirror_template = os.environ.get(
-            "AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE", ""
-        ).strip()
-        mirror_url: str | None = None
-        if mirror_template:
-            try:
-                mirror_url = mirror_template.format(article_id=article_id)
-            except (KeyError, IndexError, ValueError):
-                mirror_url = None
         _emit_lark_gate_b_card(
             article_id=article_id,
             short_id=sid,
@@ -1552,6 +1590,17 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             mirror_url=mirror_url,
             telegram_message_id=message_id,
         )
+    except Exception as err:  # pragma: no cover
+        _log.warning(
+            "Gate B Lark review-card emit FAILED for %s — operators will "
+            "not see this draft in Lark: %s",
+            article_id, err, exc_info=True,
+        )
+
+    # Side fan-out via Custom Bot (notify-only, gated by env). Failures
+    # here are non-critical and stay at INFO.
+    try:
+        from agentflow.shared import lark_webhook
         lark_webhook.notify_draft_ready(
             article_id=article_id,
             title=title,
@@ -1560,7 +1609,7 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             audit_summary=audit_summary,
         )
     except Exception as err:  # pragma: no cover — best-effort
-        _log.info("Lark draft fan-out skipped for %s: %s", article_id, err)
+        _log.info("Lark draft fan-out (custom-bot) skipped for %s: %s", article_id, err)
 
     try:
         _state.transition(
