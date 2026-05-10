@@ -16,6 +16,47 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.8] — 2026-05-11 — Direction A: consecutive soft-floor-fallback detection
+
+> Pairs with v1.3.7. Once Gate A starts emitting `gate_warning` daily,
+> the operator could keep accepting low-fit candidates indefinitely
+> without realizing the root cause is signal source ↔ profile
+> misalignment (not threshold knobs). v1.3.8 adds a per-publisher
+> streak counter; after 3 consecutive fallback days (env
+> `AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS`) the daemon emits a one-time-
+> per-streak `notify.signal_misalignment` event prompting the
+> operator to add seed sources via
+> `blogflow learn-from-handle <h> --profile <id>` rather than
+> chase regex / threshold widening.
+
+### New helpers in `triggers.py`
+
+- `_signal_misalignment_state_path()` → `~/.agentflow/review/signal_misalignment.json`.
+- `_track_signal_misalignment(*, publisher_brand, in_fallback)` →
+  reads state, increments streak on consecutive fallback days,
+  resets on a successful (non-fallback) emit. Returns a notify
+  payload when the streak crosses the threshold AND we haven't
+  already pinged the operator today (per-day cooldown).
+- `post_gate_a` calls it after the soft-floor branch; if a payload
+  comes back, emits `notify.signal_misalignment` with
+  `suggested_action: add_seed_sources` + a CLI hint.
+
+### State file shape
+
+```json
+{
+  "chainstream": {
+    "last_fallback_date": "2026-05-11",
+    "consecutive_days": 3,
+    "last_notified_date": "2026-05-11"
+  }
+}
+```
+
+### Tests
+
+- 297/297 still passing.
+
 ## [1.3.7] — 2026-05-11 — Hard topic-fit gate gains soft-floor fallback
 
 > Operator on ChainStream-style narrow profiles reported "every scan

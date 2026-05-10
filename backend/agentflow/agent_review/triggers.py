@@ -886,6 +886,128 @@ def _ensure_state(
 # ---------------------------------------------------------------------------
 
 
+def _signal_misalignment_state_path() -> Any:
+    """`~/.agentflow/review/signal_misalignment.json` — per-publisher
+    consecutive-day soft-floor-fallback counters.
+    """
+    from agentflow.shared.bootstrap import agentflow_home
+    p = agentflow_home() / "review" / "signal_misalignment.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _track_signal_misalignment(
+    *,
+    publisher_brand: str,
+    in_fallback: bool,
+) -> dict[str, Any] | None:
+    """Track consecutive-day soft-floor-fallback streaks per publisher.
+
+    Called from ``post_gate_a`` on every emission attempt. When the
+    current streak crosses the threshold (default 3 consecutive days,
+    env ``AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS``) we return a payload so
+    the caller can fan out a ``notify.signal_misalignment`` event with
+    a "consider adding seed sources" suggestion.
+
+    Returns ``None`` when no notification should fire (under threshold,
+    already notified today, or the fallback path wasn't taken).
+    """
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+
+    try:
+        threshold = max(
+            1,
+            int(os.environ.get("AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS", "3") or "3"),
+        )
+    except (TypeError, ValueError):
+        threshold = 3
+
+    state_path = _signal_misalignment_state_path()
+    try:
+        state = (
+            _json.loads(state_path.read_text(encoding="utf-8"))
+            if state_path.exists() else {}
+        ) or {}
+    except (OSError, _json.JSONDecodeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    key = (publisher_brand or "_default").strip().lower() or "_default"
+    entry = state.get(key) or {}
+    if not isinstance(entry, dict):
+        entry = {}
+
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    yesterday_iso = (
+        datetime.now(timezone.utc).date() - timedelta(days=1)
+    ).isoformat()
+    last_fallback = str(entry.get("last_fallback_date") or "")
+    consecutive = int(entry.get("consecutive_days") or 0)
+
+    if in_fallback:
+        if last_fallback == yesterday_iso:
+            consecutive += 1
+        elif last_fallback == today_iso:
+            # Already counted today — leave streak as-is. This handles
+            # multiple Gate A emits within one day.
+            pass
+        else:
+            consecutive = 1
+        entry["last_fallback_date"] = today_iso
+        entry["consecutive_days"] = consecutive
+    else:
+        # Streak broken by a successful (non-fallback) emit.
+        if consecutive > 0:
+            entry["last_recovery_date"] = today_iso
+        consecutive = 0
+        entry["consecutive_days"] = 0
+        # Clear the notification cooldown so the next streak can notify
+        # immediately if it crosses threshold.
+        entry.pop("last_notified_date", None)
+
+    state[key] = entry
+    try:
+        state_path.write_text(
+            _json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as err:  # pragma: no cover — persistence best-effort
+        _log.warning("signal misalignment state write failed: %s", err)
+
+    # Only notify when (a) in fallback, (b) over threshold, (c) we
+    # haven't already notified for this run of consecutive days.
+    if not in_fallback or consecutive < threshold:
+        return None
+    last_notified = str(entry.get("last_notified_date") or "")
+    if last_notified == today_iso:
+        return None  # cooldown — already pinged operator today
+
+    entry["last_notified_date"] = today_iso
+    state[key] = entry
+    try:
+        state_path.write_text(
+            _json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:  # pragma: no cover
+        pass
+
+    return {
+        "publisher_brand": publisher_brand,
+        "consecutive_days": consecutive,
+        "threshold": threshold,
+        "message": (
+            f"已连续 {consecutive} 天 hotspot 信号都达不到 fit 硬门 "
+            f"({publisher_brand}) —— 当前热点源跟你的 profile 主题分布错位。"
+            "盲加 profile 关键词只会稀释 profile,正解是加更贴近主题的 seed "
+            "source(Twitter list / RSS / handle)。详见 SKILL.md §\"Direction A: "
+            "调源\"。"
+        ),
+    }
+
+
 def post_gate_a(
     *,
     hotspots: list[Any],
@@ -1124,6 +1246,36 @@ def post_gate_a(
         telegram_message_id=None,
         gate_warning=soft_floor_fallback,
     )
+
+    # v1.3.8 Direction A: track consecutive soft-floor-fallback days per
+    # publisher; after N days (default 3) emit a notify.signal_misalignment
+    # so the operator gets a one-time-per-streak nudge to add seed sources
+    # instead of chasing the regex / threshold knobs that won't fix it.
+    try:
+        misalignment_alert = _track_signal_misalignment(
+            publisher_brand=publisher_brand,
+            in_fallback=soft_floor_fallback is not None,
+        )
+    except Exception as err:  # pragma: no cover — best-effort telemetry
+        _log.warning("signal misalignment tracking failed: %s", err)
+        misalignment_alert = None
+    if misalignment_alert:
+        try:
+            _emit_lark_review_card(
+                event_type="notify.signal_misalignment",
+                article_id=publisher_brand or None,
+                payload={
+                    "kind": "signal_misalignment",
+                    **misalignment_alert,
+                    "suggested_action": "add_seed_sources",
+                    "next_command_hint": (
+                        "blogflow learn-from-handle <handle> --profile <id>  "
+                        "# 或扩 ~/.agentflow/style_profile.yaml::seed_handles"
+                    ),
+                },
+            )
+        except Exception as err:  # pragma: no cover
+            _log.warning("signal misalignment notify emit failed: %s", err)
 
     # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).
     # Push-only, not actionable — operators still review on TG. Wrapped
