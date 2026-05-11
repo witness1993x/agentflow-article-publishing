@@ -1162,9 +1162,89 @@ def post_gate_a(
                 _log.warning(
                     "topic-fit hard gate (%.3f) + soft floor (%.3f) both empty: "
                     "0/%d hotspots cleared. Today's signals genuinely don't "
-                    "match the active publisher's domain — skipping Gate A.",
+                    "match the active publisher's domain — emitting "
+                    "notify.scan_yielded_nothing to surface the situation to "
+                    "the operator instead of skipping Gate A silently.",
                     hard_threshold, soft_floor, before,
                 )
+                # v1.3.13: previously returned None silently here, which made
+                # scheduled scans look like they "didn't fire" when actually
+                # they ran but found nothing actionable. The operator had no
+                # signal in Lark + no way to distinguish "daemon broken" from
+                # "today's recall pool is bad". Now we emit a Lark
+                # notification carrying the diagnostic + drive the
+                # signal-misalignment streak counter too. The operator can
+                # then triage source quality (run `blogflow source-doctor`,
+                # check BRAVE_API_KEY credits, etc.) without first having to
+                # guess whether the scheduler even ran.
+                try:
+                    dropped_preview = [
+                        {
+                            "topic_one_liner": str(h.get("topic_one_liner") or "")[:120],
+                            "fit_score": round(float(fit_by_id.get(id(h), 0.0)), 4),
+                            "source": (
+                                (h.get("source_references") or [{}])[0].get("source", "?")
+                                if h.get("source_references") else "?"
+                            ),
+                        }
+                        for h in (hotspots[:5] if hotspots else [])
+                    ]
+                except Exception:  # pragma: no cover — defensive
+                    dropped_preview = []
+                try:
+                    _emit_lark_review_card(
+                        event_type="notify.scan_yielded_nothing",
+                        article_id=publisher_brand or None,
+                        payload={
+                            "kind": "scan_yielded_nothing",
+                            "publisher_brand": publisher_brand,
+                            "hard_threshold": hard_threshold,
+                            "soft_floor": soft_floor,
+                            "candidates_seen": before,
+                            "candidates_kept": 0,
+                            "dropped_preview": dropped_preview,
+                            "message": (
+                                f"今日扫描完成,但 {before} 个 hotspot 全部 fit<"
+                                f"{soft_floor:.2f},无法上 Gate A 卡。最可能的"
+                                "原因:召回源跟 profile 主题偏离(查 `blogflow "
+                                "doctor` 的 'Recall sources enabled' 行 + "
+                                "`blogflow source-doctor` 看 KOL 死亡率)。"
+                            ),
+                            "suggested_actions": [
+                                "blogflow doctor",
+                                "blogflow source-doctor",
+                                "blogflow source-doctor --fix-block --include-payment-required",
+                                "(re-check) BRAVE_API_KEY credits + AGENTFLOW_BRAVE_SEARCH_ENABLED=true",
+                            ],
+                        },
+                    )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("notify.scan_yielded_nothing emit failed: %s", err)
+
+                # Also tick the v1.3.8 signal-misalignment streak counter so
+                # consecutive "0 actionable" days roll up into the existing
+                # notify.signal_misalignment event after the threshold.
+                try:
+                    misalignment_alert = _track_signal_misalignment(
+                        publisher_brand=publisher_brand,
+                        in_fallback=True,  # this is even worse than fallback
+                    )
+                    if misalignment_alert:
+                        _emit_lark_review_card(
+                            event_type="notify.signal_misalignment",
+                            article_id=publisher_brand or None,
+                            payload={
+                                "kind": "signal_misalignment",
+                                **misalignment_alert,
+                                "suggested_action": "add_seed_sources",
+                                "next_command_hint": (
+                                    "blogflow source-doctor  # check KOL health\n"
+                                    "blogflow learn-from-handle <h> --profile <id>"
+                                ),
+                            },
+                        )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("streak counter emit failed: %s", err)
                 return None
             _log.warning(
                 "topic-fit hard gate (%.3f) eliminated all %d hotspots; "

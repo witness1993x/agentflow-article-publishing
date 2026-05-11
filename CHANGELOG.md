@@ -16,6 +16,60 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.13] — 2026-05-11 — Third Phase-3 silent-emit found: post_gate_a "both gates empty" path
+
+> Operator report: "为什么跑了之后,出了结果,没有走后续流程呢" —
+> daemon's 09:00 / 20:00 scheduled scans were firing (confirmed via
+> `~/.agentflow/review/scheduled_state.json` + logs), `article-hotspots`
+> CLI was completing, but no Gate A card was reaching Lark. Cause:
+> Twitter API 402 (credits exhausted) collapsed recall to 1 single
+> off-domain HN hotspot, which failed both the hard topic-fit gate
+> (0.10) AND the v1.3.7 soft-floor (0.02). The "both gates empty" code
+> path then did `_log.warning(...) + return None` silently. The
+> operator had no signal in Lark; logs showed "scheduled hotspots
+> fired" but no follow-on; the chain dead-ended invisibly. Same class
+> as v1.3.6 / v1.3.10 — Phase 3 silent-emit regression, third site.
+
+### `post_gate_a` "both gates empty" path now emits `notify.scan_yielded_nothing`
+
+Pre-fix:
+```python
+if not soft_eligible:
+    _log.warning(...)
+    return None   # silent
+```
+
+Post-fix:
+```python
+if not soft_eligible:
+    _log.warning(...)
+    _emit_lark_review_card("notify.scan_yielded_nothing", ...payload...)
+    _track_signal_misalignment(in_fallback=True)  # tick streak counter
+    return None
+```
+
+The notify carries:
+- `candidates_seen`, `candidates_kept: 0`, `hard_threshold`, `soft_floor`
+- `dropped_preview`: top-5 dropped candidates with their `fit_score` +
+  `source` (so operator sees WHY they didn't qualify)
+- `message`: Chinese one-liner with "最可能的原因:召回源跟 profile 主题偏离"
+- `suggested_actions`: 4 commands the operator can run to diagnose
+  (`blogflow doctor`, `blogflow source-doctor`, etc.)
+
+### v1.3.8 streak counter extended
+
+`_track_signal_misalignment` is now called from the "both gates empty"
+path too, with `in_fallback=True`. Previously only ticked on
+soft-floor-fallback days; "both gates empty" days (worse than
+fallback) didn't tick. Now they do — operator gets the consolidated
+`notify.signal_misalignment` after threshold consecutive days,
+regardless of whether the daily failure was "fallback only" or
+"complete miss".
+
+### Tests
+
+- 297/297 still passing.
+
 ## [1.3.12] — 2026-05-11 — profile_search 0-hits root cause + recall-check enrichment + silent-emit audit clean
 
 > Continued from the v1.3.11 live walkthrough: 3 remaining issues
