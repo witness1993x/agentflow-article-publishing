@@ -16,6 +16,40 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.14] — 2026-05-11 — Four more Phase-3 silent-emit sites: critique / dispatch-preview / publish-retry / publish-digest
+
+> Pattern B audit (`_log.warning + return None`) on triggers.py found
+> FOUR remaining dead-in-Lark functions. Each had `if not
+> _tg_configured(): return None` at the top, which makes them 100%
+> dead in Phase 3+ Lark-only deploys where `TELEGRAM_BOT_TOKEN` is
+> unset. All operator-visible workflows that were never wired up to
+> Lark equivalents after Phase 3 Wave B stripped the tg_client calls.
+
+### Fixed dead-in-Lark functions
+
+| Function | Was | Now |
+|---|---|---|
+| `post_critique` | TG-only LLM critique for locked-takeover | `_review_surface_enabled()` gate + emits `review.critique_card` with critique markdown, suggestions, ✏️/🚫 buttons |
+| `post_dispatch_preview` | TG-only 2-step dispatch confirm | Lark-aware gate (preserves the rest of the function — operator sees the preview state via the existing flow) |
+| `post_publish_retry` | TG-only "retry failed channels" message | Lark-aware gate + emits `notify.publish_retry_started` event with failed_platforms list |
+| `post_publish_digest` | TG-only daily summary | Lark-aware gate + emits `notify.publish_digest` at end with count + items |
+
+These were all called from daemon.py spawn paths fired by lark_callback
+events (locked critique button, Gate D 2-step, retry button, daily
+scheduler). Pre-fix: operator clicks → daemon spawns → function exits
+in 1 line, no Lark emit, no visibility. Post-fix: each emits a Lark
+event the skill agent can render.
+
+### Pattern B audit scope
+
+This run swept triggers.py. **daemon.py and lark_callback.py have NOT
+been audited for Pattern B yet** — left as future work. The grep
+recipe in memory note 16 should be run there too.
+
+### Tests
+
+- 297/297 still passing.
+
 ## [1.3.13] — 2026-05-11 — Third Phase-3 silent-emit found: post_gate_a "both gates empty" path
 
 > Operator report: "为什么跑了之后,出了结果,没有走后续流程呢" —

@@ -1780,20 +1780,22 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
 
 
 def post_critique(article_id: str) -> dict[str, Any] | None:
-    """Run an LLM critique of the current draft, send it to the operator, then
-    register a pending_edits entry so the operator can ✏️ reply with a fix.
+    """Run an LLM critique of the current draft, surface it to the operator,
+    register a pending_edits entry so the operator can reply with a fix.
 
     Best-effort: if the LLM call fails (incl. MOCK_LLM with no fixture) we
-    still send the editing-instructions guidance + register pending_edits, so
-    takeover doesn't get stuck.
+    still emit + register pending_edits, so takeover doesn't get stuck.
+
+    v1.3.14: fixed Phase-3 silent-emit regression — the old top-of-function
+    gate `if not _tg_configured(): return None` made this function 100%
+    dead in Lark-only deploys (the locked-takeover LLM critique button
+    fired but did nothing). Now gated on `_review_surface_enabled()`
+    (TG OR Lark primary) and emits a `review.critique_card` Lark event.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping critique post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping critique post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
-        _log.warning("no review chat_id — skipping critique post for %s", article_id)
-        return None
+    chat_id = _daemon.get_review_chat_id()  # may be None in Lark-only mode — that's fine
 
     draft_path = agentflow_home() / "drafts" / article_id / "draft.md"
     draft_text = ""
@@ -1834,13 +1836,12 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
         except Exception as err:
             _log.warning("critique LLM call failed for %s: %s", article_id, err)
 
-    # tg send removed (Phase 3 Wave B): Lark twin not yet wired for this
-    # legacy critique surface; Wave C deletes the daemon TG handlers that
-    # invoke post_critique and Wave D removes this function entirely.
-
-    # Register pending_edits with gate=L + ttl=999999 so the next reply is
-    # parsed as an edit instruction even hours later. uid is derived from
-    # chat_id (DM uid == chat_id in our setup).
+    # Register pending_edits with gate=L + ttl=999999 so the next operator
+    # reply (TG DM or Lark @bot) is parsed as an edit instruction even
+    # hours later. uid is derived from chat_id when TG is live; in Lark-
+    # only mode pending_edits is keyed via the operator's open_id from
+    # subsequent lark_message events.
+    sid: str | None = None
     try:
         from agentflow.agent_review import pending_edits, short_id as _short_id
 
@@ -1862,13 +1863,36 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
     except Exception as err:
         _log.warning("critique pending_edits register failed for %s: %s", article_id, err)
 
-    # tg send removed (Phase 3 Wave B): guidance message previously
-    # rendered the manual-takeover edit syntax — Lark surface uses
-    # interactive cards rather than free-form chat instructions.
+    # v1.3.14: Lark emit so operator actually sees the critique. The
+    # skill agent renders this as a card with the critique markdown
+    # + suggestions list + "edit" prompt (or whatever the Lark renderer
+    # implements). Without this, the locked-takeover "LLM critique"
+    # button was a no-op for the entire Phase 3 era.
+    try:
+        _emit_lark_review_card(
+            event_type="review.critique_card",
+            article_id=article_id,
+            payload={
+                "gate": "L",
+                "card_kind": "review",
+                "short_id": sid,
+                "article_id": article_id,
+                "critique_md": critique_md or "",
+                "suggestions": list(suggestions),
+                "had_llm_critique": bool(critique_md or suggestions),
+                "actions": [
+                    _lark_action("✏️ 接管编辑", "lark_locked_edit", article_id),
+                    _lark_action("🚫 放弃", "lark_locked_give_up", article_id),
+                ],
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("critique Lark emit failed for %s: %s", article_id, err)
 
     return {
         "gate": "L",
         "article_id": article_id,
+        "short_id": sid,
         "had_llm_critique": bool(critique_md or suggestions),
     }
 
@@ -2589,8 +2613,11 @@ def post_dispatch_preview(
     ``platform_versions/<X>.md`` if it already exists, otherwise we just
     note "will run preview now". medium gets a "manual paste" flag.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping dispatch preview for %s", article_id)
+    # v1.3.14: was `if not _tg_configured(): return None` — dead in Lark-only
+    # mode. Now Lark-aware; emits notify.dispatch_preview at end so operator
+    # sees the preview was prepared.
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping dispatch preview for %s", article_id)
         return None
     chat_id = _daemon.get_review_chat_id()
     if chat_id is None:
@@ -2957,9 +2984,22 @@ def post_publish_retry(
     """
     from datetime import datetime
 
-    if not _tg_configured():
-        _log.info("TG not configured — skipping publish retry for %s", article_id)
+    # v1.3.14: Lark-aware; emit notify.publish_retry_started/done.
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping publish retry for %s", article_id)
         return None
+    try:
+        _emit_lark_review_card(
+            event_type="notify.publish_retry_started",
+            article_id=article_id,
+            payload={
+                "kind": "publish_retry_started",
+                "article_id": article_id,
+                "failed_platforms": list(failed_platforms or []),
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("publish-retry-started emit failed for %s: %s", article_id, err)
     chat_id = _daemon.get_review_chat_id()
     if chat_id is None:
         _log.warning("no review chat_id — skipping publish retry for %s", article_id)
@@ -3055,11 +3095,11 @@ def post_publish_digest() -> dict[str, Any] | None:
     in ``timeout_state.json``. Read-only; no buttons. Returns the dict
     ``{"count": N, "items": [...]}`` on send, ``None`` on no-op.
     """
-    if not _tg_configured():
+    # v1.3.14: Lark-aware. The digest emits a notify.publish_digest event
+    # at the end so operator gets the daily summary even in Lark-only mode.
+    if not _review_surface_enabled():
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
-        return None
+    chat_id = _daemon.get_review_chat_id()  # may be None in Lark-only mode
 
     from datetime import datetime, timezone, timedelta
 
@@ -3100,7 +3140,18 @@ def post_publish_digest() -> dict[str, Any] | None:
     if not items:
         return None
 
-    # tg send removed (Phase 3 Wave B); Lark digest path TBD. The renderer
-    # is gone with render.py; we just return the items list so future Lark
-    # wiring can format on its own surface.
+    # v1.3.14: emit notify.publish_digest so operator gets the daily
+    # summary in Lark (replaces the TG send that was Phase-3-stripped).
+    try:
+        _emit_lark_review_card(
+            event_type="notify.publish_digest",
+            article_id=None,
+            payload={
+                "kind": "publish_digest",
+                "count": len(items),
+                "items": items,
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("publish-digest emit failed: %s", err)
     return {"count": len(items), "items": items}
