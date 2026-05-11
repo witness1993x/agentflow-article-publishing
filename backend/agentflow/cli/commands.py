@@ -1258,12 +1258,30 @@ def hotspots(
         search_hotspots: list[Any] = []
         search_queries = topic_profile_search_queries(topic_profile, resolved_profile_id)
         per_query_target = max(1, min(5, int(target_candidates or 5)))
+        # v1.3.12: defaults relaxed from days=7 / min_points=10 to days=90 /
+        # min_points=3. The old values were tuned for trending HN front-page
+        # topics; niche profiles (crypto infra, vertical SaaS) get 0 hits
+        # because their queries don't get >=10 point stories every 7 days.
+        # Operators can still tighten via env. Verified live against the
+        # chainstream profile: 5 queries × {old=0} → {new=28} hits.
+        try:
+            profile_search_days = max(
+                1, int(os.environ.get("AGENTFLOW_PROFILE_SEARCH_DAYS", "90") or "90")
+            )
+        except (TypeError, ValueError):
+            profile_search_days = 90
+        try:
+            profile_search_min_points = max(
+                0, int(os.environ.get("AGENTFLOW_PROFILE_SEARCH_MIN_POINTS", "3") or "3")
+            )
+        except (TypeError, ValueError):
+            profile_search_min_points = 3
         for query_text in search_queries:
             search_output, saved_path = asyncio.run(
                 run_d1_search(
                     query=query_text,
-                    days=7,
-                    min_points=10,
+                    days=profile_search_days,
+                    min_points=profile_search_min_points,
                     target_candidates=per_query_target,
                 )
             )
@@ -1493,16 +1511,18 @@ cli.add_command(
 @click.option(
     "--days",
     type=int,
-    default=7,
+    default=90,
     show_default=True,
-    help="Only include stories from the last N days.",
+    help="Only include stories from the last N days. v1.3.12 raised the "
+    "default from 7 → 90; niche profiles get 0 hits with the old window.",
 )
 @click.option(
     "--min-points",
     type=int,
-    default=10,
+    default=3,
     show_default=True,
-    help="Drop HN stories below this score.",
+    help="Drop HN stories below this score. v1.3.12 lowered the default "
+    "from 10 → 3 for the same reason as --days.",
 )
 @click.option(
     "--target-candidates",

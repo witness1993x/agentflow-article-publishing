@@ -16,6 +16,80 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.12] — 2026-05-11 — profile_search 0-hits root cause + recall-check enrichment + silent-emit audit clean
+
+> Continued from the v1.3.11 live walkthrough: 3 remaining issues
+> shaken out and fixed in one release. The v1.3.10 silent-emit class
+> audit also completed cleanly (no remaining sites).
+
+### profile_search 0/0/0/0/0 hits root cause
+
+v1.3.11 walkthrough captured: `recall.queries` (5 ChainStream-aligned
+queries to HN Algolia) returned 0 hits each. Direct probe of HN Algolia
+with the same queries returned **520 / 15 / 256 / 2 / 577** total hits
+respectively. The collector's results were 0 — filter problem, not API.
+
+Root cause: `agentflow/cli/commands.py` hardcoded `days=7` +
+`min_points=10` when invoking `run_d1_search` for the profile_search
+bundle (line 1265-1266). Tuned for trending HN front-page topics, not
+niche-domain profiles. ChainStream queries get 0 hits because the niche
+content doesn't crack >=10 points within a 7-day window.
+
+A/B tested live against HN Algolia:
+- `days=7 min_points=10` (old default) → 0 total hits across 5 queries
+- `days=90 min_points=3` (new default) → **28 total hits across 5 queries**
+
+Fix:
+- `commands.py` profile_search call now reads
+  `AGENTFLOW_PROFILE_SEARCH_DAYS` (default 90) +
+  `AGENTFLOW_PROFILE_SEARCH_MIN_POINTS` (default 3).
+- `blogflow search --days / --min-points` CLI option defaults flipped
+  too: 7 → 90 and 10 → 3.
+
+### `check_recall_sources_enabled` enriched (preflight.py)
+
+v1.3.9/v1.3.11 only flagged ENABLED-vs-configured mismatches. v1.3.12
+adds:
+
+- Hard fail when `AGENTFLOW_BRAVE_SEARCH_ENABLED=true` AND queries
+  configured AND `BRAVE_API_KEY` not set (was silent before).
+- Hard fail same shape for Twitter search + `TWITTER_BEARER_TOKEN`.
+- Soft warning when `~/.agentflow/review/source_health.json` shows
+  >=50% dead Twitter KOL handles (e.g. 65/65 in the chainstream case)
+  — points operator at `blogflow source-doctor --fix-block`.
+- Surface RSS feed count (16 in the chainstream case) in extras.
+- Twitter KOL totals + blocked counts.
+- New extras keys: `twitter_kols_total`, `twitter_kols_blocked`,
+  `twitter_kols_dead_ratio_last_scan`, `rss_feeds_configured`,
+  `last_scan_health_path_exists`.
+
+### Phase 3 silent-emit class audit — CLEAN
+
+Per memory rule #16 (grep `"Lark .* skipped|Lark fan-out|Lark emit
+failed"` in triggers.py + check no main emit shares try/except with a
+side fanout), audited all 5 surviving Lark emit sites:
+
+- Gate A (line 1273): main emit at top level, no try wrap. ✓
+- Gate B (line 1537): v1.3.10 split — main in own try/WARNING, side in
+  own try/INFO. ✓
+- Gate C (line 2225): main emit at top level, no try wrap. ✓
+- Gate D (line 2461): main emit at top level, no try wrap. ✓
+- locked_takeover (line 1685): main emit at top level. ✓
+- image_picker (line 2295): main emit at top level. ✓
+
+Three remaining try/except-INFO-skipped blocks are pure side-fanouts:
+hotspots digest (line 1316), publish-ready notify (line 2175), dispatch
+notify (line 2784). None wrap a main `_emit_lark_X_card` call.
+
+**No new silent-emit sites found.** The class is closed at the
+triggers.py audit boundary. Future work would be to extend the audit
+to `lark_callback.py` and other emit sites, but those weren't subject
+to the Phase 3 regression because they were already Lark-native code.
+
+### Tests
+
+- 297/297 still passing.
+
 ## [1.3.11] — 2026-05-11 — Recall-source observability + auto-prune dead handles
 
 > Live `blogflow article-hotspots` against the real ChainStream profile

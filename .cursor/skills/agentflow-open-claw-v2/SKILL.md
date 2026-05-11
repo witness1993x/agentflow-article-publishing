@@ -174,7 +174,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.11.tar.gz` 及更新版本配合。**v1.3.0 起 Telegram surface 已彻底删除**;v1.3.1 删 render.py + 修 timeout sweeper bug;**v1.3.2 加了 Agent-Lark Window 模式**(无 webhook,daemon 写文件队列 + skill agent tail + 挂载 Lark 窗口推卡);v1.3.3 补齐运维交付物(smoke-test CLI、卡片 schema 内置、云电脑部署 runbook);v1.3.4 把 runbook 也搬进 `references/CLOUD_COMPUTER_DEPLOY.md`;v1.3.5 重写 SKILL.md 的部署模式 framing —— Mode A (文件队列) 是 **默认且唯一** 应该问 user 的路径,Mode B (webhook) 退到 advanced 章节,skill agent 在云电脑/同机部署下**绝不能**问 user 索要 webhook URL / auth header / bridge token / dashboard 端口(详见 anti-pattern #11)。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.12.tar.gz` 及更新版本配合。**v1.3.0 起 Telegram surface 已彻底删除**;v1.3.1 删 render.py + 修 timeout sweeper bug;**v1.3.2 加了 Agent-Lark Window 模式**(无 webhook,daemon 写文件队列 + skill agent tail + 挂载 Lark 窗口推卡);v1.3.3 补齐运维交付物(smoke-test CLI、卡片 schema 内置、云电脑部署 runbook);v1.3.4 把 runbook 也搬进 `references/CLOUD_COMPUTER_DEPLOY.md`;v1.3.5 重写 SKILL.md 的部署模式 framing —— Mode A (文件队列) 是 **默认且唯一** 应该问 user 的路径,Mode B (webhook) 退到 advanced 章节,skill agent 在云电脑/同机部署下**绝不能**问 user 索要 webhook URL / auth header / bridge token / dashboard 端口(详见 anti-pattern #11)。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
 
 - `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
 - `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）
