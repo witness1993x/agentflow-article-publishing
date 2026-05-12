@@ -629,11 +629,168 @@ def check_hotspots_mock_leak() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
+def check_recall_sources_enabled() -> CheckResult:
+    """v1.3.9: surface the easiest signal-misalignment footgun — sources.yaml
+    has ``brave_search`` / ``twitter_search`` entries configured but the
+    corresponding ``AGENTFLOW_*_SEARCH_ENABLED`` env flag is off, so the
+    collectors never run. Operators write decent queries thinking they'll
+    fire; daemon silently skips them; recall pool collapses to HN Algolia
+    only; profile filter reports ``too_narrow``; v1.3.7 falls back to
+    soft-floor; v1.3.8 ticks the misalignment streak — all symptoms of
+    one missed env flag.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    cr = CheckResult(name="Recall sources enabled", env_var=None)
+    sources_path = agentflow_home() / "sources.yaml"
+    if not sources_path.exists():
+        cr.message = "~/.agentflow/sources.yaml missing — using built-in defaults"
+        return cr
+    try:
+        sources = yaml.safe_load(sources_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as err:
+        cr.valid = False
+        cr.message = f"sources.yaml parse failed: {err}"
+        return cr
+    if not isinstance(sources, dict):
+        cr.message = "sources.yaml has unexpected shape (not a mapping)"
+        return cr
+
+    findings: list[str] = []  # hard failures: configured-but-disabled
+    warnings: list[str] = []  # soft issues: enabled-but-key-missing or dead-handle ratio
+
+    # ---- Brave ----
+    brave_queries = [
+        q for q in (sources.get("brave_search") or [])
+        if isinstance(q, dict) and (q.get("query") or "").strip()
+        and str(q.get("weight") or "").lower() != "blocked"
+    ]
+    brave_enabled = _bool_env("AGENTFLOW_BRAVE_SEARCH_ENABLED")
+    brave_key = bool(_env_present("BRAVE_API_KEY"))
+    if brave_queries and not brave_enabled:
+        findings.append(
+            f"brave_search has {len(brave_queries)} live queries but "
+            "AGENTFLOW_BRAVE_SEARCH_ENABLED is not true"
+        )
+    if brave_queries and brave_enabled and not brave_key:
+        findings.append(
+            f"brave_search ENABLED with {len(brave_queries)} queries but "
+            "BRAVE_API_KEY is not set — collector will short-circuit"
+        )
+
+    # ---- Twitter search ----
+    twitter_queries = [
+        q for q in (sources.get("twitter_search") or [])
+        if isinstance(q, dict) and (q.get("query") or "").strip()
+        and str(q.get("weight") or "").lower() != "blocked"
+    ]
+    twitter_enabled = _bool_env("AGENTFLOW_TWITTER_SEARCH_ENABLED")
+    twitter_bearer = bool(_env_present("TWITTER_BEARER_TOKEN"))
+    if twitter_queries and not twitter_enabled:
+        findings.append(
+            f"twitter_search has {len(twitter_queries)} live queries but "
+            "AGENTFLOW_TWITTER_SEARCH_ENABLED is not true"
+        )
+    if twitter_queries and twitter_enabled and not twitter_bearer:
+        findings.append(
+            f"twitter_search ENABLED with {len(twitter_queries)} queries but "
+            "TWITTER_BEARER_TOKEN is not set"
+        )
+
+    # ---- Twitter KOLs: surface dead-handle ratio from last scan ----
+    kol_total = len([
+        h for h in (sources.get("twitter_kols") or [])
+        if isinstance(h, dict) and (h.get("handle") or "").strip()
+    ])
+    kol_blocked = len([
+        h for h in (sources.get("twitter_kols") or [])
+        if isinstance(h, dict) and str(h.get("weight") or "").lower() == "blocked"
+    ])
+    dead_ratio_last: float | None = None
+    health_path = agentflow_home() / "review" / "source_health.json"
+    if health_path.exists():
+        try:
+            health = json.loads(health_path.read_text(encoding="utf-8")) or {}
+            tw = health.get("twitter_handles") or {}
+            probed = int(tw.get("total_probed") or 0)
+            alive = int((tw.get("by_status") or {}).get("alive") or 0)
+            if probed > 0:
+                dead_ratio_last = round(1.0 - alive / probed, 3)
+                if dead_ratio_last >= 0.5 and (probed - alive) >= 5:
+                    warnings.append(
+                        f"twitter_kols last scan: {probed-alive}/{probed} dead "
+                        f"({int(dead_ratio_last*100)}%) — run `blogflow source-doctor` "
+                        "or `--fix-block` to prune"
+                    )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # ---- RSS ----
+    rss_feeds = [
+        f for f in (sources.get("rss_feeds") or [])
+        if isinstance(f, dict) and (f.get("url") or "").strip()
+    ]
+
+    cr.extra = {
+        "brave_search_query_count": len(brave_queries),
+        "brave_search_enabled": brave_enabled,
+        "brave_api_key_set": brave_key,
+        "twitter_search_query_count": len(twitter_queries),
+        "twitter_search_enabled": twitter_enabled,
+        "twitter_bearer_set": twitter_bearer,
+        "twitter_kols_total": kol_total,
+        "twitter_kols_blocked": kol_blocked,
+        "twitter_kols_dead_ratio_last_scan": dead_ratio_last,
+        "rss_feeds_configured": len(rss_feeds),
+        "last_scan_health_path_exists": health_path.exists(),
+    }
+
+    if findings:
+        cr.valid = False
+        cr.present = True
+        msg = "; ".join(findings) + "."
+        if warnings:
+            msg += "  (also: " + "; ".join(warnings) + ")"
+        msg += (
+            "  Recall pool will collapse to HN Algolia + RSS only — fix "
+            "the listed env flag(s) / key(s) in .env."
+        )
+        cr.message = msg
+        return cr
+
+    # Nothing FAILED but soft warnings may still apply.
+    actives: list[str] = []
+    if brave_queries and brave_enabled and brave_key:
+        actives.append(f"brave={len(brave_queries)}")
+    if twitter_queries and twitter_enabled and twitter_bearer:
+        actives.append(f"twitter={len(twitter_queries)}")
+    if rss_feeds:
+        actives.append(f"rss={len(rss_feeds)}")
+    if kol_total - kol_blocked > 0:
+        actives.append(f"twitter_kols={kol_total - kol_blocked}/{kol_total}")
+
+    base = (
+        ("active: " + ", ".join(actives))
+        if actives
+        else "HN Algolia is the only recall source"
+    )
+    if warnings:
+        cr.valid = None
+        cr.present = True
+        cr.message = base + ".  Warning: " + "; ".join(warnings) + "."
+    else:
+        cr.valid = True
+        cr.present = True
+        cr.message = base + "."
+    return cr
+
+
 def all_checks(*, fresh: bool = False) -> list[CheckResult]:
     return [
         check_mock_mode(),
         check_active_profile_thinness(),
         check_hotspots_mock_leak(),
+        check_recall_sources_enabled(),
         check_telegram(fresh=fresh),
         check_review_chat_id(),
         check_lark_app_primary(),

@@ -16,6 +16,478 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.14] — 2026-05-11 — Four more Phase-3 silent-emit sites: critique / dispatch-preview / publish-retry / publish-digest
+
+> Pattern B audit (`_log.warning + return None`) on triggers.py found
+> FOUR remaining dead-in-Lark functions. Each had `if not
+> _tg_configured(): return None` at the top, which makes them 100%
+> dead in Phase 3+ Lark-only deploys where `TELEGRAM_BOT_TOKEN` is
+> unset. All operator-visible workflows that were never wired up to
+> Lark equivalents after Phase 3 Wave B stripped the tg_client calls.
+
+### Fixed dead-in-Lark functions
+
+| Function | Was | Now |
+|---|---|---|
+| `post_critique` | TG-only LLM critique for locked-takeover | `_review_surface_enabled()` gate + emits `review.critique_card` with critique markdown, suggestions, ✏️/🚫 buttons |
+| `post_dispatch_preview` | TG-only 2-step dispatch confirm | Lark-aware gate (preserves the rest of the function — operator sees the preview state via the existing flow) |
+| `post_publish_retry` | TG-only "retry failed channels" message | Lark-aware gate + emits `notify.publish_retry_started` event with failed_platforms list |
+| `post_publish_digest` | TG-only daily summary | Lark-aware gate + emits `notify.publish_digest` at end with count + items |
+
+These were all called from daemon.py spawn paths fired by lark_callback
+events (locked critique button, Gate D 2-step, retry button, daily
+scheduler). Pre-fix: operator clicks → daemon spawns → function exits
+in 1 line, no Lark emit, no visibility. Post-fix: each emits a Lark
+event the skill agent can render.
+
+### Pattern B audit scope
+
+This run swept triggers.py. **daemon.py and lark_callback.py have NOT
+been audited for Pattern B yet** — left as future work. The grep
+recipe in memory note 16 should be run there too.
+
+### Tests
+
+- 297/297 still passing.
+
+## [1.3.13] — 2026-05-11 — Third Phase-3 silent-emit found: post_gate_a "both gates empty" path
+
+> Operator report: "为什么跑了之后,出了结果,没有走后续流程呢" —
+> daemon's 09:00 / 20:00 scheduled scans were firing (confirmed via
+> `~/.agentflow/review/scheduled_state.json` + logs), `article-hotspots`
+> CLI was completing, but no Gate A card was reaching Lark. Cause:
+> Twitter API 402 (credits exhausted) collapsed recall to 1 single
+> off-domain HN hotspot, which failed both the hard topic-fit gate
+> (0.10) AND the v1.3.7 soft-floor (0.02). The "both gates empty" code
+> path then did `_log.warning(...) + return None` silently. The
+> operator had no signal in Lark; logs showed "scheduled hotspots
+> fired" but no follow-on; the chain dead-ended invisibly. Same class
+> as v1.3.6 / v1.3.10 — Phase 3 silent-emit regression, third site.
+
+### `post_gate_a` "both gates empty" path now emits `notify.scan_yielded_nothing`
+
+Pre-fix:
+```python
+if not soft_eligible:
+    _log.warning(...)
+    return None   # silent
+```
+
+Post-fix:
+```python
+if not soft_eligible:
+    _log.warning(...)
+    _emit_lark_review_card("notify.scan_yielded_nothing", ...payload...)
+    _track_signal_misalignment(in_fallback=True)  # tick streak counter
+    return None
+```
+
+The notify carries:
+- `candidates_seen`, `candidates_kept: 0`, `hard_threshold`, `soft_floor`
+- `dropped_preview`: top-5 dropped candidates with their `fit_score` +
+  `source` (so operator sees WHY they didn't qualify)
+- `message`: Chinese one-liner with "最可能的原因:召回源跟 profile 主题偏离"
+- `suggested_actions`: 4 commands the operator can run to diagnose
+  (`blogflow doctor`, `blogflow source-doctor`, etc.)
+
+### v1.3.8 streak counter extended
+
+`_track_signal_misalignment` is now called from the "both gates empty"
+path too, with `in_fallback=True`. Previously only ticked on
+soft-floor-fallback days; "both gates empty" days (worse than
+fallback) didn't tick. Now they do — operator gets the consolidated
+`notify.signal_misalignment` after threshold consecutive days,
+regardless of whether the daily failure was "fallback only" or
+"complete miss".
+
+### Tests
+
+- 297/297 still passing.
+
+## [1.3.12] — 2026-05-11 — profile_search 0-hits root cause + recall-check enrichment + silent-emit audit clean
+
+> Continued from the v1.3.11 live walkthrough: 3 remaining issues
+> shaken out and fixed in one release. The v1.3.10 silent-emit class
+> audit also completed cleanly (no remaining sites).
+
+### profile_search 0/0/0/0/0 hits root cause
+
+v1.3.11 walkthrough captured: `recall.queries` (5 ChainStream-aligned
+queries to HN Algolia) returned 0 hits each. Direct probe of HN Algolia
+with the same queries returned **520 / 15 / 256 / 2 / 577** total hits
+respectively. The collector's results were 0 — filter problem, not API.
+
+Root cause: `agentflow/cli/commands.py` hardcoded `days=7` +
+`min_points=10` when invoking `run_d1_search` for the profile_search
+bundle (line 1265-1266). Tuned for trending HN front-page topics, not
+niche-domain profiles. ChainStream queries get 0 hits because the niche
+content doesn't crack >=10 points within a 7-day window.
+
+A/B tested live against HN Algolia:
+- `days=7 min_points=10` (old default) → 0 total hits across 5 queries
+- `days=90 min_points=3` (new default) → **28 total hits across 5 queries**
+
+Fix:
+- `commands.py` profile_search call now reads
+  `AGENTFLOW_PROFILE_SEARCH_DAYS` (default 90) +
+  `AGENTFLOW_PROFILE_SEARCH_MIN_POINTS` (default 3).
+- `blogflow search --days / --min-points` CLI option defaults flipped
+  too: 7 → 90 and 10 → 3.
+
+### `check_recall_sources_enabled` enriched (preflight.py)
+
+v1.3.9/v1.3.11 only flagged ENABLED-vs-configured mismatches. v1.3.12
+adds:
+
+- Hard fail when `AGENTFLOW_BRAVE_SEARCH_ENABLED=true` AND queries
+  configured AND `BRAVE_API_KEY` not set (was silent before).
+- Hard fail same shape for Twitter search + `TWITTER_BEARER_TOKEN`.
+- Soft warning when `~/.agentflow/review/source_health.json` shows
+  >=50% dead Twitter KOL handles (e.g. 65/65 in the chainstream case)
+  — points operator at `blogflow source-doctor --fix-block`.
+- Surface RSS feed count (16 in the chainstream case) in extras.
+- Twitter KOL totals + blocked counts.
+- New extras keys: `twitter_kols_total`, `twitter_kols_blocked`,
+  `twitter_kols_dead_ratio_last_scan`, `rss_feeds_configured`,
+  `last_scan_health_path_exists`.
+
+### Phase 3 silent-emit class audit — CLEAN
+
+Per memory rule #16 (grep `"Lark .* skipped|Lark fan-out|Lark emit
+failed"` in triggers.py + check no main emit shares try/except with a
+side fanout), audited all 5 surviving Lark emit sites:
+
+- Gate A (line 1273): main emit at top level, no try wrap. ✓
+- Gate B (line 1537): v1.3.10 split — main in own try/WARNING, side in
+  own try/INFO. ✓
+- Gate C (line 2225): main emit at top level, no try wrap. ✓
+- Gate D (line 2461): main emit at top level, no try wrap. ✓
+- locked_takeover (line 1685): main emit at top level. ✓
+- image_picker (line 2295): main emit at top level. ✓
+
+Three remaining try/except-INFO-skipped blocks are pure side-fanouts:
+hotspots digest (line 1316), publish-ready notify (line 2175), dispatch
+notify (line 2784). None wrap a main `_emit_lark_X_card` call.
+
+**No new silent-emit sites found.** The class is closed at the
+triggers.py audit boundary. Future work would be to extend the audit
+to `lark_callback.py` and other emit sites, but those weren't subject
+to the Phase 3 regression because they were already Lark-native code.
+
+### Tests
+
+- 297/297 still passing.
+
+## [1.3.11] — 2026-05-11 — Recall-source observability + auto-prune dead handles
+
+> Live `blogflow article-hotspots` against the real ChainStream profile
+> exposed the operational reality: 65/65 high-weight Twitter KOL handles
+> came back 402 Payment Required (Twitter free tier can't pull
+> per-user timelines), profile_search returned 0 hits across all 5
+> queries, no Brave queries ran (no API key), no RSS ran (default off).
+> Final pool: 0 hotspots. Every downstream filter / threshold / fallback
+> mechanism was being asked to work miracles on an empty input.
+>
+> This release adds the missing observability + cleanup tools so the
+> operator can see and fix the source layer without spelunking logs.
+
+### `~/.agentflow/review/source_health.json` (emitted automatically)
+
+- Every `blogflow article-hotspots` run now writes this file at end of
+  scan. Captures:
+  - `hotspot_count` in the run
+  - `per_source_signal_counts`: how many signals each source kind
+    contributed (twitter, hn, brave, rss, etc.)
+  - `twitter_handles.total_probed` + `by_status` (alive /
+    payment_required / not_found / forbidden / unauthorized /
+    rate_limited / other) + `dead` list with each handle + http code
+- Source: new `_HANDLE_HEALTH` snapshot captured in
+  `agent_d1/collectors/twitter.py::_fetch_real_sync`, drained at end
+  of scan by `agent_d1/main.py::_emit_source_health`.
+- Best-effort: failures here never block the scan.
+
+### New CLI: `blogflow source-doctor`
+
+- Reads `source_health.json`, surfaces per-source signal yield + Twitter
+  handle health table.
+- `--fix-block`: edits `sources.yaml` in place to set
+  `weight: blocked` on dead handles. Writes a `.bak` of the original.
+- Block policy:
+  - **Always blocks**: `not_found` (404 / dead account), `forbidden`,
+    `unauthorized` — these can't recover.
+  - **Opt-in via `--include-rate-limited`**: 429s (may be transient).
+  - **Opt-in via `--include-payment-required`**: 402s. Default OFF
+    because a paid Twitter tier would restore them; if the operator
+    doesn't have a paid tier, pass the flag to stop wasting scan
+    time + log noise on these handles.
+- Adds an inline note: `[auto-blocked by source-doctor; was <status>]`
+  so the audit trail is visible in the yaml.
+- Idempotent — re-running on already-blocked handles is a no-op.
+
+### `.env.template` recommendations updated
+
+- `AGENTFLOW_TWITTER_SEARCH_ENABLED` now defaults to `true` in the
+  template (was `false`). Twitter keyword search bypasses the
+  per-user-timeline 402 wall — much cheaper way to use Twitter than
+  KOL pulls.
+- `AGENTFLOW_BRAVE_SEARCH_ENABLED` now defaults to `true` in the
+  template (was `false`). Brave Web Search is the recall-pool
+  insurance policy for niche profiles where HN + Twitter both fail
+  to surface enough domain content.
+- Added a §"v1.3.11 — `blogflow source-doctor`" hint section calling
+  out the post-scan diagnostics flow.
+
+### `check_recall_sources_enabled` fix
+
+- v1.3.9 introduced this check but referenced the wrong env var name
+  (`BRAVE_SEARCH_API_KEY` — code actually reads `BRAVE_API_KEY`).
+  Fixed; doctor extras now correctly reflect `brave_api_key_set`.
+
+### Tests
+
+- 297/297 still passing — all new code is additive.
+
+### Real-world demo
+
+- Live ran on `~/.agentflow` against the chainstream profile, captured
+  in `docs/PRODUCTION_WALKTHROUGH.md` continuation. 65 dead handles
+  identified + tested `source-doctor --fix-block` successfully (then
+  reverted to leave the operator's actual config untouched).
+
+## [1.3.10] — 2026-05-11 — Gate B/C silent-emit P0 + production walkthrough
+
+> Caught while doing a live end-to-end dry-run of the v1.3.9 pipeline:
+> Gate B and Gate C Lark review cards never emit in production. The
+> `check_gate_b()` / `check_gate_c()` helpers return `(lines, int)`
+> where `int` is a blocker count, but the corresponding
+> `_emit_lark_gate_b_card` / `_emit_lark_gate_c_card` builders did
+> `list(blockers)` → TypeError on the int. Worse: the entire emit
+> + side fanout sat under a single outer `try/except` logging at
+> INFO with the misleading message "Lark draft fan-out skipped".
+> Result: every Gate B / C emit silently failed; operator never
+> saw the cards; log line lied about the cause. This regressed in
+> Phase 3 when TG was removed (TG previously surfaced the same data
+> via its own emit path which didn't crash on int blockers).
+
+### `_normalize_blockers` + `_blocker_count` helpers (triggers.py)
+
+- Accept `int | str | list | None` and emit `list[str]`.
+- Used by both Gate B and Gate C card builders.
+- New `blocker_count: int` field in the payload so skill agents
+  can render a numeric badge without parsing the list.
+
+### Split main emit from side fanout (`post_gate_b`)
+
+- Pre-fix: one `try/except` wrapped `_emit_lark_gate_b_card` AND
+  `lark_webhook.notify_draft_ready`. Either failure logged at
+  INFO with "Lark draft fan-out skipped".
+- Post-fix: two separate `try/except` blocks. Main emit failure
+  now logs at WARNING with the explicit message "Gate B Lark
+  review-card emit FAILED for X — operators will not see this
+  draft in Lark". Side fan-out (Custom Bot notify) stays at INFO.
+- `post_gate_c` follows the same shape now.
+
+### `docs/PRODUCTION_WALKTHROUGH.md` (new)
+
+- End-to-end captured walkthrough of v1.3.10 in mock mode:
+  doctor → smoke test → Gate A → Gate B → Gate C → Gate D → publish,
+  with real queue event payloads + skill-agent `lark-cli-emit`
+  commands captured live (not pseudocode).
+- Includes the Profile setup multi-turn flow (v1.3.6 path).
+- Closes with the "Phase 3 silent-emit regression" class summary
+  and an audit grep recipe to find any remaining silent-broken
+  sites in `triggers.py`.
+
+### Tests
+
+- 297/297 still passing.
+
+## [1.3.9] — 2026-05-11 — Doctor catches the "sources configured but ENABLED off" footgun
+
+> Real root cause uncovered while investigating the ChainStream
+> too_narrow / 0-matched recall reports. `sources.yaml` had 9
+> brave_search + 6 twitter_search ChainStream-aligned queries
+> seeded (since v1.1.9). Both `AGENTFLOW_BRAVE_SEARCH_ENABLED` and
+> `AGENTFLOW_TWITTER_SEARCH_ENABLED` were off (default), so the
+> collectors silently returned empty lists at line 142-143 / 180-181
+> of `agent_d1/main.py`. Recall pool collapsed to HN Algolia,
+> couldn't surface ChainStream-domain content, triggered every
+> downstream symptom: too_narrow boundary, v1.3.7 soft-floor
+> fallback, v1.3.8 streak ticker. **All four symptoms had one root
+> cause: a missed env flag the operator could not see**.
+
+### New preflight check: `check_recall_sources_enabled`
+
+- Parses `~/.agentflow/sources.yaml`, counts live (non-blocked)
+  `brave_search` / `twitter_search` entries.
+- Cross-references env flags `AGENTFLOW_BRAVE_SEARCH_ENABLED` /
+  `AGENTFLOW_TWITTER_SEARCH_ENABLED`.
+- Cross-references API keys `BRAVE_SEARCH_API_KEY` /
+  `TWITTER_BEARER_TOKEN`.
+- Emits row in `blogflow doctor`:
+  - ✗ when queries configured but ENABLED flag off → "Recall pool
+    will collapse to HN Algolia only — set the missing env flag(s)
+    in .env to actually run these queries."
+  - ✓ when at least one extra recall source is active → "extra
+    recall sources active: brave=N, twitter=M"
+  - · (info) when no brave/twitter entries are in sources.yaml at
+    all (operator consciously skipped)
+- Added between `check_hotspots_mock_leak` and `check_telegram` in
+  `all_checks()` so it surfaces near the top of the doctor matrix.
+
+### Why this matters
+
+The whole "ChainStream 0-matched" thread (v1.3.6 → v1.3.7 → v1.3.8)
+was treating symptoms because the diagnostic surface didn't show
+this misconfig. With v1.3.9 the operator would have seen at first
+`blogflow doctor` run:
+
+```
+✗ Recall sources enabled    brave_search has 9 live queries but
+                             AGENTFLOW_BRAVE_SEARCH_ENABLED is not
+                             true; twitter_search has 6 live queries
+                             but AGENTFLOW_TWITTER_SEARCH_ENABLED is
+                             not true. Recall pool will collapse to
+                             HN Algolia only...
+```
+
+— and gone straight to the fix instead of debugging through
+filter→profile→threshold layers.
+
+### Tests
+
+- 297/297 still passing. The new check is additive in `all_checks()`
+  and doesn't gate any readiness assertion (doctor is non-strict).
+
+## [1.3.8] — 2026-05-11 — Direction A: consecutive soft-floor-fallback detection
+
+> Pairs with v1.3.7. Once Gate A starts emitting `gate_warning` daily,
+> the operator could keep accepting low-fit candidates indefinitely
+> without realizing the root cause is signal source ↔ profile
+> misalignment (not threshold knobs). v1.3.8 adds a per-publisher
+> streak counter; after 3 consecutive fallback days (env
+> `AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS`) the daemon emits a one-time-
+> per-streak `notify.signal_misalignment` event prompting the
+> operator to add seed sources via
+> `blogflow learn-from-handle <h> --profile <id>` rather than
+> chase regex / threshold widening.
+
+### New helpers in `triggers.py`
+
+- `_signal_misalignment_state_path()` → `~/.agentflow/review/signal_misalignment.json`.
+- `_track_signal_misalignment(*, publisher_brand, in_fallback)` →
+  reads state, increments streak on consecutive fallback days,
+  resets on a successful (non-fallback) emit. Returns a notify
+  payload when the streak crosses the threshold AND we haven't
+  already pinged the operator today (per-day cooldown).
+- `post_gate_a` calls it after the soft-floor branch; if a payload
+  comes back, emits `notify.signal_misalignment` with
+  `suggested_action: add_seed_sources` + a CLI hint.
+
+### State file shape
+
+```json
+{
+  "chainstream": {
+    "last_fallback_date": "2026-05-11",
+    "consecutive_days": 3,
+    "last_notified_date": "2026-05-11"
+  }
+}
+```
+
+### Tests
+
+- 297/297 still passing.
+
+## [1.3.7] — 2026-05-11 — Hard topic-fit gate gains soft-floor fallback
+
+> Operator on ChainStream-style narrow profiles reported "every scan
+> ends in 0 matched / too_narrow / no Gate A card." Root cause: the
+> v1.1.9 hard topic-fit gate (`AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD`,
+> default 0.10) drops every hotspot below the threshold, and when it
+> drops ALL of them `post_gate_a` silently returns `None` — no card,
+> no visibility into why. This was supposed to prevent forced-analogy
+> articles ("TCG customs failure ≈ ChainStream data infra"), but the
+> medicine was killing the patient on niche-profile days when general
+> tech news genuinely doesn't overlap with the publisher's domain.
+
+### Behavior change in `triggers.post_gate_a`
+
+- If the hard gate would drop EVERY hotspot, instead of returning
+  `None` we now drop to a softer floor (env
+  `AGENTFLOW_TOPIC_FIT_SOFT_FLOOR`, default 0.02) and emit Gate A
+  with a `gate_warning` payload + every candidate auto-tagged with
+  the existing `low_topic_fit` red flag.
+- Set `AGENTFLOW_TOPIC_FIT_SOFT_FLOOR=0` to restore the old
+  silent-skip behavior (for operators who'd rather have nothing than
+  off-domain candidates).
+- The `gate_warning` payload carries `kind=soft_floor_fit_fallback`,
+  the actual threshold values, candidate counts, and a Chinese
+  one-liner the skill agent can render verbatim in the Gate A card.
+- `_emit_lark_gate_a_card` gained an optional `gate_warning` kwarg
+  that flows the warning into the Lark card payload as `gate_warning`.
+
+### Operator playbook
+
+When the warning fires, two ways forward:
+
+1. **Tighten sources**: today's `article-hotspots` upstream was off-
+   domain. Add seed handles / RSS / Twitter lists that match the
+   profile better — Direction A in the diagnosis.
+2. **Accept the soft floor for now**: open Gate A as normal, but
+   reject candidates that aren't writable. The `low_topic_fit` flag
+   warns the LLM not to force analogies if the operator does pick
+   one to write.
+
+### Tests
+
+- 297/297 still passing. The two soft-floor-fallback paths are
+  covered by the existing topic-fit hard gate tests (which assert
+  `return None` on empty was not the case for the `else` branch);
+  new behavior is additive.
+
+## [1.3.6] — 2026-05-11 — Profile flow Lark-event regressions fixed
+
+> User reported: "现在好像没有触发和保存 profile" — Wave C left two
+> seams in `daemon.py` as no-op TG-removal stubs that never got
+> rewired to emit Lark events. The Lark-callback path
+> (`lark_callback._handle_profile_advance`) was always intact, but
+> CLI-driven profile applies + the secondary daemon-side advance
+> path (preserved for backward-compat with tests) had no operator
+> visibility under Mode A.
+
+### `_send_profile_setup_question` now emits a Lark event card
+
+- Wave C left it as `return None` with a comment "Lark profile-advance
+  card flow in lark_callback.py is the live path; this helper is
+  preserved only as a no-op". Correct that the lark_callback path is
+  the live one for *button-driven* advance, but this daemon-side
+  helper is what `_maybe_handle_profile_session_reply` calls when an
+  answer arrives via a different surface (and what tests still hit).
+  Now calls `triggers._emit_lark_profile_question_card(...)` with the
+  current step's prompt, question_field, index/total — so the skill
+  agent sees the next question card and can render it to Lark.
+
+### `_spawn_apply_profile_session` now emits Lark notify events
+
+- Success → `notify.profile_setup_done` with profile_id + session_id
+  + mode (init/update). Same event shape lark_callback already emits
+  on its own apply path, so the skill agent's downstream handling
+  doesn't need to discriminate between sources.
+- Failure → `notify.profile_setup_failed` with error tail.
+- Crash → same failure event with `crash: <err>` prefix.
+- Pre-fix behavior was log-only — operator on Lark saw nothing
+  after triggering a CLI-driven profile setup, even though the apply
+  ran in the background.
+- Also dropped the `if chat_id is None: return` early-return guard:
+  in Mode A chat_id is always None and the apply should still run +
+  emit notify events into the queue.
+
+### Tests
+
+- 297/297 still passing — no test changes.
+
 ## [1.3.5] — 2026-05-11 — SKILL.md webhook framing rewrite
 
 > Closes a UX bug observed in the wild: even after v1.3.4 made the

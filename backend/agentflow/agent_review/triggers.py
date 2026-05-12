@@ -141,6 +141,7 @@ def _emit_lark_gate_a_card(
     target_series: str,
     candidates: list[dict[str, Any]],
     telegram_message_id: Any | None = None,
+    gate_warning: dict[str, Any] | None = None,
 ) -> None:
     """Ask the Lark App/OpenClaw renderer to draw an actionable Gate A card.
 
@@ -201,10 +202,42 @@ def _emit_lark_gate_a_card(
                     ),
                 ],
                 "telegram_message_id": telegram_message_id,
+                "gate_warning": dict(gate_warning) if gate_warning else None,
             },
         )
     except Exception:  # pragma: no cover - payload shaping is best-effort
         _log.warning("Lark Gate A card payload build failed", exc_info=True)
+
+
+def _normalize_blockers(blockers: Any) -> list[str]:
+    """Accept blockers as int (count from check_gate_*) or list[str] (legacy
+    expanded form). Always emit list[str] in the card payload. v1.3.10
+    fixes a long-standing P0 where check_gate_b returns (lines, int) but
+    the card builder did `list(int)` → TypeError → silently swallowed by
+    the outer try/except as "Lark draft fan-out skipped"."""
+    if blockers is None:
+        return []
+    if isinstance(blockers, int):
+        if blockers <= 0:
+            return []
+        return [f"{blockers} unresolved blocker{'s' if blockers != 1 else ''}"]
+    if isinstance(blockers, str):
+        return [blockers] if blockers else []
+    try:
+        return [str(b) for b in blockers if str(b).strip()]
+    except TypeError:
+        return [str(blockers)]
+
+
+def _blocker_count(blockers: Any) -> int:
+    if blockers is None:
+        return 0
+    if isinstance(blockers, int):
+        return max(0, blockers)
+    try:
+        return len([b for b in blockers if str(b).strip()])
+    except TypeError:
+        return 0
 
 
 def _emit_lark_gate_b_card(
@@ -220,7 +253,7 @@ def _emit_lark_gate_b_card(
     compliance_score: float,
     tags: list[str],
     self_check_lines: list[str],
-    blockers: list[str],
+    blockers: Any,  # int count from check_gate_b OR list[str] expanded form
     opening_excerpt: str,
     draft_md: str,
     mirror_url: str | None,
@@ -243,7 +276,8 @@ def _emit_lark_gate_b_card(
             "compliance_score": compliance_score,
             "tags": list(tags),
             "self_check_lines": list(self_check_lines),
-            "blockers": list(blockers),
+            "blockers": _normalize_blockers(blockers),
+            "blocker_count": _blocker_count(blockers),
             "opening_excerpt": (opening_excerpt or "")[:600],
             "draft_excerpt": (draft_md or "")[:4000],
             "draft_length": len(draft_md or ""),
@@ -314,7 +348,7 @@ def _emit_lark_gate_c_card(
     cover_size: str,
     overlay_status: str,
     self_check_lines: list[str],
-    blockers: list[str],
+    blockers: Any,  # int from check_gate_c OR list[str] expanded form
     telegram_message_id: Any | None = None,
 ) -> None:
     _emit_lark_review_card(
@@ -330,7 +364,8 @@ def _emit_lark_gate_c_card(
             "cover_size": cover_size,
             "brand_overlay_status": overlay_status,
             "self_check_lines": list(self_check_lines),
-            "blockers": list(blockers),
+            "blockers": _normalize_blockers(blockers),
+            "blocker_count": _blocker_count(blockers),
             "actions": [
                 _lark_action("✅ 通过", "lark_gate_c_approve", article_id),
                 _lark_action("🚫 跳过/拒绝配图", "lark_gate_c_skip", article_id),
@@ -884,6 +919,128 @@ def _ensure_state(
 # ---------------------------------------------------------------------------
 
 
+def _signal_misalignment_state_path() -> Any:
+    """`~/.agentflow/review/signal_misalignment.json` — per-publisher
+    consecutive-day soft-floor-fallback counters.
+    """
+    from agentflow.shared.bootstrap import agentflow_home
+    p = agentflow_home() / "review" / "signal_misalignment.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _track_signal_misalignment(
+    *,
+    publisher_brand: str,
+    in_fallback: bool,
+) -> dict[str, Any] | None:
+    """Track consecutive-day soft-floor-fallback streaks per publisher.
+
+    Called from ``post_gate_a`` on every emission attempt. When the
+    current streak crosses the threshold (default 3 consecutive days,
+    env ``AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS``) we return a payload so
+    the caller can fan out a ``notify.signal_misalignment`` event with
+    a "consider adding seed sources" suggestion.
+
+    Returns ``None`` when no notification should fire (under threshold,
+    already notified today, or the fallback path wasn't taken).
+    """
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+
+    try:
+        threshold = max(
+            1,
+            int(os.environ.get("AGENTFLOW_SIGNAL_MISALIGNMENT_DAYS", "3") or "3"),
+        )
+    except (TypeError, ValueError):
+        threshold = 3
+
+    state_path = _signal_misalignment_state_path()
+    try:
+        state = (
+            _json.loads(state_path.read_text(encoding="utf-8"))
+            if state_path.exists() else {}
+        ) or {}
+    except (OSError, _json.JSONDecodeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    key = (publisher_brand or "_default").strip().lower() or "_default"
+    entry = state.get(key) or {}
+    if not isinstance(entry, dict):
+        entry = {}
+
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    yesterday_iso = (
+        datetime.now(timezone.utc).date() - timedelta(days=1)
+    ).isoformat()
+    last_fallback = str(entry.get("last_fallback_date") or "")
+    consecutive = int(entry.get("consecutive_days") or 0)
+
+    if in_fallback:
+        if last_fallback == yesterday_iso:
+            consecutive += 1
+        elif last_fallback == today_iso:
+            # Already counted today — leave streak as-is. This handles
+            # multiple Gate A emits within one day.
+            pass
+        else:
+            consecutive = 1
+        entry["last_fallback_date"] = today_iso
+        entry["consecutive_days"] = consecutive
+    else:
+        # Streak broken by a successful (non-fallback) emit.
+        if consecutive > 0:
+            entry["last_recovery_date"] = today_iso
+        consecutive = 0
+        entry["consecutive_days"] = 0
+        # Clear the notification cooldown so the next streak can notify
+        # immediately if it crosses threshold.
+        entry.pop("last_notified_date", None)
+
+    state[key] = entry
+    try:
+        state_path.write_text(
+            _json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as err:  # pragma: no cover — persistence best-effort
+        _log.warning("signal misalignment state write failed: %s", err)
+
+    # Only notify when (a) in fallback, (b) over threshold, (c) we
+    # haven't already notified for this run of consecutive days.
+    if not in_fallback or consecutive < threshold:
+        return None
+    last_notified = str(entry.get("last_notified_date") or "")
+    if last_notified == today_iso:
+        return None  # cooldown — already pinged operator today
+
+    entry["last_notified_date"] = today_iso
+    state[key] = entry
+    try:
+        state_path.write_text(
+            _json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:  # pragma: no cover
+        pass
+
+    return {
+        "publisher_brand": publisher_brand,
+        "consecutive_days": consecutive,
+        "threshold": threshold,
+        "message": (
+            f"已连续 {consecutive} 天 hotspot 信号都达不到 fit 硬门 "
+            f"({publisher_brand}) —— 当前热点源跟你的 profile 主题分布错位。"
+            "盲加 profile 关键词只会稀释 profile,正解是加更贴近主题的 seed "
+            "source(Twitter list / RSS / handle)。详见 SKILL.md §\"Direction A: "
+            "调源\"。"
+        ),
+    }
+
+
 def post_gate_a(
     *,
     hotspots: list[Any],
@@ -960,27 +1117,156 @@ def post_gate_a(
         )
     except (TypeError, ValueError):
         hard_threshold = 0.10
+    soft_floor_fallback: dict[str, Any] | None = None
     if hard_threshold > 0 and pub and fit_by_id:
         before = len(hotspots)
-        hotspots = [
+        eligible = [
             h for h in hotspots
             if fit_by_id.get(id(h), 0.0) >= hard_threshold
         ]
-        dropped = before - len(hotspots)
-        if dropped:
-            _log.warning(
-                "topic-fit hard gate dropped %d/%d hotspots below threshold %.3f",
-                dropped, before, hard_threshold,
+        if eligible:
+            # Normal path: at least one hotspot cleared the hard gate.
+            dropped = before - len(eligible)
+            if dropped:
+                _log.warning(
+                    "topic-fit hard gate dropped %d/%d hotspots below threshold %.3f",
+                    dropped, before, hard_threshold,
+                )
+            hotspots = eligible
+        else:
+            # v1.3.7: Soft-floor fallback. Hard gate would drop EVERYTHING —
+            # instead of silently skipping Gate A and leaving the operator
+            # staring at "0 matched / too_narrow" with no card, keep the
+            # least-bad candidates above a softer floor and post Gate A
+            # with a gate_warning banner. Every kept candidate auto-picks
+            # up a ``low_topic_fit`` red flag downstream (line ~1038).
+            # Operators see something + know to be skeptical, rather than
+            # nothing + confusion. Disabled when AGENTFLOW_TOPIC_FIT_SOFT_
+            # FLOOR=0 (then we fall back to the old silent-skip behavior).
+            try:
+                soft_floor = float(
+                    os.environ.get("AGENTFLOW_TOPIC_FIT_SOFT_FLOOR", "0.02") or "0.02"
+                )
+            except (TypeError, ValueError):
+                soft_floor = 0.02
+            soft_floor = max(0.0, soft_floor)
+            soft_eligible = (
+                [
+                    h for h in hotspots
+                    if fit_by_id.get(id(h), 0.0) >= soft_floor
+                ]
+                if soft_floor > 0
+                else []
             )
-        if not hotspots:
+            if not soft_eligible:
+                _log.warning(
+                    "topic-fit hard gate (%.3f) + soft floor (%.3f) both empty: "
+                    "0/%d hotspots cleared. Today's signals genuinely don't "
+                    "match the active publisher's domain — emitting "
+                    "notify.scan_yielded_nothing to surface the situation to "
+                    "the operator instead of skipping Gate A silently.",
+                    hard_threshold, soft_floor, before,
+                )
+                # v1.3.13: previously returned None silently here, which made
+                # scheduled scans look like they "didn't fire" when actually
+                # they ran but found nothing actionable. The operator had no
+                # signal in Lark + no way to distinguish "daemon broken" from
+                # "today's recall pool is bad". Now we emit a Lark
+                # notification carrying the diagnostic + drive the
+                # signal-misalignment streak counter too. The operator can
+                # then triage source quality (run `blogflow source-doctor`,
+                # check BRAVE_API_KEY credits, etc.) without first having to
+                # guess whether the scheduler even ran.
+                try:
+                    dropped_preview = [
+                        {
+                            "topic_one_liner": str(h.get("topic_one_liner") or "")[:120],
+                            "fit_score": round(float(fit_by_id.get(id(h), 0.0)), 4),
+                            "source": (
+                                (h.get("source_references") or [{}])[0].get("source", "?")
+                                if h.get("source_references") else "?"
+                            ),
+                        }
+                        for h in (hotspots[:5] if hotspots else [])
+                    ]
+                except Exception:  # pragma: no cover — defensive
+                    dropped_preview = []
+                try:
+                    _emit_lark_review_card(
+                        event_type="notify.scan_yielded_nothing",
+                        article_id=publisher_brand or None,
+                        payload={
+                            "kind": "scan_yielded_nothing",
+                            "publisher_brand": publisher_brand,
+                            "hard_threshold": hard_threshold,
+                            "soft_floor": soft_floor,
+                            "candidates_seen": before,
+                            "candidates_kept": 0,
+                            "dropped_preview": dropped_preview,
+                            "message": (
+                                f"今日扫描完成,但 {before} 个 hotspot 全部 fit<"
+                                f"{soft_floor:.2f},无法上 Gate A 卡。最可能的"
+                                "原因:召回源跟 profile 主题偏离(查 `blogflow "
+                                "doctor` 的 'Recall sources enabled' 行 + "
+                                "`blogflow source-doctor` 看 KOL 死亡率)。"
+                            ),
+                            "suggested_actions": [
+                                "blogflow doctor",
+                                "blogflow source-doctor",
+                                "blogflow source-doctor --fix-block --include-payment-required",
+                                "(re-check) BRAVE_API_KEY credits + AGENTFLOW_BRAVE_SEARCH_ENABLED=true",
+                            ],
+                        },
+                    )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("notify.scan_yielded_nothing emit failed: %s", err)
+
+                # Also tick the v1.3.8 signal-misalignment streak counter so
+                # consecutive "0 actionable" days roll up into the existing
+                # notify.signal_misalignment event after the threshold.
+                try:
+                    misalignment_alert = _track_signal_misalignment(
+                        publisher_brand=publisher_brand,
+                        in_fallback=True,  # this is even worse than fallback
+                    )
+                    if misalignment_alert:
+                        _emit_lark_review_card(
+                            event_type="notify.signal_misalignment",
+                            article_id=publisher_brand or None,
+                            payload={
+                                "kind": "signal_misalignment",
+                                **misalignment_alert,
+                                "suggested_action": "add_seed_sources",
+                                "next_command_hint": (
+                                    "blogflow source-doctor  # check KOL health\n"
+                                    "blogflow learn-from-handle <h> --profile <id>"
+                                ),
+                            },
+                        )
+                except Exception as err:  # pragma: no cover
+                    _log.warning("streak counter emit failed: %s", err)
+                return None
             _log.warning(
-                "topic-fit hard gate eliminated ALL hotspots — "
-                "either AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=%.3f is too strict, "
-                "or today's upstream signals genuinely don't match the "
-                "active publisher's domain. Skipping Gate A.",
-                hard_threshold,
+                "topic-fit hard gate (%.3f) eliminated all %d hotspots; "
+                "falling back to soft floor (%.3f) with %d candidates, all "
+                "marked low_topic_fit. Operator review required — today's "
+                "upstream signals are off-domain.",
+                hard_threshold, before, soft_floor, len(soft_eligible),
             )
-            return None
+            hotspots = soft_eligible
+            soft_floor_fallback = {
+                "kind": "soft_floor_fit_fallback",
+                "hard_threshold": hard_threshold,
+                "soft_floor": soft_floor,
+                "candidates_kept": len(soft_eligible),
+                "candidates_seen": before,
+                "message": (
+                    "今日 hotspot 信号与本 publisher 主题偏离;每条候选 fit<"
+                    f"{hard_threshold:.2f}。已用 soft floor ({soft_floor:.2f}) "
+                    "兜底,候选都带 low_topic_fit 红旗——请重点核对是否真的能写,"
+                    "或直接全拒后明天再扫。"
+                ),
+            }
 
     # Composite weight: how much to lean into topic-publisher fit vs raw
     # freshness. Defaults to 0.6 (60% fit / 40% freshness). Tighter brand
@@ -1071,7 +1357,38 @@ def post_gate_a(
         target_series=target_series,
         candidates=candidates,
         telegram_message_id=None,
+        gate_warning=soft_floor_fallback,
     )
+
+    # v1.3.8 Direction A: track consecutive soft-floor-fallback days per
+    # publisher; after N days (default 3) emit a notify.signal_misalignment
+    # so the operator gets a one-time-per-streak nudge to add seed sources
+    # instead of chasing the regex / threshold knobs that won't fix it.
+    try:
+        misalignment_alert = _track_signal_misalignment(
+            publisher_brand=publisher_brand,
+            in_fallback=soft_floor_fallback is not None,
+        )
+    except Exception as err:  # pragma: no cover — best-effort telemetry
+        _log.warning("signal misalignment tracking failed: %s", err)
+        misalignment_alert = None
+    if misalignment_alert:
+        try:
+            _emit_lark_review_card(
+                event_type="notify.signal_misalignment",
+                article_id=publisher_brand or None,
+                payload={
+                    "kind": "signal_misalignment",
+                    **misalignment_alert,
+                    "suggested_action": "add_seed_sources",
+                    "next_command_hint": (
+                        "blogflow learn-from-handle <handle> --profile <id>  "
+                        "# 或扩 ~/.agentflow/style_profile.yaml::seed_handles"
+                    ),
+                },
+            )
+        except Exception as err:  # pragma: no cover
+            _log.warning("signal misalignment notify emit failed: %s", err)
 
     # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).
     # Push-only, not actionable — operators still review on TG. Wrapped
@@ -1306,30 +1623,35 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     body_doc = _export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
 
-    # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
-    # actionable — Gate B operations stay on TG. Gated by
-    # AGENTFLOW_LARK_DRAFT_FANOUT (default off). Best-effort.
+    # v1.3.10: split the main Lark review-card emit from the optional
+    # lark_webhook fan-out. Previously both shared one try/except which
+    # silently swallowed _emit_lark_gate_b_card failures (e.g. the
+    # `blockers: int → list(int)` TypeError) under the misleading
+    # "Lark draft fan-out skipped" log message — operators never saw
+    # Gate B cards in Lark after Phase 3 and didn't know why.
+    audit_summary: str | None = None
+    audit_meta = meta.get("structure_audit") or {}
+    if isinstance(audit_meta, dict):
+        verdict = audit_meta.get("verdict")
+        try:
+            score = float(audit_meta.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if verdict and verdict not in {"skipped", "pass", None}:
+            audit_summary = f"audit={verdict} ({score:.2f})"
+    mirror_template = os.environ.get(
+        "AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE", ""
+    ).strip()
+    mirror_url: str | None = None
+    if mirror_template:
+        try:
+            mirror_url = mirror_template.format(article_id=article_id)
+        except (KeyError, IndexError, ValueError):
+            mirror_url = None
+
+    # Main Gate B review-card emit. Failures here are operator-visible
+    # bugs — log at WARNING with a clear marker so they aren't lost.
     try:
-        from agentflow.shared import lark_webhook
-        audit_summary: str | None = None
-        audit_meta = meta.get("structure_audit") or {}
-        if isinstance(audit_meta, dict):
-            verdict = audit_meta.get("verdict")
-            try:
-                score = float(audit_meta.get("score") or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            if verdict and verdict not in {"skipped", "pass", None}:
-                audit_summary = f"audit={verdict} ({score:.2f})"
-        mirror_template = os.environ.get(
-            "AGENTFLOW_DRAFT_MIRROR_URL_TEMPLATE", ""
-        ).strip()
-        mirror_url: str | None = None
-        if mirror_template:
-            try:
-                mirror_url = mirror_template.format(article_id=article_id)
-            except (KeyError, IndexError, ValueError):
-                mirror_url = None
         _emit_lark_gate_b_card(
             article_id=article_id,
             short_id=sid,
@@ -1348,6 +1670,17 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             mirror_url=mirror_url,
             telegram_message_id=message_id,
         )
+    except Exception as err:  # pragma: no cover
+        _log.warning(
+            "Gate B Lark review-card emit FAILED for %s — operators will "
+            "not see this draft in Lark: %s",
+            article_id, err, exc_info=True,
+        )
+
+    # Side fan-out via Custom Bot (notify-only, gated by env). Failures
+    # here are non-critical and stay at INFO.
+    try:
+        from agentflow.shared import lark_webhook
         lark_webhook.notify_draft_ready(
             article_id=article_id,
             title=title,
@@ -1356,7 +1689,7 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             audit_summary=audit_summary,
         )
     except Exception as err:  # pragma: no cover — best-effort
-        _log.info("Lark draft fan-out skipped for %s: %s", article_id, err)
+        _log.info("Lark draft fan-out (custom-bot) skipped for %s: %s", article_id, err)
 
     try:
         _state.transition(
@@ -1447,20 +1780,22 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
 
 
 def post_critique(article_id: str) -> dict[str, Any] | None:
-    """Run an LLM critique of the current draft, send it to the operator, then
-    register a pending_edits entry so the operator can ✏️ reply with a fix.
+    """Run an LLM critique of the current draft, surface it to the operator,
+    register a pending_edits entry so the operator can reply with a fix.
 
     Best-effort: if the LLM call fails (incl. MOCK_LLM with no fixture) we
-    still send the editing-instructions guidance + register pending_edits, so
-    takeover doesn't get stuck.
+    still emit + register pending_edits, so takeover doesn't get stuck.
+
+    v1.3.14: fixed Phase-3 silent-emit regression — the old top-of-function
+    gate `if not _tg_configured(): return None` made this function 100%
+    dead in Lark-only deploys (the locked-takeover LLM critique button
+    fired but did nothing). Now gated on `_review_surface_enabled()`
+    (TG OR Lark primary) and emits a `review.critique_card` Lark event.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping critique post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping critique post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
-        _log.warning("no review chat_id — skipping critique post for %s", article_id)
-        return None
+    chat_id = _daemon.get_review_chat_id()  # may be None in Lark-only mode — that's fine
 
     draft_path = agentflow_home() / "drafts" / article_id / "draft.md"
     draft_text = ""
@@ -1501,13 +1836,12 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
         except Exception as err:
             _log.warning("critique LLM call failed for %s: %s", article_id, err)
 
-    # tg send removed (Phase 3 Wave B): Lark twin not yet wired for this
-    # legacy critique surface; Wave C deletes the daemon TG handlers that
-    # invoke post_critique and Wave D removes this function entirely.
-
-    # Register pending_edits with gate=L + ttl=999999 so the next reply is
-    # parsed as an edit instruction even hours later. uid is derived from
-    # chat_id (DM uid == chat_id in our setup).
+    # Register pending_edits with gate=L + ttl=999999 so the next operator
+    # reply (TG DM or Lark @bot) is parsed as an edit instruction even
+    # hours later. uid is derived from chat_id when TG is live; in Lark-
+    # only mode pending_edits is keyed via the operator's open_id from
+    # subsequent lark_message events.
+    sid: str | None = None
     try:
         from agentflow.agent_review import pending_edits, short_id as _short_id
 
@@ -1529,13 +1863,36 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
     except Exception as err:
         _log.warning("critique pending_edits register failed for %s: %s", article_id, err)
 
-    # tg send removed (Phase 3 Wave B): guidance message previously
-    # rendered the manual-takeover edit syntax — Lark surface uses
-    # interactive cards rather than free-form chat instructions.
+    # v1.3.14: Lark emit so operator actually sees the critique. The
+    # skill agent renders this as a card with the critique markdown
+    # + suggestions list + "edit" prompt (or whatever the Lark renderer
+    # implements). Without this, the locked-takeover "LLM critique"
+    # button was a no-op for the entire Phase 3 era.
+    try:
+        _emit_lark_review_card(
+            event_type="review.critique_card",
+            article_id=article_id,
+            payload={
+                "gate": "L",
+                "card_kind": "review",
+                "short_id": sid,
+                "article_id": article_id,
+                "critique_md": critique_md or "",
+                "suggestions": list(suggestions),
+                "had_llm_critique": bool(critique_md or suggestions),
+                "actions": [
+                    _lark_action("✏️ 接管编辑", "lark_locked_edit", article_id),
+                    _lark_action("🚫 放弃", "lark_locked_give_up", article_id),
+                ],
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("critique Lark emit failed for %s: %s", article_id, err)
 
     return {
         "gate": "L",
         "article_id": article_id,
+        "short_id": sid,
         "had_llm_critique": bool(critique_md or suggestions),
     }
 
@@ -2256,8 +2613,11 @@ def post_dispatch_preview(
     ``platform_versions/<X>.md`` if it already exists, otherwise we just
     note "will run preview now". medium gets a "manual paste" flag.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping dispatch preview for %s", article_id)
+    # v1.3.14: was `if not _tg_configured(): return None` — dead in Lark-only
+    # mode. Now Lark-aware; emits notify.dispatch_preview at end so operator
+    # sees the preview was prepared.
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping dispatch preview for %s", article_id)
         return None
     chat_id = _daemon.get_review_chat_id()
     if chat_id is None:
@@ -2624,9 +2984,22 @@ def post_publish_retry(
     """
     from datetime import datetime
 
-    if not _tg_configured():
-        _log.info("TG not configured — skipping publish retry for %s", article_id)
+    # v1.3.14: Lark-aware; emit notify.publish_retry_started/done.
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping publish retry for %s", article_id)
         return None
+    try:
+        _emit_lark_review_card(
+            event_type="notify.publish_retry_started",
+            article_id=article_id,
+            payload={
+                "kind": "publish_retry_started",
+                "article_id": article_id,
+                "failed_platforms": list(failed_platforms or []),
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("publish-retry-started emit failed for %s: %s", article_id, err)
     chat_id = _daemon.get_review_chat_id()
     if chat_id is None:
         _log.warning("no review chat_id — skipping publish retry for %s", article_id)
@@ -2722,11 +3095,11 @@ def post_publish_digest() -> dict[str, Any] | None:
     in ``timeout_state.json``. Read-only; no buttons. Returns the dict
     ``{"count": N, "items": [...]}`` on send, ``None`` on no-op.
     """
-    if not _tg_configured():
+    # v1.3.14: Lark-aware. The digest emits a notify.publish_digest event
+    # at the end so operator gets the daily summary even in Lark-only mode.
+    if not _review_surface_enabled():
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
-        return None
+    chat_id = _daemon.get_review_chat_id()  # may be None in Lark-only mode
 
     from datetime import datetime, timezone, timedelta
 
@@ -2767,7 +3140,18 @@ def post_publish_digest() -> dict[str, Any] | None:
     if not items:
         return None
 
-    # tg send removed (Phase 3 Wave B); Lark digest path TBD. The renderer
-    # is gone with render.py; we just return the items list so future Lark
-    # wiring can format on its own surface.
+    # v1.3.14: emit notify.publish_digest so operator gets the daily
+    # summary in Lark (replaces the TG send that was Phase-3-stripped).
+    try:
+        _emit_lark_review_card(
+            event_type="notify.publish_digest",
+            article_id=None,
+            payload={
+                "kind": "publish_digest",
+                "count": len(items),
+                "items": items,
+            },
+        )
+    except Exception as err:  # pragma: no cover
+        _log.warning("publish-digest emit failed: %s", err)
     return {"count": len(items), "items": items}

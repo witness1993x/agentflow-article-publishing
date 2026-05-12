@@ -638,7 +638,68 @@ def _save_output(output: D1Output) -> Path:
     with path.open("w", encoding="utf-8") as fh:
         json.dump(output.to_dict(), fh, ensure_ascii=False, indent=2)
     _log.info("wrote %d hotspots to %s", len(output.hotspots), path)
+    _emit_source_health(output)
     return path
+
+
+def _emit_source_health(output: D1Output) -> None:
+    """v1.3.11: write ~/.agentflow/review/source_health.json so operators
+    can run ``blogflow source-doctor`` after a scan and see which Twitter
+    KOL handles failed (402 payment_required, 404 not_found, etc.), which
+    sources contributed signals, and where the recall pool actually came
+    from. Best-effort; never blocks the scan."""
+    try:
+        health_path = agentflow_home() / "review" / "source_health.json"
+        health_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Per-source signal counts from the merged hotspot set.
+        per_source: dict[str, int] = {}
+        for h in output.hotspots:
+            for ref in (h.source_references or []):
+                src = (ref.source if hasattr(ref, "source") else ref.get("source")) or "unknown"
+                per_source[str(src)] = per_source.get(str(src), 0) + 1
+
+        # Twitter per-handle health from the collector's snapshot.
+        twitter_handles_health: dict[str, dict] = {}
+        try:
+            twitter_handles_health = twitter_collector.pop_handle_health()
+        except Exception:  # pragma: no cover - best effort
+            twitter_handles_health = {}
+
+        # Aggregate counts by health status.
+        by_status: dict[str, int] = {}
+        dead: list[dict] = []
+        for handle, info in twitter_handles_health.items():
+            status = info.get("status") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+            if status not in {"alive"}:
+                dead.append({
+                    "handle": handle,
+                    "status": status,
+                    "http_code": info.get("http_code"),
+                })
+
+        snapshot = {
+            "generated_at": output.generated_at.isoformat(),
+            "scan_id": getattr(output, "scan_id", None),
+            "hotspot_count": len(output.hotspots),
+            "per_source_signal_counts": per_source,
+            "twitter_handles": {
+                "total_probed": len(twitter_handles_health),
+                "by_status": by_status,
+                "dead": dead,
+            },
+        }
+        health_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log.info(
+            "source_health: %d source kinds, %d twitter handles probed, %d dead",
+            len(per_source), len(twitter_handles_health), len(dead),
+        )
+    except Exception as err:  # pragma: no cover - best effort
+        _log.warning("source_health.json emit failed (non-fatal): %s", err)
 
 
 # ---------------------------------------------------------------------------

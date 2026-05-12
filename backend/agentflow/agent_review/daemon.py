@@ -265,25 +265,38 @@ def _session_display_name(session: dict[str, Any]) -> str:
 
 
 def _send_profile_setup_question(session: dict[str, Any]) -> None:
-    chat_id = session.get("active_chat_id") or session.get("chat_id")
-    if chat_id is None:
-        return
+    """Emit the next profile-setup question as a Lark event card.
+
+    Called from `_maybe_handle_profile_session_reply` after the operator
+    submits an answer that doesn't yet complete the session — we advance
+    `step_index`, save, and post the next question. The skill agent on
+    its tail loop renders this into a Lark card with one input field
+    + the `回答` / `稍后` buttons (per `_emit_lark_profile_question_card`).
+    """
     step_index = int(session.get("step_index") or 0)
     if step_index >= len(_PROFILE_SETUP_STEPS):
         return
-    # Phase 3: TG send removed. The Lark profile-advance card flow in
-    # lark_callback.py is the live path; this helper is preserved only as
-    # a no-op so existing tests that mock at this seam keep passing until
-    # Wave D rewrites them.
-    return None
+    step = _PROFILE_SETUP_STEPS[step_index]
+    profile_id = str(session.get("profile_id") or "")
+    session_id = str(session.get("id") or "")
+    # Lazy import to avoid circular: triggers imports daemon for some
+    # helpers but the inverse is one-way.
+    from agentflow.agent_review.triggers import _emit_lark_profile_question_card
+    _emit_lark_profile_question_card(
+        session_path=session_id,
+        profile_id=profile_id,
+        question_field=str(step.get("key") or ""),
+        question_text=str(step.get("prompt") or ""),
+        question_index=step_index + 1,
+        total_questions=len(_PROFILE_SETUP_STEPS),
+    )
 
 
 def _spawn_apply_profile_session(session_id: str, chat_id: int | str | None) -> None:
     import subprocess
+    from agentflow.shared.agent_bridge import emit_agent_event
 
     def _run() -> None:
-        if chat_id is None:
-            return
         try:
             session = load_session(session_id)
             from agentflow.agent_review.triggers import _af_argv
@@ -307,19 +320,42 @@ def _spawn_apply_profile_session(session_id: str, chat_id: int | str | None) -> 
                 timeout=120,
             )
             if result.returncode != 0:
-                _log.warning(
-                    "profile setup failed for %s: %s",
-                    profile_id,
-                    (result.stderr or result.stdout)[:500],
-                )
+                tail = (result.stderr or result.stdout)[:500]
+                _log.warning("profile setup failed for %s: %s", profile_id, tail)
                 session["status"] = "failed"
                 save_session(session)
+                emit_agent_event(
+                    source="daemon.profile_setup",
+                    event_type="notify.profile_setup_failed",
+                    payload={
+                        "profile_id": profile_id,
+                        "session_id": session_id,
+                        "error_tail": tail,
+                    },
+                )
                 return
             session["status"] = "applied"
             save_session(session)
             _log.info("profile setup applied for %s", profile_id)
+            emit_agent_event(
+                source="daemon.profile_setup",
+                event_type="notify.profile_setup_done",
+                payload={
+                    "profile_id": profile_id,
+                    "session_id": session_id,
+                    "mode": cmd,
+                },
+            )
         except Exception as err:
             _log.warning("profile session apply crashed for %s: %s", session_id, err)
+            emit_agent_event(
+                source="daemon.profile_setup",
+                event_type="notify.profile_setup_failed",
+                payload={
+                    "session_id": session_id,
+                    "error_tail": f"crash: {err}",
+                },
+            )
 
     threading.Thread(target=_run, daemon=True).start()
 
