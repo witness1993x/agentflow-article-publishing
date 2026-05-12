@@ -92,7 +92,7 @@ Before this skill provides useful guidance, the following must exist on disk:
 
 如 user 在云端报 "agentflow not found / blogflow command not found / 没找到 ~/.agentflow"，先确认上面 4 项是否齐全。**不要假设 skill 自身能解决 runtime 缺失**。
 
-兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.0.tar.gz` 及更新版本配合。**v1.3.0 (Phase 3) 起 Telegram surface 已彻底删除**——daemon、CLI、SDK 都不再有 TG 路径,`AGENTFLOW_LARK_APP_PRIMARY=true` + Lark 事件 webhook 是 daemon 启动的唯一前提,缺了就 SystemExit。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
+兼容版本：本 skill v3.0 与 `blogflow-lark-deploy-v1.3.1.tar.gz` 及更新版本配合。**v1.3.0 (Phase 3) 起 Telegram surface 已彻底删除**——daemon、CLI、SDK 都不再有 TG 路径,`AGENTFLOW_LARK_APP_PRIMARY=true` + Lark 事件 webhook 是 daemon 启动的唯一前提,缺了就 SystemExit。v1.3.1 进一步删了 render.py（TG-Markdown 渲染器, 802 行）+ 修了 timeout sweeper 在 v1.3.0 残留的死代码 bug（_safe_send 永返 False 导致 timeout_state 永不 mark, 每 60s 重复 fire audit log）。v3.0 在 v2.9 基础上加入 Phase 1 完成的 7 张新卡的渲染契约：
 
 - `review.suggestion_list_card` + `review.suggestion_review_card`（profile-scoped 改进建议；GAP-S）
 - `review.profile_setup_card` 增 `current_question` / `question_index` / `total_questions` 字段（多轮追问；GAP-P2）

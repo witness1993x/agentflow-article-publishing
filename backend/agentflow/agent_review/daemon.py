@@ -17,7 +17,6 @@ from typing import Any
 from agentflow.agent_review import (
     auth,
     pending_edits,
-    render as _render,
     self_check,
     short_id as _sid,
     state,
@@ -1416,23 +1415,13 @@ def _scan_timeouts() -> None:
     if not pending:
         return
 
-    chat_id = get_review_chat_id()
     now = datetime.now(timezone.utc)
 
-    def _safe_send(text: str) -> bool:
-        # Phase 3: TG side channel removed. Timeout sweeper now relies on
-        # Lark cards (re-emitted via triggers.post_*) for operator visibility.
-        return False
-
-    def _title_of(aid: str) -> str:
-        try:
-            data = json.loads(
-                (agentflow_home() / "drafts" / aid / "metadata.json")
-                .read_text(encoding="utf-8")
-            ) or {}
-            return str(data.get("title") or "(no title)")
-        except Exception:
-            return "(no title)"
+    # Phase 3: timeout sweeper is Lark-only. The Lark card for the active
+    # gate is already on the operator's screen — re-pinging via a daemon-
+    # side message would just spam them. So the sweeper now just records
+    # the timeout state + audit, and runs the auto-skip / auto-cancel
+    # transitions where applicable. No text rendering, no escape_md2.
 
     for aid in pending:
         try:
@@ -1448,61 +1437,38 @@ def _scan_timeouts() -> None:
         except ValueError:
             continue
         hrs = (now - ts).total_seconds() / 3600.0
-        title = _title_of(aid)
-        title_md = _render.escape_md2(title)
-        aid_md = _render.escape_md2(aid)
 
         if cur == state.STATE_DRAFT_PENDING_REVIEW:
             if hrs >= b_first and not timeout_state.has_first_pinged(aid):
-                text = (
-                    f"⏰ 12h\\+ 未审\n\n"
-                    f"*{title_md}*\n"
-                    f"`{aid_md}`\n"
-                    f"请处理 Gate B 卡片\\."
-                )
-                if _safe_send(text):
-                    timeout_state.mark_first_pinged(aid)
-                    _audit({
-                        "kind": "timeout_first_ping",
-                        "gate": "B",
-                        "article_id": aid,
-                        "hrs": round(hrs, 2),
-                    })
+                timeout_state.mark_first_pinged(aid)
+                _audit({
+                    "kind": "timeout_first_ping",
+                    "gate": "B",
+                    "article_id": aid,
+                    "hrs": round(hrs, 2),
+                })
             if (
                 hrs >= b_second
                 and timeout_state.has_first_pinged(aid)
                 and not timeout_state.has_second_action(aid)
             ):
-                text = (
-                    f"⏰ 已等 24h\\+，请尽快处理或显式拒绝\n\n"
-                    f"*{title_md}*\n"
-                    f"`{aid_md}`"
-                )
-                if _safe_send(text):
-                    timeout_state.mark_second_action(aid)
-                    _audit({
-                        "kind": "timeout_second_ping",
-                        "gate": "B",
-                        "article_id": aid,
-                        "hrs": round(hrs, 2),
-                    })
+                timeout_state.mark_second_action(aid)
+                _audit({
+                    "kind": "timeout_second_ping",
+                    "gate": "B",
+                    "article_id": aid,
+                    "hrs": round(hrs, 2),
+                })
 
         elif cur == state.STATE_IMAGE_PENDING_REVIEW:
             if hrs >= c_first and not timeout_state.has_first_pinged(aid):
-                text = (
-                    f"⏰ Cover 6h\\+ 未审\n\n"
-                    f"*{title_md}*\n"
-                    f"`{aid_md}`\n"
-                    f"请处理 Gate C 卡片\\."
-                )
-                if _safe_send(text):
-                    timeout_state.mark_first_pinged(aid)
-                    _audit({
-                        "kind": "timeout_first_ping",
-                        "gate": "C",
-                        "article_id": aid,
-                        "hrs": round(hrs, 2),
-                    })
+                timeout_state.mark_first_pinged(aid)
+                _audit({
+                    "kind": "timeout_first_ping",
+                    "gate": "C",
+                    "article_id": aid,
+                    "hrs": round(hrs, 2),
+                })
             if hrs >= c_autoskip and not timeout_state.has_second_action(aid):
                 try:
                     state.transition(
@@ -1517,11 +1483,6 @@ def _scan_timeouts() -> None:
                 except Exception as err:  # pragma: no cover
                     _log.warning("auto_skip transition failed for %s: %s", aid, err)
                     continue
-                _safe_send(
-                    f"⏰ Cover 12h 未审 → 自动 fallback 到无封面，state→image\\_skipped\n\n"
-                    f"*{title_md}*\n"
-                    f"`{aid_md}`"
-                )
                 # Trigger Gate D card after auto-skip so the article doesn't stall.
                 try:
                     _spawn_gate_d(aid)
@@ -1549,39 +1510,21 @@ def _scan_timeouts() -> None:
                 except Exception as err:
                     _log.warning("auto_cancel transition failed for %s: %s", aid, err)
                     continue
-                # Attach a [⏰ 再延 12h] extend button (Q6). Mint a fresh
-                # sid for the extend callback (12h TTL — matches the new
-                # extension window). The handler enforces the per-article
-                # 1-extension cap via timeout_state.extended_count.
-                extend_text = (
-                    f"⏰ Gate D 12h 未确认 → 自动 cancel, state→image\\_approved\n\n"
-                    f"*{title_md}*\n"
-                    f"`{aid_md}`\n\n"
-                    f"想继续？点击 ⏰ 延 12h（限 1 次）。"
-                )
-                extend_kb: dict[str, Any] | None = None
+                # Mint a fresh extend sid (12h TTL) so the Lark Gate D card's
+                # "再延 12h" button has something to resolve against. The
+                # handler enforces the per-article 1-extension cap via
+                # timeout_state.extended_count.
                 try:
-                    extend_sid = _sid.register(
+                    _sid.register(
                         gate="D",
                         article_id=aid,
                         ttl_hours=12,
                         extra={"extend_only": True},
                     )
-                    extend_kb = {
-                        "inline_keyboard": [[
-                            {
-                                "text": "⏰ 再延 12h",
-                                "callback_data": f"D:extend:{extend_sid}",
-                            }
-                        ]]
-                    }
                 except Exception as err:
                     _log.warning(
                         "Gate D extend sid mint failed for %s: %s", aid, err
                     )
-                # Phase 3: Gate D auto-cancel extend prompt is now Lark-only;
-                # the Lark card already shows the extend option, so this
-                # daemon-side ping is dropped.
                 _log.info(
                     "Gate D auto_cancel extend window opened for %s", aid,
                 )
@@ -1629,24 +1572,18 @@ def _scan_timeouts() -> None:
         first_pinged = bool(ga_entry.get("first_pinged_at"))
         second_done = bool(ga_entry.get("second_action_taken_at"))
         batch_path = gentry.get("batch_path") or ""
-        batch_md = _render.escape_md2(str(batch_path) or "(no batch)")
 
         if ga_hrs >= a_first and not first_pinged:
-            text = (
-                f"⏰ Gate A 12h\\+ 未审，请处理 hotspots batch\n\n"
-                f"`{batch_md}`"
-            )
-            if _safe_send(text):
-                ga_entry["first_pinged_at"] = datetime.now(timezone.utc).isoformat()
-                ga_state[sid] = ga_entry
-                ga_dirty = True
-                _audit({
-                    "kind": "timeout_first_ping",
-                    "gate": "A",
-                    "short_id": sid,
-                    "batch_path": batch_path,
-                    "hrs": round(ga_hrs, 2),
-                })
+            ga_entry["first_pinged_at"] = datetime.now(timezone.utc).isoformat()
+            ga_state[sid] = ga_entry
+            ga_dirty = True
+            _audit({
+                "kind": "timeout_first_ping",
+                "gate": "A",
+                "short_id": sid,
+                "batch_path": batch_path,
+                "hrs": round(ga_hrs, 2),
+            })
 
         if ga_hrs >= a_autoreject and not second_done:
             # Auto-reject the batch: flag every hotspot as rejected_batch
@@ -1690,10 +1627,6 @@ def _scan_timeouts() -> None:
                 "hrs": round(ga_hrs, 2),
                 **({"io_error": io_err} if io_err else {}),
             })
-            _safe_send(
-                "⏰ Gate A 24h 未审 → 整批自动拒绝（重新跑 `blogflow article-hotspots` 可恢复）\n\n"
-                f"`{batch_md}`"
-            )
             ga_entry["second_action_taken_at"] = datetime.now(timezone.utc).isoformat()
             ga_state[sid] = ga_entry
             ga_dirty = True

@@ -23,7 +23,6 @@ from typing import Any
 
 from agentflow.agent_review import (
     daemon as _daemon,
-    render,
     self_check,
     short_id as _sid,
     state as _state,
@@ -60,6 +59,43 @@ def _review_chat_id() -> int | str | None:
     if not _tg_configured():
         return None
     return _daemon.get_review_chat_id()
+
+
+# v1.3.x: Gate B/C TTL helpers + body export inlined from the deleted
+# render.py. The TTL envs preserve the names render.py used so any operator
+# overrides keep working.
+
+
+def _gate_b_ttl_hours() -> float:
+    try:
+        return float(os.environ.get("REVIEW_GATE_B_SECOND_PING_HOURS", "") or 24)
+    except ValueError:
+        return 24
+
+
+def _gate_c_ttl_hours() -> float:
+    try:
+        return float(os.environ.get("REVIEW_GATE_C_AUTOSKIP_HOURS", "") or 12)
+    except ValueError:
+        return 12
+
+
+def _export_body_markdown(article_id: str) -> Path:
+    """Write the article's Medium-preview body to a temp file the bot can
+    attach to a Gate B card. Returns the path. Inlined from the deleted
+    render.export_body_markdown."""
+    src = agentflow_home() / "medium" / article_id / "medium_preview.md"
+    if not src.exists():
+        src = agentflow_home() / "drafts" / article_id / "draft.md"
+    out_dir = agentflow_home() / "review" / "outbox"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    short = article_id[-8:]
+    dst = out_dir / f"{short}_draft.md"
+    dst.write_text(
+        src.read_text(encoding="utf-8") if src.exists() else "(no draft)",
+        encoding="utf-8",
+    )
+    return dst
 
 
 def _emit_lark_review_card(
@@ -1027,15 +1063,7 @@ def post_gate_a(
         }
         worth_reviewing = list(filter_meta.get("filtered_out_preview") or [])
 
-    text, kb, sid = render.render_gate_a(
-        publisher_brand=publisher_brand,
-        target_series=target_series,
-        candidates=candidates,
-        batch_path=str(batch_path),
-        round_summary=round_summary,
-        worth_reviewing=worth_reviewing,
-        config_suggestions=config_suggestions or [],
-    )
+    sid = _sid.register(gate="A", batch_path=str(batch_path), ttl_hours=24)
     _emit_lark_gate_a_card(
         short_id=sid,
         batch_path=str(batch_path),
@@ -1083,11 +1111,15 @@ def post_profile_setup_prompt(
     if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping profile setup prompt")
         return None
-    text, kb, sid = render.render_profile_setup_card(
-        profile_id=profile_id,
-        reason=reason,
-        missing_fields=missing_fields,
-        session_path=session_path,
+    sid = _sid.register(
+        gate="P",
+        batch_path=session_path,
+        ttl_hours=24,
+        extra={
+            "profile_id": profile_id,
+            "reason": reason,
+            "missing_fields": list(missing_fields),
+        },
     )
     _emit_lark_review_card(
         "review.profile_setup_card",
@@ -1100,7 +1132,6 @@ def post_profile_setup_prompt(
             "reason": reason,
             "missing_fields": list(missing_fields),
             "session_path": session_path,
-            "text": text,
             "telegram_message_id": None,
         },
     )
@@ -1266,23 +1297,13 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
     if not opening and sections:
         opening = (sections[0].get("content_markdown") or "").strip()
 
-    text, kb, sid = render.render_gate_b(
-        article_id=article_id,
-        title=title,
-        subtitle=overrides.get("subtitle"),
-        publisher_brand=publisher.get("brand"),
-        voice=publisher.get("voice"),
-        word_count=word_count,
-        section_count=len(sections),
-        compliance_score=compliance,
-        tags=list(overrides.get("tags") or []) or list(publisher.get("default_tags") or []),
-        self_check_lines=self_lines,
-        opening_excerpt=opening,
+    sid = _sid.register(
+        gate="B", article_id=article_id, ttl_hours=_gate_b_ttl_hours()
     )
 
     message_id: int | None = None
 
-    body_doc = render.export_body_markdown(article_id)
+    body_doc = _export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
 
     # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
@@ -1399,13 +1420,13 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
     )
 
     try:
-        text, kb, sid = render.render_locked_takeover(
+        sid = _sid.register(
+            gate="L",
             article_id=article_id,
-            title=title,
-            rewrite_count=rewrite_count,
+            ttl_hours=24 * 30,
         )
     except Exception as err:
-        _log.warning("locked-takeover render failed for %s: %s", article_id, err)
+        _log.warning("locked-takeover sid register failed for %s: %s", article_id, err)
         return None
 
     _emit_lark_locked_takeover_card(
@@ -1860,27 +1881,11 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
         images.get("cover_image_path") or images.get("first_resolved_path")
     )
 
-    title = preview_meta.get("title") or export.get("source", {}).get("title") or "(no title)"
-    subtitle = preview_meta.get("subtitle")
-    tags = list(preview_meta.get("tags") or [])
-    canonical = preview_meta.get("canonical_url")
-    publisher_brand = "default"
-    try:
-        meta = _read_metadata(article_id)
-        publisher_brand = (meta.get("publisher_account") or {}).get("brand") or "default"
-    except Exception:
-        pass
-    warnings = list(export.get("warnings") or [])
-
-    caption, sid, kb = render.render_publish_ready(
+    sid = _sid.register(
+        gate="PR",
         article_id=article_id,
-        title=title,
-        subtitle=subtitle,
-        publisher_brand=publisher_brand,
-        tags=tags,
-        canonical_url=canonical,
-        package_path=str(package_path),
-        warnings=warnings,
+        ttl_hours=24 * 30,
+        extra={},
     )
 
     # tg sends removed (Phase 3 Wave B): cover photo, caption, and
@@ -1960,16 +1965,8 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
     cover_size = f"{summary.get('width','?')}x{summary.get('height','?')}"
     overlay_status = "ON" if summary.get("brand_overlay_applied") else "off"
 
-    caption, kb, sid = render.render_gate_c(
-        article_id=article_id,
-        title=title,
-        image_mode="cover-only",
-        cover_style="cover",
-        cover_size=cover_size,
-        self_check_lines=self_lines,
-        brand_overlay_status=overlay_status,
-        brand_overlay_anchor="bottom_left",
-        inline_body_count=0,
+    sid = _sid.register(
+        gate="C", article_id=article_id, ttl_hours=_gate_c_ttl_hours()
     )
     message_id: int | None = None
     _emit_lark_gate_c_card(
@@ -2035,12 +2032,10 @@ def post_image_gate_picker(article_id: str) -> dict[str, Any] | None:
     title = meta.get("title") or "(no title)"
 
     try:
-        text, kb, sid = render.render_image_gate_picker(
-            article_id=article_id, title=title,
-        )
+        sid = _sid.register(gate="I", article_id=article_id, ttl_hours=12)
     except Exception as err:  # pragma: no cover
         _log.warning(
-            "render_image_gate_picker failed for %s: %s", article_id, err
+            "image_gate_picker sid register failed for %s: %s", article_id, err
         )
         return None
 
@@ -2209,13 +2204,6 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
         extra={"available": available, "selected": list(selected)},
     )
 
-    text, kb = render.render_gate_d(
-        article_id=article_id,
-        title=title,
-        available=available,
-        selected=set(selected),
-        short_id=sid,
-    )
     message_id: int | None = None
     _emit_lark_gate_d_card(
         article_id=article_id,
@@ -2311,18 +2299,6 @@ def post_dispatch_preview(
                 article_id, p, err,
             )
         info[p] = slot
-
-    try:
-        text, kb = render.render_dispatch_preview(
-            article_id=article_id,
-            title=title,
-            selected_platforms=selected,
-            per_platform_info=info,
-            short_id=short_id,
-        )
-    except Exception as err:
-        _log.warning("render_dispatch_preview failed for %s: %s", article_id, err)
-        return None
 
     # tg send removed (Phase 3 Wave B): dispatch-preview was a TG-only
     # 2-step UI overlay on the Gate D card; Lark surface skips this stage
@@ -2484,15 +2460,27 @@ def post_publish_dispatch(
                 "reason": "package.md missing after 2 attempts",
             })
 
-    summary_md, retry_kb, retry_sid = render.render_dispatch_summary(
-        article_id=article_id,
-        results=dispatch_results,
-    )
+    failed_platforms = [
+        str(r.get("platform") or "?")
+        for r in dispatch_results
+        if r.get("status") == "failed"
+    ]
+    retry_sid: str | None = None
+    if failed_platforms:
+        retry_sid = _sid.register(
+            gate="D",
+            article_id=article_id,
+            ttl_hours=12,
+            extra={"failed": list(failed_platforms)},
+        )
 
-    # Q7: 摘要超长保护 + dispatch_results.json attach
-    SUMMARY_LIMIT = 3500  # TG 4096 限, 留 buffer
+    # Q7: 摘要超长保护 + dispatch_results.json attach. Length probe is now
+    # against the JSON-serialized results (the TG-formatted summary that
+    # used to feed this check is gone; the artifact-write trigger still
+    # honors the same operator intent: long results spill to disk).
+    SUMMARY_LIMIT = 3500
     results_path: Path | None = None
-    estimated_len = len(summary_md)
+    estimated_len = len(json.dumps(dispatch_results, ensure_ascii=False))
     if estimated_len > SUMMARY_LIMIT:
         try:
             results_path = (
@@ -2518,17 +2506,6 @@ def post_publish_dispatch(
         # tg send removed (Phase 3 Wave B): "summary too long" operator
         # nudge no longer fires; the dispatch_results.json artifact is
         # still written for downstream readers.
-
-        truncated_results = []
-        for r in dispatch_results:
-            rcopy = dict(r)
-            if rcopy.get("reason") and len(rcopy["reason"]) > 100:
-                rcopy["reason"] = rcopy["reason"][:97] + "..."
-            truncated_results.append(rcopy)
-        summary_md, retry_kb, retry_sid = render.render_dispatch_summary(
-            article_id=article_id,
-            results=truncated_results,
-        )
 
     # tg sends removed (Phase 3 Wave B): dispatch summary text +
     # dispatch_results.json document were the TG operator surface; Lark
@@ -2674,15 +2651,25 @@ def post_publish_retry(
     publish_exit = (res.returncode if res else None)
 
     dispatch_results = _collect_dispatch_results(article_id, failed_platforms)
-    summary_md, retry_kb, retry_sid = render.render_dispatch_summary(
-        article_id=article_id,
-        results=dispatch_results,
-    )
+    still_failed = [
+        str(r.get("platform") or "?")
+        for r in dispatch_results
+        if r.get("status") == "failed"
+    ]
+    retry_sid: str | None = None
+    if still_failed:
+        retry_sid = _sid.register(
+            gate="D",
+            article_id=article_id,
+            ttl_hours=12,
+            extra={"failed": list(still_failed)},
+        )
 
-    # Q7: 摘要超长保护 + dispatch_results.json attach
+    # Q7: 摘要超长保护 + dispatch_results.json attach. Length probe is now
+    # against the JSON-serialized results (TG summary string is gone).
     SUMMARY_LIMIT = 3500
     results_path: Path | None = None
-    estimated_len = len(summary_md)
+    estimated_len = len(json.dumps(dispatch_results, ensure_ascii=False))
     if estimated_len > SUMMARY_LIMIT:
         try:
             results_path = (
@@ -2708,17 +2695,6 @@ def post_publish_retry(
 
         # tg send removed (Phase 3 Wave B): "summary too long" nudge
         # was a TG-only operator surface.
-
-        truncated_results = []
-        for r in dispatch_results:
-            rcopy = dict(r)
-            if rcopy.get("reason") and len(rcopy["reason"]) > 100:
-                rcopy["reason"] = rcopy["reason"][:97] + "..."
-            truncated_results.append(rcopy)
-        summary_md, retry_kb, retry_sid = render.render_dispatch_summary(
-            article_id=article_id,
-            results=truncated_results,
-        )
 
     # tg sends removed (Phase 3 Wave B): retry summary + results.json
     # document no longer pushed to TG; the file is still on disk for
@@ -2791,10 +2767,7 @@ def post_publish_digest() -> dict[str, Any] | None:
     if not items:
         return None
 
-    try:
-        text = render.render_publish_digest(items)
-        _ = text  # tg send removed (Phase 3 Wave B); Lark digest path TBD
-        return {"count": len(items), "items": items}
-    except Exception as err:
-        _log.warning("post_publish_digest render failed: %s", err)
-        return None
+    # tg send removed (Phase 3 Wave B); Lark digest path TBD. The renderer
+    # is gone with render.py; we just return the items list so future Lark
+    # wiring can format on its own surface.
+    return {"count": len(items), "items": items}

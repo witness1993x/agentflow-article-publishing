@@ -16,7 +16,6 @@ from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
 from agentflow.agent_d2 import image_generator
-from agentflow.agent_review import render as review_render
 from agentflow.agent_review import state as review_state
 from agentflow.agent_review import daemon as review_daemon
 from agentflow.agent_review import short_id as review_short_id
@@ -825,18 +824,6 @@ class TopicProfileIntentTests(AgentflowHomeTestCase):
         ]
         self.assertEqual(len(profile_events), 1)
         self.assertEqual(profile_events[0]["payload"]["profile_id"], "uniswap")
-
-    def test_profile_setup_question_prefers_collected_brand_display(self) -> None:
-        text = review_render.render_profile_setup_question(
-            profile_id="uniswap-test",
-            display_name="Uniswap",
-            step_label="Do",
-            prompt="请输入 Do 规则。",
-            step_index=5,
-            total_steps=9,
-        )
-        self.assertIn("*Profile*  Uniswap", text)
-        self.assertIn("*Profile ID*  `uniswap\\-test`", text)
 
     def test_hotspots_creates_learning_suggestion_and_passes_panel_context(self) -> None:
         runner = CliRunner()
@@ -1881,49 +1868,6 @@ class MediumWorkflowTests(AgentflowHomeTestCase):
         self.assertEqual(gate_history[-1]["decision"], "medium_package_ready")
         self.assertEqual(len(gate_history), 2)
 
-    def test_dispatch_summary_treats_medium_manual_as_non_failed(self) -> None:
-        text, retry_kb, retry_sid = review_render.render_dispatch_summary(
-            article_id="article_medium_manual",
-            results=[
-                {
-                    "platform": "medium",
-                    "status": "manual",
-                    "url": None,
-                    "reason": "browser paste required",
-                }
-            ],
-        )
-
-        self.assertIn("medium", text)
-        self.assertIn("browser paste required", text)
-        self.assertEqual(retry_kb, {})
-        self.assertIsNone(retry_sid)
-
-    def test_dispatch_summary_registers_retry_for_failed_platforms(self) -> None:
-        text, retry_kb, retry_sid = review_render.render_dispatch_summary(
-            article_id="article_retry_failed",
-            results=[
-                {
-                    "platform": "ghost_wordpress",
-                    "status": "failed",
-                    "url": None,
-                    "reason": "timeout",
-                }
-            ],
-        )
-
-        self.assertIn("ghost\\_wordpress", text)
-        self.assertIsNotNone(retry_sid)
-        self.assertEqual(
-            retry_kb["inline_keyboard"][0][0]["callback_data"],
-            f"D:retry:{retry_sid}",
-        )
-        entry = review_short_id.resolve(retry_sid or "")
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["gate"], "D")
-        self.assertEqual(entry["article_id"], "article_retry_failed")
-        self.assertEqual(entry["extra"]["failed"], ["ghost_wordpress"])
-
     def test_medium_package_falls_back_to_draft_and_flags_unresolved_images(self) -> None:
         article_id = "article_medium_fallback"
         draft = DraftOutput(
@@ -1966,108 +1910,6 @@ class MediumWorkflowTests(AgentflowHomeTestCase):
         self.assertTrue(
             any("unresolved image placeholders" in item for item in checklist_payload["blockers"])
         )
-
-
-class TgMenuV103Tests(AgentflowHomeTestCase):
-    """v1.0.3 Telegram menu enrichment — orphan callback wiring, unified
-    button labels, and the 8-command global slash menu."""
-
-    def test_gate_b_card_uses_unified_label_set(self) -> None:
-        text, kb, _sid = review_render.render_gate_b(
-            article_id="article_label_b",
-            title="Label test",
-            subtitle=None,
-            publisher_brand="brand",
-            voice="first_party_brand",
-            word_count=100,
-            section_count=2,
-            compliance_score=0.9,
-            tags=[],
-            self_check_lines=[],
-            opening_excerpt="hello",
-        )
-        labels = {
-            btn["text"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        }
-        callbacks = [
-            btn["callback_data"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        ]
-        self.assertIn("✅ 通过", labels)
-        self.assertIn("🚫 拒绝", labels)
-        # Gate B v1.0.3 requirements: diff + defer wired as buttons
-        self.assertTrue(any(cb.startswith("B:diff:") for cb in callbacks))
-        self.assertTrue(
-            any(cb.startswith("B:defer:") and "hours=2" in cb for cb in callbacks)
-        )
-
-    def test_gate_c_card_uses_unified_label_set_and_full_button(self) -> None:
-        text, kb, _sid = review_render.render_gate_c(
-            article_id="article_label_c",
-            title="Cover label",
-            image_mode="cover-only",
-            cover_style="cover",
-            cover_size="2048x1024",
-            self_check_lines=[],
-            brand_overlay_status="ON",
-            brand_overlay_anchor="bottom_left",
-            inline_body_count=0,
-        )
-        labels = {
-            btn["text"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        }
-        callbacks = [
-            btn["callback_data"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        ]
-        self.assertIn("✅ 通过", labels)
-        self.assertIn("🚫 拒绝", labels)
-        self.assertTrue(any(cb.startswith("C:full:") for cb in callbacks))
-        self.assertTrue(
-            any(cb.startswith("C:defer:") and "hours=2" in cb for cb in callbacks)
-        )
-
-    def test_gate_a_card_renders_expand_and_defer_buttons(self) -> None:
-        text, kb, _sid = review_render.render_gate_a(
-            publisher_brand="brand",
-            target_series="A",
-            candidates=[
-                {"title": "T1", "angle": "a", "score": "0.5", "age_h": "1.0", "source": "s"},
-            ],
-            batch_path=str(self.home / "batch.json"),
-        )
-        callbacks = [
-            btn["callback_data"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        ]
-        self.assertTrue(any(cb.startswith("A:expand:") for cb in callbacks))
-        self.assertTrue(
-            any(cb.startswith("A:defer:") and "hours=4" in cb for cb in callbacks)
-        )
-
-    def test_gate_d_confirm_uses_unified_pass_label(self) -> None:
-        sid = review_short_id.register(gate="D", article_id="art_d_label")
-        text, kb = review_render.render_gate_d(
-            article_id="art_d_label",
-            title="Channel select label",
-            available=["medium", "twitter"],
-            selected=set(),
-            short_id=sid,
-        )
-        labels = {
-            btn["text"]
-            for row in kb["inline_keyboard"]
-            for btn in row
-        }
-        self.assertIn("✅ 通过", labels)
-        self.assertIn("🚫 拒绝", labels)
 
 
 class D1RecallFilterTests(AgentflowHomeTestCase):

@@ -16,6 +16,48 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.1] — 2026-05-10 — render.py removed + timeout-sweeper regression fix
+
+> v1.3.0 left `render.py` (802 lines, TG-Markdown + inline-keyboard
+> renderer) on disk because triggers.py's `_sid.register()` calls were
+> embedded inside each `render_X()`. This release refactors triggers.py
+> to call `_sid.register()` directly and deletes the module. While there,
+> a regression in `daemon.py`'s timeout sweeper (introduced by Phase 3
+> Wave C) is also fixed.
+
+### `render.py` removed (commit `87b1004`)
+
+- 15 `render.X(...)` callsites in `triggers.py` refactored to direct
+  `_sid.register(gate=..., article_id=..., ttl_hours=...)` calls per
+  gate. The text/keyboard outputs of the deleted render functions had
+  been unused locals since Phase 3 Wave B. Per-gate TTL helpers
+  (`_gate_b_ttl_hours`, `_gate_c_ttl_hours`) inlined into triggers.py.
+- `export_body_markdown(article_id)` inlined as `_export_body_markdown`
+  in triggers.py (only consumer was the Lark draft fan-out).
+- 7 tests + the `TgMenuV103Tests` class in `test_v02_workflows.py`
+  deleted — they asserted on rendered Markdown content the runtime no
+  longer produces. `from agentflow.agent_review import render as
+  review_render` import removed.
+- `render.py` deleted (-802 lines).
+
+### `daemon._scan_timeouts` regression fix (same commit)
+
+- `_safe_send` was reduced to a no-op (`return False`) in Phase 3 Wave
+  C, but the surrounding `if _safe_send(text): timeout_state.mark_first_pinged(aid)`
+  guards meant the timeout state was never marked, so the sweeper
+  re-fired the same audit log every 60 seconds for every pending
+  article. Fixed: the sweeper now records timeout state + audit
+  unconditionally and runs the auto-skip / auto-cancel transitions
+  where applicable. The active Lark gate card is already on the
+  operator's screen — re-pinging via daemon-side text would just spam.
+- `_safe_send` and `_title_of` shims deleted along with all 5
+  `_render.escape_md2(...)` callsites in daemon.py.
+
+### Net diff
+
+`+142 / -1196` across 4 files. Test suite: 296/296 passing clean
+(303 → 296 after deleting 7 review_render tests).
+
 ## [1.3.0] — 2026-05-10 — Phase 3 — Telegram surface removed
 
 > The user's original 痛点 ("上下文太多导致 daemon 判定一直会走 tg bot")
