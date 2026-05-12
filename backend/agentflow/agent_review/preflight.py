@@ -182,25 +182,24 @@ def _probe(
 
 
 def check_telegram(*, fresh: bool = False) -> CheckResult:
+    """Phase 3: Telegram surface is removed. This check now reports the env
+    var status only — the doctor matrix still surfaces it for migration
+    visibility, but no remote probe is attempted because the SDK has been
+    deleted. ``fresh`` is accepted for signature compatibility.
+    """
+    del fresh  # unused — kept for API symmetry with other checkers
     token = _env_present("TELEGRAM_BOT_TOKEN")
     cr = CheckResult(name="Telegram bot", env_var="TELEGRAM_BOT_TOKEN")
     if not token:
-        cr.message = "TELEGRAM_BOT_TOKEN not set"
+        cr.message = "TELEGRAM_BOT_TOKEN not set (Phase 3: TG support removed)"
         return cr
     cr.present = True
-
-    def _probe_fn() -> tuple[bool, str, dict[str, Any] | None]:
-        from agentflow.agent_review import tg_client
-        me = tg_client.get_me()
-        username = me.get("username")
-        return True, f"@{username}", {"username": username, "id": me.get("id")}
-
-    valid, msg, extra = _probe(
-        "telegram", _probe_fn, fresh=fresh, token_fp=_token_fp(token),
+    cr.valid = None  # neither pass nor fail — we no longer probe.
+    cr.message = (
+        "TELEGRAM_BOT_TOKEN is set but the Telegram surface was removed in "
+        "Phase 3. Unset the variable to clear this row; review now goes "
+        "through Lark exclusively."
     )
-    cr.valid = valid
-    cr.message = msg
-    cr.extra = extra
     return cr
 
 
@@ -627,9 +626,12 @@ def all_checks(*, fresh: bool = False) -> list[CheckResult]:
 
 
 def critical_for_review_daemon(*, fresh: bool = False) -> list[CheckResult]:
-    if _bool_env("AGENTFLOW_LARK_APP_PRIMARY"):
-        return [check_lark_app_primary()]
-    return [check_telegram(fresh=fresh), check_review_chat_id()]
+    """Phase 3: review-daemon is Lark-only. The legacy TG branch is gone —
+    operators must set ``AGENTFLOW_LARK_APP_PRIMARY=true`` and configure the
+    event webhook. ``fresh`` is accepted for signature compatibility.
+    """
+    del fresh  # unused
+    return [check_lark_app_primary()]
 
 
 def critical_for_hotspots(*, fresh: bool = False) -> list[CheckResult]:

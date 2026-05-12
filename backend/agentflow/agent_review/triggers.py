@@ -35,33 +35,12 @@ from agentflow.shared.logger import get_logger
 _log = get_logger("agent_review.triggers")
 
 
-# L-1 (Phase 2 closure): lazy / deletion-tolerant tg_client.
-# In Lark-only deployments, tg_client.py may be removed (Phase 3) or its
-# transitive dep `requests` may be absent. The 29 tg_client.* callsites in
-# this module are all gated by `chat_id is not None` (which is None when
-# `_tg_configured()` is False), so they don't execute in Lark-only mode.
-# The import here just needs to tolerate absence at module-load time.
-#
-# When the SDK is unreachable, we expose a deny-stub: callsites that
-# accidentally bypass the chat_id guard will RAISE (loudly), not silently
-# no-op. This way bugs are visible instead of producing cards into the void.
-class _TgClientUnavailable:
-    """Sentinel for 'tg_client SDK absent'. Any attribute access raises."""
-
-    def __getattr__(self, name: str) -> Any:
-        def _denied(*args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError(
-                f"tg_client.{name} called in Lark-only deployment "
-                "where the TG SDK is unavailable. Upstream chat_id "
-                "guard is missing or not enforced."
-            )
-        return _denied
-
-
-try:
-    from agentflow.agent_review import tg_client  # noqa: F401
-except ImportError:  # pragma: no cover — exercised by test_no_tg_runtime.py
-    tg_client = _TgClientUnavailable()  # type: ignore[assignment]
+# Phase 3 Wave D: tg_client.py is deleted. The TG sentinel + lazy import
+# scaffolding from Phase 2 (L-1) is no longer needed; nothing in this
+# module imports tg_client. ``_tg_configured()`` is preserved as a
+# back-compat predicate (returns False everywhere now that the env var
+# isn't read by any production path), so legacy callers that branch on
+# "is TG live?" simply never enter the TG path.
 
 
 def _tg_configured() -> bool:
@@ -1057,17 +1036,13 @@ def post_gate_a(
         worth_reviewing=worth_reviewing,
         config_suggestions=config_suggestions or [],
     )
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-        _sid.attach_message_id(sid, sent.get("message_id"))
     _emit_lark_gate_a_card(
         short_id=sid,
         batch_path=str(batch_path),
         publisher_brand=publisher_brand,
         target_series=target_series,
         candidates=candidates,
-        telegram_message_id=sent.get("message_id"),
+        telegram_message_id=None,
     )
 
     # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).
@@ -1089,7 +1064,7 @@ def post_gate_a(
     return {
         "gate": "A",
         "short_id": sid,
-        "tg_message_id": sent.get("message_id"),
+        "tg_message_id": None,
         "candidate_count": len(candidates),
     }
 
@@ -1114,9 +1089,6 @@ def post_profile_setup_prompt(
         missing_fields=missing_fields,
         session_path=session_path,
     )
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
     _emit_lark_review_card(
         "review.profile_setup_card",
         article_id=profile_id,
@@ -1129,13 +1101,13 @@ def post_profile_setup_prompt(
             "missing_fields": list(missing_fields),
             "session_path": session_path,
             "text": text,
-            "telegram_message_id": sent.get("message_id"),
+            "telegram_message_id": None,
         },
     )
     return {
         "gate": "P",
         "short_id": sid,
-        "tg_message_id": sent.get("message_id"),
+        "tg_message_id": None,
         "profile_id": profile_id,
         "missing_fields": list(missing_fields),
     }
@@ -1157,37 +1129,16 @@ _DRAFT_PATH = [
 def _revoke_prior_card_keyboard(
     gate: str, article_id: str, chat_id: int | str,
 ) -> None:
-    """v1.0.16: when a fresh Gate B/C/D card is about to land, clear the
-    inline keyboard on any prior active card for the same (gate,
-    article_id). The operator's TG history then has exactly one
-    interactable card per gate, eliminating the "which card do I click,
-    the v1 or v2?" confusion the autopost feedback flagged. Also
-    revokes the old short_id so callbacks against the now-buttonless
-    card surface the soft-revoke "✓ 已处理 (重复点击)" branch instead
-    of executing twice.
+    """Phase 3 Wave B: TG-only stale-keyboard cleanup retired.
+
+    Historically (v1.0.16) this cleared the inline keyboard on any prior
+    active TG card for the same (gate, article_id) so the operator never
+    saw two interactable cards. With TG sends removed, there is nothing
+    to clear. Signature is preserved because Gate B/C/D callsites and a
+    legacy unit test still reference this function; Wave D will delete
+    it entirely.
     """
-    try:
-        existing = _sid.find_active(gate=gate, article_id=article_id)
-    except Exception:
-        existing = None
-    if not existing:
-        return
-    old_sid, entry = existing
-    old_message_id = entry.get("tg_message_id")
-    if old_message_id:
-        try:
-            tg_client.edit_message_reply_markup(
-                chat_id, int(old_message_id), reply_markup={},
-            )
-        except Exception as err:  # pragma: no cover — best-effort
-            _log.info(
-                "stale-card keyboard cleanup failed for %s/%s msg=%s: %s",
-                gate, article_id, old_message_id, err,
-            )
-    try:
-        _sid.revoke(old_sid)
-    except Exception:
-        pass
+    pass
 
 
 def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | None:
@@ -1329,19 +1280,10 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
         opening_excerpt=opening,
     )
 
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-        message_id = sent.get("message_id")
-        _sid.attach_message_id(sid, message_id)
-    else:
-        message_id = None
+    message_id: int | None = None
 
     body_doc = render.export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
-    if chat_id is not None:
-        tg_client.send_long_text(chat_id, render.escape_md2(body_raw))
-        tg_client.send_document(chat_id, body_doc, caption=None, parse_mode=None)
 
     # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
     # actionable — Gate B operations stay on TG. Gated by
@@ -1466,27 +1408,19 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
         _log.warning("locked-takeover render failed for %s: %s", article_id, err)
         return None
 
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        try:
-            sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-        except Exception as err:
-            _log.warning("locked-takeover send failed for %s: %s", article_id, err)
-            if not _lark_app_primary():
-                return None
     _emit_lark_locked_takeover_card(
         article_id=article_id,
         short_id=sid,
         title=title,
         rewrite_count=rewrite_count,
-        telegram_message_id=sent.get("message_id"),
+        telegram_message_id=None,
     )
 
     return {
         "gate": "L",
         "article_id": article_id,
         "short_id": sid,
-        "tg_message_id": sent.get("message_id"),
+        "tg_message_id": None,
         "rewrite_count": rewrite_count,
     }
 
@@ -1546,25 +1480,9 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
         except Exception as err:
             _log.warning("critique LLM call failed for %s: %s", article_id, err)
 
-    # Compose + send the critique payload (graceful degradation when missing).
-    try:
-        if critique_md or suggestions:
-            lines = ["🧠 *LLM Critique*", "", f"*Article*  `{render.escape_md2(article_id)}`"]
-            if critique_md:
-                lines.extend(["", "*Critique*", render.escape_md2(critique_md)])
-            if suggestions:
-                lines.extend(["", "*Suggestions*"])
-                for s in suggestions[:10]:
-                    lines.append("• " + render.escape_md2(s))
-            tg_client.send_message(chat_id, "\n".join(lines))
-        else:
-            tg_client.send_message(
-                chat_id,
-                "🧠 *LLM Critique*\n\n"
-                + render.escape_md2("(LLM critique 不可用 — 直接进入手动接管)"),
-            )
-    except Exception as err:
-        _log.warning("critique send failed for %s: %s", article_id, err)
+    # tg send removed (Phase 3 Wave B): Lark twin not yet wired for this
+    # legacy critique surface; Wave C deletes the daemon TG handlers that
+    # invoke post_critique and Wave D removes this function entirely.
 
     # Register pending_edits with gate=L + ttl=999999 so the next reply is
     # parsed as an edit instruction even hours later. uid is derived from
@@ -1590,18 +1508,9 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
     except Exception as err:
         _log.warning("critique pending_edits register failed for %s: %s", article_id, err)
 
-    # Always send the guidance message so the operator knows how to reply.
-    try:
-        tg_client.send_message(
-            chat_id,
-            "✏️ Manual takeover 编辑模式 \\(无 TTL\\)\\. 请回复:\n"
-            "`<scope> <改写指令>`\n"
-            "scope 可以是: `title` / `opening` / `closing` / 第几节的整数 \\(0\\-based\\)\n"
-            "例: `title 标题再尖锐一点` / `2 第二节改得更口语化`",
-            parse_mode="MarkdownV2",
-        )
-    except Exception as err:
-        _log.warning("critique guidance send failed for %s: %s", article_id, err)
+    # tg send removed (Phase 3 Wave B): guidance message previously
+    # rendered the manual-takeover edit syntax — Lark surface uses
+    # interactive cards rather than free-form chat instructions.
 
     return {
         "gate": "L",
@@ -1679,17 +1588,9 @@ def mark_published(
                 "mark_published: %s already marked on %s (skip duplicate)",
                 article_id, platform,
             )
-            if _tg_configured():
-                chat_id = _daemon.get_review_chat_id()
-                if chat_id is not None:
-                    try:
-                        tg_client.send_message(
-                            chat_id,
-                            f"⚠ {platform} 已 mark 过 ({article_id}), 不重复 append",
-                            parse_mode=None,
-                        )
-                    except Exception:
-                        pass
+            # tg send removed (Phase 3 Wave B): duplicate-mark warning
+            # was a TG-only operator nudge; Lark surface relies on the
+            # return dict {"status": "duplicate_skipped"} for the caller.
             existing_urls = meta_pre.get("published_url")
             if isinstance(existing_urls, dict):
                 existing_url_for_plat = existing_urls.get(platform)
@@ -1765,23 +1666,10 @@ def mark_published(
     except _state.StateError as err:
         _log.warning("state transition skipped: %s", err)
 
-    # 4. TG confirmation (best-effort, never raises)
+    # 4. TG confirmation removed (Phase 3 Wave B): Lark surface mirrors
+    # publish events through lark_webhook.notify_publish_ready /
+    # notify_dispatch_result; no TG card needs minting here.
     tg_msg_id: int | None = None
-    if _tg_configured():
-        chat_id = _daemon.get_review_chat_id()
-        if chat_id is not None:
-            try:
-                title = meta.get("title") or "(untitled)"
-                text = (
-                    f"📌 *Published*  ·  {render.escape_md2(platform)}\n\n"
-                    f"*{render.escape_md2(title)}*\n"
-                    f"{render.escape_md2(published_url)}\n\n"
-                    f"article\\_id: `{render.escape_md2(article_id)}`"
-                )
-                sent = tg_client.send_message(chat_id, text)
-                tg_msg_id = int(sent.get("message_id") or 0) or None
-            except Exception as err:  # pragma: no cover
-                _log.warning("publish-mark TG post failed: %s", err)
 
     return {
         "article_id": article_id,
@@ -1995,15 +1883,11 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
         warnings=warnings,
     )
 
+    # tg sends removed (Phase 3 Wave B): cover photo, caption, and
+    # package.md attachment are no longer pushed to a TG chat. The Lark
+    # publish-ready notification below carries the operator nudge; the
+    # package path is still returned to callers for downstream pickup.
     sent: dict[str, Any] = {}
-    if chat_id is not None:
-        if cover_path and Path(cover_path).exists():
-            sent = tg_client.send_photo(
-                chat_id, cover_path, caption=caption, reply_markup=kb,
-            )
-        else:
-            sent = tg_client.send_message(chat_id, caption, reply_markup=kb)
-        tg_client.send_document(chat_id, package_path, parse_mode=None)
 
     # State: image_approved → ready_to_publish. `af medium-package` may have
     # already advanced the state while generating package.md, so avoid a
@@ -2087,13 +1971,7 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
         brand_overlay_anchor="bottom_left",
         inline_body_count=0,
     )
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        sent = tg_client.send_photo(chat_id, summary["cover_path"], caption=caption, reply_markup=kb)
-        message_id = sent.get("message_id")
-        _sid.attach_message_id(sid, message_id)
-    else:
-        message_id = None
+    message_id: int | None = None
     _emit_lark_gate_c_card(
         article_id=article_id,
         short_id=sid,
@@ -2166,29 +2044,17 @@ def post_image_gate_picker(article_id: str) -> dict[str, Any] | None:
         )
         return None
 
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        try:
-            sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-        except Exception as err:  # pragma: no cover
-            _log.warning(
-                "image-gate picker send_message failed for %s: %s", article_id, err
-            )
-            if not _lark_app_primary():
-                return None
-        else:
-            _sid.attach_message_id(sid, sent.get("message_id"))
     _emit_lark_image_picker_card(
         article_id=article_id,
         short_id=sid,
         title=title,
-        telegram_message_id=sent.get("message_id"),
+        telegram_message_id=None,
     )
     return {
         "gate": "I",
         "article_id": article_id,
         "short_id": sid,
-        "tg_message_id": sent.get("message_id"),
+        "tg_message_id": None,
     }
 
 
@@ -2350,13 +2216,7 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
         selected=set(selected),
         short_id=sid,
     )
-    sent: dict[str, Any] = {}
-    if chat_id is not None:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-        message_id = sent.get("message_id")
-        _sid.attach_message_id(sid, message_id)
-    else:
-        message_id = None
+    message_id: int | None = None
     _emit_lark_gate_d_card(
         article_id=article_id,
         short_id=sid,
@@ -2464,18 +2324,15 @@ def post_dispatch_preview(
         _log.warning("render_dispatch_preview failed for %s: %s", article_id, err)
         return None
 
-    try:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    except Exception as err:
-        _log.warning("dispatch preview send failed for %s: %s", article_id, err)
-        return None
-
+    # tg send removed (Phase 3 Wave B): dispatch-preview was a TG-only
+    # 2-step UI overlay on the Gate D card; Lark surface skips this stage
+    # and dispatches directly from the Gate D confirm action.
     return {
         "gate": "D",
         "stage": "dispatch_preview",
         "article_id": article_id,
         "short_id": short_id,
-        "tg_message_id": sent.get("message_id"),
+        "tg_message_id": None,
         "selected": list(selected),
     }
 
@@ -2519,17 +2376,10 @@ def post_publish_dispatch(
         _log.warning("publish dispatch with empty platforms list for %s", article_id)
         return None
 
-    # Q3: 入口 ETA 自适应通知
+    # Q3 (Phase 3 Wave B): ETA notification TG send removed; Lark surface
+    # exposes the same estimate via lark_webhook in dispatch fan-outs.
     eta = _estimate_eta_seconds(platforms)
-    if chat_id is not None:
-        try:
-            tg_client.send_message(
-                chat_id,
-                f"⏳ 分发中... 预计 ~{eta}s ({len(platforms)} 平台 ETA)\n\n云端实际可能浮动。",
-                parse_mode=None,
-            )
-        except Exception:
-            pass
+    _ = eta  # retain computation for future Lark ETA wiring
 
     env = os.environ.copy()
     results: dict[str, Any] = {}
@@ -2544,15 +2394,8 @@ def post_publish_dispatch(
     # Q2: preview 失败 → 阻断 publish + 通知 operator
     if res is None or res.returncode != 0:
         err_tail = (res.stderr if res else "").strip()[-500:] if res else "(timeout/oserr)"
-        if chat_id is not None:
-            try:
-                tg_client.send_message(
-                    chat_id,
-                    f"❌ preview 失败, dispatch 已阻断  ·  article={article_id}\n\n{err_tail}",
-                    parse_mode=None,
-                )
-            except Exception:
-                pass
+        # tg send removed (Phase 3 Wave B): preview-failure operator
+        # nudge now flows exclusively through lark_webhook below.
         try:
             from agentflow.shared import lark_webhook
             lark_webhook.notify_spawn_failure(
@@ -2672,15 +2515,9 @@ def post_publish_dispatch(
             _log.warning("dispatch_results.json write failed: %s", err)
             results_path = None
 
-        if chat_id is not None:
-            try:
-                tg_client.send_message(
-                    chat_id,
-                    f"ℹ 摘要超长 ({estimated_len} 字符)，完整结果见附件 dispatch_results.json",
-                    parse_mode=None,
-                )
-            except Exception:
-                pass
+        # tg send removed (Phase 3 Wave B): "summary too long" operator
+        # nudge no longer fires; the dispatch_results.json artifact is
+        # still written for downstream readers.
 
         truncated_results = []
         for r in dispatch_results:
@@ -2693,20 +2530,9 @@ def post_publish_dispatch(
             results=truncated_results,
         )
 
-    if chat_id is not None:
-        try:
-            tg_client.send_message(
-                chat_id, summary_md, reply_markup=retry_kb if retry_kb else None,
-            )
-        except Exception as err:  # pragma: no cover
-            _log.warning("dispatch summary TG send failed: %s", err)
-
-    if results_path and results_path.exists():
-        if chat_id is not None:
-            try:
-                tg_client.send_document(chat_id, results_path, parse_mode=None)
-            except Exception as err:  # pragma: no cover
-                _log.warning("dispatch_results.json send_document failed: %s", err)
+    # tg sends removed (Phase 3 Wave B): dispatch summary text +
+    # dispatch_results.json document were the TG operator surface; Lark
+    # mirror is emitted via lark_webhook.notify_dispatch_result below.
 
     if retry_sid:
         results["retry_short_id"] = retry_sid
@@ -2833,16 +2659,10 @@ def post_publish_retry(
         _log.warning("publish retry with empty platform list for %s", article_id)
         return None
 
-    # Q3: 入口 ETA 自适应通知
+    # Q3 (Phase 3 Wave B): retry ETA TG send removed; computation kept
+    # in case future Lark wiring wants to surface it.
     eta = _estimate_eta_seconds(failed_platforms)
-    try:
-        tg_client.send_message(
-            chat_id,
-            f"⏳ 重试中... 预计 ~{eta}s ({len(failed_platforms)} 平台 ETA)\n\n云端实际可能浮动。",
-            parse_mode=None,
-        )
-    except Exception:
-        pass
+    _ = eta
 
     env = os.environ.copy()
     # Q4: 自适应 publish timeout
@@ -2886,14 +2706,8 @@ def post_publish_retry(
             _log.warning("dispatch_results.json (retry) write failed: %s", err)
             results_path = None
 
-        try:
-            tg_client.send_message(
-                chat_id,
-                f"ℹ 摘要超长 ({estimated_len} 字符)，完整结果见附件 dispatch_results.json",
-                parse_mode=None,
-            )
-        except Exception:
-            pass
+        # tg send removed (Phase 3 Wave B): "summary too long" nudge
+        # was a TG-only operator surface.
 
         truncated_results = []
         for r in dispatch_results:
@@ -2906,18 +2720,9 @@ def post_publish_retry(
             results=truncated_results,
         )
 
-    try:
-        tg_client.send_message(
-            chat_id, summary_md, reply_markup=retry_kb if retry_kb else None,
-        )
-    except Exception as err:  # pragma: no cover
-        _log.warning("retry summary TG send failed: %s", err)
-
-    if results_path and results_path.exists():
-        try:
-            tg_client.send_document(chat_id, results_path, parse_mode=None)
-        except Exception as err:  # pragma: no cover
-            _log.warning("dispatch_results.json (retry) send_document failed: %s", err)
+    # tg sends removed (Phase 3 Wave B): retry summary + results.json
+    # document no longer pushed to TG; the file is still on disk for
+    # any caller that wants it.
 
     return {
         "gate": "D",
@@ -2988,8 +2793,8 @@ def post_publish_digest() -> dict[str, Any] | None:
 
     try:
         text = render.render_publish_digest(items)
-        tg_client.send_message(chat_id, text, parse_mode="MarkdownV2")
+        _ = text  # tg send removed (Phase 3 Wave B); Lark digest path TBD
         return {"count": len(items), "items": items}
     except Exception as err:
-        _log.warning("post_publish_digest send failed: %s", err)
+        _log.warning("post_publish_digest render failed: %s", err)
         return None
