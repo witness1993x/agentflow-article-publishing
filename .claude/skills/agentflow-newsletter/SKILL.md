@@ -3,19 +3,19 @@ name: agentflow-newsletter
 description: |
   Turn an article draft (or a scratch topic) into a newsletter email, test-send to yourself, and fan out to subscribers via Resend.
 
-  TRIGGER: "/agentflow-newsletter", "af newsletter-*", "af notify", "newsletter", "email", "Resend", "邮件", "newsletter-correction".
+  TRIGGER: "/agentflow-newsletter", "blogflow newsletter-*", "blogflow notify", "af newsletter-*", "newsletter", "email", "Resend", "邮件", "newsletter-correction".
 
   SKIP for: modifying the EmailPublisher internals (agent_d4/publishers/email.py); editing Resend audience configuration (in .env); modifying prompts/email_newsletter.md.
 ---
 
 # agentflow-newsletter — ship the email version of a post
 
-Wraps `af newsletter-draft`, `af newsletter-show`, `af newsletter-edit`, `af newsletter-preview-send`, `af newsletter-send`, `af newsletter-correction`, and `af newsletter-list-show`. Goal: deliver `<article_id>` (or a new scratch topic) as a newsletter, with one hard stop before the irreversible blast.
+Wraps `blogflow newsletter-draft`, `blogflow newsletter-show`, `blogflow newsletter-edit`, `blogflow newsletter-preview-send`, `blogflow newsletter-send`, `blogflow newsletter-correction`, and `blogflow newsletter-list-show`. Goal: deliver `<article_id>` (or a new scratch topic) as a newsletter, with one hard stop before the irreversible blast.
 
 **Platform status (v0.1):**
 - Provider: Resend (`https://api.resend.com/emails`). Requires `RESEND_API_KEY`, `NEWSLETTER_FROM_EMAIL`, and either `NEWSLETTER_AUDIENCE_ID` (recommended) or an explicit recipient list.
 - Mock mode (`MOCK_LLM=true`) works end-to-end without any key — safe for dry runs.
-- Rollback: **emails cannot be un-sent.** If the user says "undo", use `af newsletter-correction` to send a manual follow-up correction to the audience.
+- Rollback: **emails cannot be un-sent.** If the user says "undo", use `blogflow newsletter-correction` to send a manual follow-up correction to the audience.
 
 ## Input
 
@@ -33,13 +33,13 @@ Prefix every command with `PYTHONPATH=.`.
 ## Step 1 — derive / create the draft
 
 ```bash
-PYTHONPATH=. af newsletter-draft <article_id> --json
+PYTHONPATH=. blogflow newsletter-draft <article_id> --json
 ```
 
 or scratch mode:
 
 ```bash
-PYTHONPATH=. af newsletter-draft --from-scratch "this week in agent infra" --json
+PYTHONPATH=. blogflow newsletter-draft --from-scratch "this week in agent infra" --json
 ```
 
 Capture `newsletter_id` from the JSON output. Tell the user: "drafted `<newsletter_id>` — subject `<S>` (`<N>` chars)."
@@ -47,7 +47,7 @@ Capture `newsletter_id` from the JSON output. Tell the user: "drafted `<newslett
 ## Step 2 — show the draft
 
 ```bash
-PYTHONPATH=. af newsletter-show <newsletter_id>
+PYTHONPATH=. blogflow newsletter-show <newsletter_id>
 ```
 
 Read `html_body` length, `plain_text_body` length, subject, preview_text. Print the first ~20 lines of plain text so the user can skim.
@@ -57,7 +57,7 @@ Read `html_body` length, `plain_text_body` length, subject, preview_text. Print 
 Let the user direct edits by section. Sections are a fixed enum: `subject | preview_text | intro | body | closing`.
 
 ```bash
-PYTHONPATH=. af newsletter-edit <newsletter_id> --section intro --command "make it warmer, drop the jargon"
+PYTHONPATH=. blogflow newsletter-edit <newsletter_id> --section intro --command "make it warmer, drop the jargon"
 ```
 
 Loop until the user says "good" or "looks fine" or equivalent.
@@ -95,7 +95,7 @@ Then pause: "Proceed to test-send to yourself? (yes / edit first / cancel)"
 ## Step 5 — test-send to self
 
 ```bash
-PYTHONPATH=. af newsletter-preview-send <newsletter_id> --to self --json
+PYTHONPATH=. blogflow newsletter-preview-send <newsletter_id> --to self --json
 ```
 
 If `MOCK_LLM=true`, this returns a fake `resend_id` and no email goes out — say so explicitly.
@@ -122,13 +122,13 @@ Only "yes send" (exact, lowercase) proceeds. Anything else (including "yes", "se
 Optionally offer `--dry-run` first:
 
 ```bash
-PYTHONPATH=. af newsletter-send <newsletter_id> --dry-run --json
+PYTHONPATH=. blogflow newsletter-send <newsletter_id> --dry-run --json
 ```
 
 ## Step 7 — send for real
 
 ```bash
-PYTHONPATH=. af newsletter-send <newsletter_id> --json
+PYTHONPATH=. blogflow newsletter-send <newsletter_id> --json
 ```
 
 On success, parse `platform_post_id` (Resend id). Tell the user: "newsletter `<id>` sent — Resend id `<resend_id>`. Check the dashboard at https://resend.com/emails/<resend_id> for delivery stats."
@@ -141,38 +141,38 @@ On failure: show `failure_reason` and do NOT retry automatically. Ask the user t
 - Publish history: one line in `~/.agentflow/publish_history.jsonl` (platform `email_newsletter`).
 - Newsletter status: `~/.agentflow/newsletters/<id>/metadata.json` flips to `"status": "sent"` with `last_sent_at` + `last_platform_post_id`.
 
-Close with one line: "Newsletter `<newsletter_id>` archived. Use `af newsletter-list-show` anytime to see the full history."
+Close with one line: "Newsletter `<newsletter_id>` archived. Use `blogflow newsletter-list-show` anytime to see the full history."
 
 ## Correction flow — when the user says "undo" or "send a correction"
 
 Reminder: this does **not** retract the original email. It sends a new follow-up correction to the configured audience.
 
 1. Ask the user what needs correcting.
-2. Apply any edits first with `af newsletter-edit <newsletter_id> ...` so the stored draft reflects the corrected copy.
+2. Apply any edits first with `blogflow newsletter-edit <newsletter_id> ...` so the stored draft reflects the corrected copy.
 3. Offer a dry run:
 
 ```bash
-PYTHONPATH=. af newsletter-correction <newsletter_id> --dry-run --json
+PYTHONPATH=. blogflow newsletter-correction <newsletter_id> --dry-run --json
 ```
 
 4. Require an explicit confirmation: `yes send`.
 5. Then send:
 
 ```bash
-PYTHONPATH=. af newsletter-correction <newsletter_id> --json
+PYTHONPATH=. blogflow newsletter-correction <newsletter_id> --json
 ```
 
 On success, report the new Resend id and remind the user that the first email remains in subscribers' inboxes.
 
-## Notifications — `af notify`
+## Notifications — `blogflow notify`
 
-Out of the main workflow but useful for skills: `af notify "<message>" [--event <type>]` sends a one-paragraph system email to `NEWSLETTER_REPLY_TO`. Use this to signal completion of long-running jobs (hotspots scan, publish retries, credential rotation). `MOCK_LLM=true` mocks silently.
+Out of the main workflow but useful for skills: `blogflow notify "<message>" [--event <type>]` sends a one-paragraph system email to `NEWSLETTER_REPLY_TO`. Use this to signal completion of long-running jobs (hotspots scan, publish retries, credential rotation). `MOCK_LLM=true` mocks silently.
 
 ## NEVER
 
 - Never skip Step 4 (pre-send overview) unless the user explicitly says "just send".
 - Never accept any confirmation other than the literal string `yes send` for Step 6.
-- Never call `agentflow.agent_d4.publishers.email` directly — always via `af newsletter-*` or `af notify`.
+- Never call `agentflow.agent_d4.publishers.email` directly — always via `blogflow newsletter-*` or `blogflow notify`.
 - Never email a real audience from mock mode (the publisher short-circuits, so this is already impossible — don't work around it).
 
 ## MOCK_LLM

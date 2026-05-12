@@ -441,7 +441,7 @@ def render_image_gate_picker(
     """Returns (text, reply_markup, short_id).
 
     Sent after Gate B ✅ to prompt the user for image-gate mode. Soft prompt —
-    user may ignore this card and run ``af image-gate <aid> --mode <X>``
+    user may ignore this card and run ``blogflow image-gate <aid> --mode <X>``
     manually from the CLI; no state transition fires until they act.
     """
     sid = _sid.register(gate="I", article_id=article_id, ttl_hours=12)
@@ -459,7 +459,7 @@ def render_image_gate_picker(
             escape_md2("• cover+body: 封面 + 正文图"),
             escape_md2("• 跳过: 不出图, 直接进 Gate D"),
             "",
-            escape_md2("可忽略此卡片，直接 CLI 跑 `af image-gate`."),
+            escape_md2("可忽略此卡片，直接 CLI 跑 `blogflow image-gate`."),
         ]
     )
     rows = [

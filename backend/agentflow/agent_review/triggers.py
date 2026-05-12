@@ -1,6 +1,7 @@
 """Auto-trigger Gate cards from pipeline command callsites.
 
-The CLI commands (``af fill``, ``af image-gate``, ``af write --auto-pick``) call
+The CLI commands (``blogflow fill``, ``blogflow image-gate``,
+``blogflow write --auto-pick``) call
 these helpers at the end of a successful run. Each helper:
 
 - short-circuits silently when TG isn't configured (no token / no chat_id),
@@ -9,7 +10,7 @@ these helpers at the end of a successful run. Each helper:
   fallbacks so the gate card is always postable
 - posts the card + supplementary content (body / cover image)
 
-Module-level functions are also called by the ``af review-post-*`` CLI
+Module-level functions are also called by the ``blogflow review-post-*`` CLI
 wrappers so we have one code path.
 """
 
@@ -37,6 +38,759 @@ _log = get_logger("agent_review.triggers")
 
 def _tg_configured() -> bool:
     return bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
+
+
+def _lark_app_primary() -> bool:
+    raw = (os.environ.get("AGENTFLOW_LARK_APP_PRIMARY") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _review_surface_enabled() -> bool:
+    return _tg_configured() or _lark_app_primary()
+
+
+def _review_chat_id() -> int | str | None:
+    if not _tg_configured():
+        return None
+    return _daemon.get_review_chat_id()
+
+
+def _emit_lark_review_card(
+    event_type: str,
+    *,
+    article_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    if not _lark_app_primary():
+        return
+    try:
+        from agentflow.shared.agent_bridge import emit_agent_event
+
+        emit_agent_event(
+            source="agentflow.review",
+            event_type=event_type,
+            article_id=article_id,
+            payload=payload,
+        )
+    except Exception:  # pragma: no cover - event fan-out is best-effort
+        _log.warning("Lark review card event emit failed: %s", event_type, exc_info=True)
+
+
+def _lark_action(
+    label: str,
+    command: str,
+    article_id: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "label": label,
+        "command": command,
+        "article_id": article_id,
+        "payload": payload or {},
+    }
+
+
+def _emit_lark_gate_a_card(
+    *,
+    short_id: str,
+    batch_path: str,
+    publisher_brand: str,
+    target_series: str,
+    candidates: list[dict[str, Any]],
+    telegram_message_id: Any | None = None,
+) -> None:
+    """Ask the Lark App/OpenClaw renderer to draw an actionable Gate A card.
+
+    ``notify_hotspots_digest`` is intentionally a scan summary. This event is
+    the review-card payload and carries the same slot/action semantics as the
+    Telegram card, translated to ``lark_*`` bridge commands.
+    """
+    try:
+        card_candidates: list[dict[str, Any]] = []
+        for idx, item in enumerate(candidates):
+            hotspot_id = str(item.get("hotspot_id") or "")
+            card_candidates.append({
+                "slot": idx,
+                "label": f"#{idx + 1}",
+                "article_id": hotspot_id,
+                "hotspot_id": hotspot_id,
+                "title": item.get("title") or "(no title)",
+                "angle": item.get("angle") or "",
+                "score": item.get("score") or "",
+                "age_h": item.get("age_h") or "",
+                "source": item.get("source") or "",
+                "keywords": list(item.get("keywords") or []),
+                "red_flags": list(item.get("red_flags") or []),
+                "actions": [
+                    _lark_action(
+                        f"✅ 起稿 #{idx + 1}",
+                        "lark_gate_a_write",
+                        hotspot_id,
+                        {
+                            "angle_index": 0,
+                            "target_series": target_series,
+                            "slot": idx,
+                        },
+                    ),
+                    _lark_action(f"📋 详情 #{idx + 1}", "lark_gate_a_expand", hotspot_id),
+                ],
+            })
+
+        _emit_lark_review_card(
+            event_type="review.gate_a_card",
+            article_id=short_id,
+            payload={
+                "gate": "A",
+                "card_kind": "review",
+                "short_id": short_id,
+                "batch_path": str(batch_path),
+                "publisher_brand": publisher_brand,
+                "target_series": target_series,
+                "candidate_count": len(card_candidates),
+                "candidates": card_candidates,
+                "actions": [
+                    _lark_action("⏰ 4h 后", "lark_defer", short_id, {"gate": "A", "hours": 4}),
+                    _lark_action(
+                        "🚫 全拒绝",
+                        "lark_gate_a_reject_all",
+                        short_id,
+                        {"batch_path": str(batch_path)},
+                    ),
+                ],
+                "telegram_message_id": telegram_message_id,
+            },
+        )
+    except Exception:  # pragma: no cover - payload shaping is best-effort
+        _log.warning("Lark Gate A card payload build failed", exc_info=True)
+
+
+def _emit_lark_gate_b_card(
+    *,
+    article_id: str,
+    short_id: str,
+    title: str,
+    subtitle: str | None,
+    publisher_brand: str | None,
+    voice: str | None,
+    word_count: int,
+    section_count: int,
+    compliance_score: float,
+    tags: list[str],
+    self_check_lines: list[str],
+    blockers: list[str],
+    opening_excerpt: str,
+    draft_md: str,
+    mirror_url: str | None,
+    telegram_message_id: Any | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.gate_b_card",
+        article_id=article_id,
+        payload={
+            "gate": "B",
+            "card_kind": "review",
+            "short_id": short_id,
+            "article_id": article_id,
+            "title": title,
+            "subtitle": subtitle,
+            "publisher_brand": publisher_brand,
+            "voice": voice,
+            "word_count": word_count,
+            "section_count": section_count,
+            "compliance_score": compliance_score,
+            "tags": list(tags),
+            "self_check_lines": list(self_check_lines),
+            "blockers": list(blockers),
+            "opening_excerpt": (opening_excerpt or "")[:600],
+            "draft_excerpt": (draft_md or "")[:4000],
+            "draft_length": len(draft_md or ""),
+            "draft_truncated": len(draft_md or "") > 4000,
+            "mirror_url": mirror_url,
+            "actions": [
+                _lark_action("✅ 通过", "lark_gate_b_approve", article_id),
+                _lark_action("✏️ 编辑", "lark_gate_b_edit", article_id),
+                _lark_action("🔁 重写", "lark_gate_b_rewrite", article_id),
+                _lark_action("📋 diff", "lark_gate_b_diff", article_id),
+                _lark_action("🚫 拒绝", "lark_gate_b_reject", article_id),
+                _lark_action("♻️ refill", "lark_refill", article_id),
+                _lark_action("📊 meta", "lark_view_meta", article_id),
+                _lark_action("⏰ 2h 后", "lark_defer", article_id, {"gate": "B", "hours": 2}),
+            ],
+            "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+def _emit_lark_image_picker_card(
+    *,
+    article_id: str,
+    short_id: str,
+    title: str,
+    telegram_message_id: Any | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.image_gate_picker_card",
+        article_id=article_id,
+        payload={
+            "gate": "I",
+            "card_kind": "review",
+            "short_id": short_id,
+            "article_id": article_id,
+            "title": title,
+            "actions": [
+                _lark_action(
+                    "💎 cover-only",
+                    "lark_image_gate_cover_only",
+                    article_id,
+                    {"mode": "cover-only"},
+                ),
+                _lark_action(
+                    "🎨 cover+body",
+                    "lark_image_gate_cover_plus_body",
+                    article_id,
+                    {"mode": "cover-plus-body"},
+                ),
+                _lark_action(
+                    "🚫 跳过封面",
+                    "lark_image_gate_skip",
+                    article_id,
+                    {"mode": "none"},
+                ),
+            ],
+            "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+def _emit_lark_gate_c_card(
+    *,
+    article_id: str,
+    short_id: str,
+    title: str,
+    cover_path: str,
+    cover_size: str,
+    overlay_status: str,
+    self_check_lines: list[str],
+    blockers: list[str],
+    telegram_message_id: Any | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.gate_c_card",
+        article_id=article_id,
+        payload={
+            "gate": "C",
+            "card_kind": "review",
+            "short_id": short_id,
+            "article_id": article_id,
+            "title": title,
+            "cover_path": cover_path,
+            "cover_size": cover_size,
+            "brand_overlay_status": overlay_status,
+            "self_check_lines": list(self_check_lines),
+            "blockers": list(blockers),
+            "actions": [
+                _lark_action("✅ 通过", "lark_gate_c_approve", article_id),
+                _lark_action("🚫 跳过/拒绝配图", "lark_gate_c_skip", article_id),
+                _lark_action(
+                    "🔁 再生成",
+                    "lark_gate_c_regen",
+                    article_id,
+                    {"mode": "cover-only", "accepts_text": True},
+                ),
+                _lark_action("🎨 换 logo 位置", "lark_gate_c_relogo", article_id),
+                _lark_action("🖼 全分辨率", "lark_gate_c_full", article_id),
+                _lark_action("⏰ 2h 后", "lark_defer", article_id, {"gate": "C", "hours": 2}),
+            ],
+            "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+def _emit_lark_gate_d_card(
+    *,
+    article_id: str,
+    short_id: str,
+    title: str,
+    available: list[str],
+    selected: list[str],
+    telegram_message_id: Any | None = None,
+) -> None:
+    actions = [
+        _lark_action(
+            ("✅ " if platform in selected else "☐ ") + platform,
+            "lark_gate_d_toggle",
+            article_id,
+            {"platform": platform},
+        )
+        for platform in available
+    ]
+    actions.extend([
+        _lark_action("⚡ 全选", "lark_gate_d_select_all", article_id, {"platforms": available}),
+        _lark_action("💾 保存默认", "lark_gate_d_save_default", article_id),
+        _lark_action("✅ 通过并发布", "lark_gate_d_confirm", article_id),
+        _lark_action("🚫 拒绝", "lark_gate_d_cancel", article_id),
+        _lark_action("⏰ 延长", "lark_gate_d_extend", article_id, {"gate": "D"}),
+    ])
+    _emit_lark_review_card(
+        "review.gate_d_card",
+        article_id=article_id,
+        payload={
+            "gate": "D",
+            "card_kind": "review",
+            "short_id": short_id,
+            "article_id": article_id,
+            "title": title,
+            "available": list(available),
+            "selected": list(selected),
+            "actions": actions,
+            "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+def _emit_lark_suggestion_list_card(
+    *,
+    suggestions: list[dict[str, Any]],
+) -> None:
+    """Render the pending-suggestions queue as a Lark review card.
+
+    Suggestions are not bound to a single article — ``article_id`` for the
+    card-level emit is ``""`` (no-article); each per-row button passes its
+    suggestion's ``article_id`` (when present) or ``""`` so OpenClaw can wire
+    deep-links back without us inventing an id.
+    """
+    if not _lark_app_primary():
+        return
+    items: list[dict[str, Any]] = []
+    for suggestion in suggestions or []:
+        suggestion_id = str(suggestion.get("id") or suggestion.get("suggestion_id") or "")
+        if not suggestion_id:
+            continue
+        article_id = str(suggestion.get("article_id") or "")
+        headline = (
+            suggestion.get("title")
+            or suggestion.get("headline")
+            or suggestion.get("summary")
+            or "Suggestion"
+        )
+        items.append({
+            "suggestion_id": suggestion_id,
+            "article_id": article_id,
+            "headline": str(headline),
+            "source": str(suggestion.get("source") or suggestion.get("stage") or ""),
+            "created_at": str(suggestion.get("created_at") or ""),
+            "risk_level": str(suggestion.get("risk_level") or ""),
+            "profile_id": str(suggestion.get("profile_id") or ""),
+            "actions": [
+                _lark_action(
+                    "🔍 审阅",
+                    "lark_suggestion_review",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "🚫 忽略",
+                    "lark_suggestion_dismiss",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+            ],
+        })
+
+    _emit_lark_review_card(
+        "review.suggestion_list_card",
+        article_id="",
+        payload={
+            "gate": "S",
+            "card_kind": "review",
+            "count": len(items),
+            "suggestions": items,
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_suggestion_review_card(
+    *,
+    suggestion: dict[str, Any],
+) -> None:
+    """Render a single suggestion's detailed review card on Lark.
+
+    ``suggestion`` may be either the raw suggestion dict (as returned by
+    ``list_suggestions``) or the ``review_suggestion`` payload's ``suggestion``
+    field — both carry the same id/title/profile_id/proposed_patch shape.
+    """
+    if not _lark_app_primary():
+        return
+    suggestion_id = str(suggestion.get("id") or suggestion.get("suggestion_id") or "")
+    article_id = str(suggestion.get("article_id") or "")
+    body = (
+        suggestion.get("summary")
+        or suggestion.get("body")
+        or suggestion.get("title")
+        or ""
+    )
+    proposed = suggestion.get("proposed_patch") if isinstance(suggestion.get("proposed_patch"), dict) else {}
+    changed_keys = sorted(proposed.keys()) if proposed else []
+
+    _emit_lark_review_card(
+        "review.suggestion_review_card",
+        article_id=article_id,
+        payload={
+            "gate": "S",
+            "card_kind": "review",
+            "suggestion_id": suggestion_id,
+            "article_id": article_id,
+            "profile_id": str(suggestion.get("profile_id") or ""),
+            "stage": str(suggestion.get("stage") or ""),
+            "risk_level": str(suggestion.get("risk_level") or ""),
+            "title": str(suggestion.get("title") or "Suggestion"),
+            "body": str(body),
+            "source": str(suggestion.get("source") or suggestion.get("stage") or ""),
+            "created_at": str(suggestion.get("created_at") or ""),
+            "changed_keys": changed_keys,
+            "actions": [
+                _lark_action(
+                    "✅ 应用",
+                    "lark_suggestion_apply",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "🚫 忽略",
+                    "lark_suggestion_dismiss",
+                    article_id,
+                    {"suggestion_id": suggestion_id},
+                ),
+                _lark_action(
+                    "↩️ 返回列表",
+                    "lark_suggestion_list",
+                    article_id,
+                ),
+            ],
+        },
+    )
+
+
+def _emit_lark_profile_question_card(
+    *,
+    session_path: str,
+    profile_id: str,
+    question_field: str,
+    question_text: str,
+    question_index: int,
+    total_questions: int,
+) -> None:
+    """Emit a `review.profile_setup_card` in *question-advance* form.
+
+    Counterpart to TG's `render_profile_setup_question`. The intro form
+    (no `current_question`) is emitted by :func:`post_profile_setup_prompt`.
+    This helper emits the per-question follow-up: `current_question`,
+    `question_field`, `question_index`, `total_questions` are populated and
+    the primary button switches from `开始补全` to `回答` (still routing to
+    the same `lark_profile_advance` command, but carrying `question_field`
+    so the daemon can write the answer to the right slot).
+    """
+    if not _lark_app_primary():
+        return
+    actions = [
+        _lark_action(
+            "回答",
+            "lark_profile_advance",
+            profile_id,
+            {
+                "profile_id": profile_id,
+                "session_path": session_path,
+                "question_field": question_field,
+                "answer_field": "text",
+            },
+        ),
+        _lark_action(
+            "稍后",
+            "lark_defer",
+            profile_id,
+            {"gate": "P"},
+        ),
+    ]
+    _emit_lark_review_card(
+        "review.profile_setup_card",
+        article_id=profile_id,
+        payload={
+            "gate": "P",
+            "card_kind": "review",
+            "profile_id": profile_id,
+            "session_path": session_path,
+            "current_question": question_text,
+            "question_field": question_field,
+            "question_index": int(question_index),
+            "total_questions": int(total_questions),
+            "missing_fields": [],
+            "reason": "profile setup question",
+            "actions": actions,
+        },
+    )
+
+
+def _emit_lark_locked_takeover_card(
+    *,
+    article_id: str,
+    short_id: str,
+    title: str,
+    rewrite_count: int,
+    telegram_message_id: Any | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.locked_takeover_card",
+        article_id=article_id,
+        payload={
+            "gate": "L",
+            "card_kind": "review",
+            "short_id": short_id,
+            "article_id": article_id,
+            "title": title,
+            "rewrite_count": rewrite_count,
+            "actions": [
+                _lark_action("🔍 critique", "lark_locked_critique", article_id),
+                _lark_action("✏️ 接管编辑", "lark_locked_edit", article_id),
+                _lark_action("🚫 放弃", "lark_locked_give_up", article_id),
+            ],
+            "telegram_message_id": telegram_message_id,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chrome card emit helpers (GAP-CHROME) — operator slash-command parity.
+#
+# Each helper emits a single ``review.<kind>_card`` event for the Lark
+# OpenClaw plugin to render. They follow the suggestion/profile pattern:
+# short-circuit silently when ``_lark_app_primary()`` is False, never raise.
+#
+# These cards are *informational*; mutating chrome intents (skip/defer/
+# publish_mark/cancel) emit a small ack via ``_make_card`` directly in the
+# handler — they don't need a dedicated review-card event.
+# ---------------------------------------------------------------------------
+
+
+def _emit_lark_status_card(
+    *,
+    in_review: int,
+    last_events: list[dict[str, Any]],
+    heartbeat_iso: str | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.status_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "status",
+            "in_review": int(in_review),
+            "heartbeat_iso": heartbeat_iso,
+            "last_events": list(last_events or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_article_list_card(
+    *,
+    articles: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.article_list_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "list",
+            "count": len(articles or []),
+            "articles": list(articles or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_published_list_card(
+    *,
+    articles: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.published_list_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "published",
+            "count": len(articles or []),
+            "articles": list(articles or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_scan_kicked_card(
+    *,
+    batch_path: str | None = None,
+    top_k: int | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.scan_kicked_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "scan",
+            "batch_path": batch_path,
+            "top_k": top_k,
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_jobs_card(
+    *,
+    jobs: list[dict[str, Any]],
+) -> None:
+    _emit_lark_review_card(
+        "review.jobs_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "jobs",
+            "count": len(jobs or []),
+            "jobs": list(jobs or []),
+            "actions": [],
+        },
+    )
+
+
+def _emit_lark_audit_list_card(
+    *,
+    entries: list[dict[str, Any]],
+    filter_kind: str | None = None,
+    n: int = 20,
+) -> None:
+    """Render the recent-audit-events list card. Contract is canonical in
+    ``templates/lark_review_cards.md``; entries are normalized so each item
+    has ``timestamp``, ``kind``, ``actor``, ``summary``, plus optional
+    ``article_id``/``gate``/``action``. The card-level ``actions[]`` carries
+    refresh + filter buttons; per-entry ``actions[]`` carries the deep-link
+    to the single-article ``lark_view_audit`` only when ``article_id`` is
+    present.
+    """
+    raw_entries = list(entries or [])
+    items: list[dict[str, Any]] = []
+    for ev in raw_entries:
+        ts = str(
+            ev.get("timestamp")
+            or ev.get("audit_ts")
+            or ev.get("ts")
+            or ""
+        )
+        kind = str(ev.get("kind") or "")
+        article_id = str(ev.get("article_id") or "")
+        gate = str(ev.get("gate") or "")
+        action = str(ev.get("action") or ev.get("cmd") or "")
+        actor = str(
+            ev.get("actor")
+            or ev.get("operator")
+            or ev.get("uid")
+            or ev.get("open_id")
+            or ""
+        )
+        # Build a one-line summary; prefer existing fields, fall back to a
+        # heuristic combining gate + action + reason/error.
+        summary_raw = (
+            ev.get("summary")
+            or ev.get("reason")
+            or ev.get("error")
+            or ev.get("status")
+            or ""
+        )
+        summary = str(summary_raw)
+        if not summary:
+            parts = [p for p in (gate, action) if p]
+            summary = " ".join(parts)
+        if len(summary) > 160:
+            summary = summary[:157] + "..."
+
+        item: dict[str, Any] = {
+            "timestamp": ts,
+            "kind": kind,
+            "actor": actor,
+            "summary": summary,
+        }
+        if article_id:
+            item["article_id"] = article_id
+        if gate:
+            item["gate"] = gate
+        if action:
+            item["action"] = action
+        # Per-entry deep-link to single-article audit view (only if we have an
+        # article id to deep-link into).
+        if article_id:
+            item["actions"] = [
+                _lark_action(
+                    "📰 查看文章",
+                    "lark_view_audit",
+                    article_id,
+                ),
+            ]
+        else:
+            item["actions"] = []
+        items.append(item)
+
+    # ``since`` = oldest timestamp shown (entries are newest-first; oldest is last).
+    since = items[-1]["timestamp"] if items else ""
+
+    payload: dict[str, Any] = {
+        "gate": "OPS",
+        "card_kind": "audit",
+        "count": len(items),
+        "total": len(items),
+        "since": since,
+        "entries": items,
+        "actions": [
+            _lark_action(
+                "🔄 刷新",
+                "lark_view_audit_recent",
+                "",
+                {"n": int(n)},
+            ),
+            _lark_action(
+                "❌ 仅看失败",
+                "lark_view_audit_recent",
+                "",
+                {"kind": "spawn_failure", "n": int(n)},
+            ),
+        ],
+    }
+    if filter_kind:
+        payload["filter"] = {"kind": str(filter_kind)}
+    _emit_lark_review_card(
+        "review.audit_list_card",
+        article_id="",
+        payload=payload,
+    )
+
+
+def _emit_lark_auth_debug_card(
+    *,
+    operator_open_id: str,
+    authorized_actions: list[str],
+    in_whitelist: bool,
+    action_table: dict[str, str] | None = None,
+) -> None:
+    _emit_lark_review_card(
+        "review.auth_debug_card",
+        article_id="",
+        payload={
+            "gate": "OPS",
+            "card_kind": "auth_debug",
+            "operator_open_id": operator_open_id,
+            "in_whitelist": bool(in_whitelist),
+            "authorized_actions": list(authorized_actions or []),
+            "action_table": dict(action_table or {}),
+            "actions": [],
+        },
+    )
 
 
 def _read_metadata(article_id: str) -> dict[str, Any]:
@@ -83,7 +837,7 @@ def _ensure_state(
 
 
 # ---------------------------------------------------------------------------
-# Gate A — post a topic-batch review card after `af hotspots`
+# Gate A — post a topic-batch review card after `blogflow article-hotspots`
 # ---------------------------------------------------------------------------
 
 
@@ -110,11 +864,11 @@ def post_gate_a(
     surfaced to the Gate A card; candidates with fit < 0.10 also pick up a
     ``low_topic_fit`` red flag.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping Gate A post")
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping Gate A post")
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping Gate A post")
         return None
     if not hotspots:
@@ -148,16 +902,21 @@ def post_gate_a(
     # is set (>0), drop hotspots whose Jaccard fit score is below it BEFORE
     # composite ranking. Stops the LLM from getting an off-topic hotspot
     # as input and producing a forced-analogy article ("TCG customs
-    # failure ≈ ChainStream data infra design"). Default 0 = backward
-    # compatible soft re-rank only. Recommended for prod: 0.05 (any tiny
-    # token overlap survives; pure topic mismatches are gone).
+    # failure ≈ ChainStream data infra design"). Set 0 explicitly to
+    # disable the hard gate.
+    #
+    # v1.1.9: bumped default 0.025 → 0.10 because the old floor still let
+    # in topics that triggered the v1.1.7 forced-analogy class (硬套
+    # 预言机). Below 0.10 → drop. [0.10, 0.20) → kept but written as
+    # observer (handled in topic_profiles.py::topic_profile_effective_voice).
+    # >= 0.20 → first-party voice.
     try:
         hard_threshold = max(
             0.0,
-            float(os.environ.get("AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD", "0") or "0"),
+            float(os.environ.get("AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD", "0.10") or "0.10"),
         )
     except (TypeError, ValueError):
-        hard_threshold = 0.0
+        hard_threshold = 0.10
     if hard_threshold > 0 and pub and fit_by_id:
         before = len(hotspots)
         hotspots = [
@@ -270,8 +1029,18 @@ def post_gate_a(
         worth_reviewing=worth_reviewing,
         config_suggestions=config_suggestions or [],
     )
-    sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    _sid.attach_message_id(sid, sent.get("message_id"))
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+        _sid.attach_message_id(sid, sent.get("message_id"))
+    _emit_lark_gate_a_card(
+        short_id=sid,
+        batch_path=str(batch_path),
+        publisher_brand=publisher_brand,
+        target_series=target_series,
+        candidates=candidates,
+        telegram_message_id=sent.get("message_id"),
+    )
 
     # v1.0.19: fan-out hotspots digest to Lark Custom Bot (if configured).
     # Push-only, not actionable — operators still review on TG. Wrapped
@@ -304,11 +1073,11 @@ def post_profile_setup_prompt(
     missing_fields: list[str],
     session_path: str,
 ) -> dict[str, Any] | None:
-    if not _tg_configured():
-        _log.info("TG not configured — skipping profile setup prompt")
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping profile setup prompt")
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping profile setup prompt")
         return None
     text, kb, sid = render.render_profile_setup_card(
@@ -317,7 +1086,24 @@ def post_profile_setup_prompt(
         missing_fields=missing_fields,
         session_path=session_path,
     )
-    sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+    _emit_lark_review_card(
+        "review.profile_setup_card",
+        article_id=profile_id,
+        payload={
+            "gate": "P",
+            "card_kind": "review",
+            "short_id": sid,
+            "profile_id": profile_id,
+            "reason": reason,
+            "missing_fields": list(missing_fields),
+            "session_path": session_path,
+            "text": text,
+            "telegram_message_id": sent.get("message_id"),
+        },
+    )
     return {
         "gate": "P",
         "short_id": sid,
@@ -328,7 +1114,7 @@ def post_profile_setup_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Gate B — post a draft-review card after `af fill`
+# Gate B — post a draft-review card after `blogflow fill`
 # ---------------------------------------------------------------------------
 
 
@@ -381,22 +1167,23 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
 
     Returns a small summary dict, or ``None`` when TG is not configured /
     chat_id is missing (caller decides whether to surface that)."""
-    if not _tg_configured():
-        _log.info("TG not configured — skipping Gate B post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping Gate B post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping Gate B post for %s", article_id)
         return None
 
-    _revoke_prior_card_keyboard("B", article_id, chat_id)
+    if chat_id is not None:
+        _revoke_prior_card_keyboard("B", article_id, chat_id)
 
     _ensure_state(
         article_id,
         target=_state.STATE_DRAFT_PENDING_REVIEW,
         path=_DRAFT_PATH,
         gate="B",
-        notes="auto-trigger from af fill",
+        notes="auto-trigger from blogflow fill",
     )
 
     meta = _read_metadata(article_id)
@@ -514,14 +1301,19 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
         opening_excerpt=opening,
     )
 
-    sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    message_id = sent.get("message_id")
-    _sid.attach_message_id(sid, message_id)
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+        message_id = sent.get("message_id")
+        _sid.attach_message_id(sid, message_id)
+    else:
+        message_id = None
 
     body_doc = render.export_body_markdown(article_id)
     body_raw = body_doc.read_text(encoding="utf-8")
-    tg_client.send_long_text(chat_id, render.escape_md2(body_raw))
-    tg_client.send_document(chat_id, body_doc, caption=None, parse_mode=None)
+    if chat_id is not None:
+        tg_client.send_long_text(chat_id, render.escape_md2(body_raw))
+        tg_client.send_document(chat_id, body_doc, caption=None, parse_mode=None)
 
     # v1.0.30: Lark fan-out of the assembled draft body. Push-only, not
     # actionable — Gate B operations stay on TG. Gated by
@@ -547,6 +1339,24 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
                 mirror_url = mirror_template.format(article_id=article_id)
             except (KeyError, IndexError, ValueError):
                 mirror_url = None
+        _emit_lark_gate_b_card(
+            article_id=article_id,
+            short_id=sid,
+            title=title,
+            subtitle=overrides.get("subtitle"),
+            publisher_brand=publisher.get("brand"),
+            voice=publisher.get("voice"),
+            word_count=word_count,
+            section_count=len(sections),
+            compliance_score=compliance,
+            tags=list(overrides.get("tags") or []) or list(publisher.get("default_tags") or []),
+            self_check_lines=self_lines,
+            blockers=blockers,
+            opening_excerpt=opening,
+            draft_md=body_raw,
+            mirror_url=mirror_url,
+            telegram_message_id=message_id,
+        )
         lark_webhook.notify_draft_ready(
             article_id=article_id,
             title=title,
@@ -564,7 +1374,7 @@ def post_gate_b(article_id: str, *, force: bool = False) -> dict[str, Any] | Non
             to_state=_state.STATE_DRAFT_PENDING_REVIEW,
             actor="daemon",
             decision="post_card",
-            tg_chat_id=int(chat_id),
+            tg_chat_id=int(chat_id) if chat_id is not None else None,
             tg_message_id=int(message_id) if message_id else None,
             notes=f"short_id={sid}, blockers={blockers}",
         )
@@ -594,13 +1404,13 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
 
     Article state should already be ``drafting_locked_human`` when this fires
     (the daemon route that triggers it does the transition before spawning).
-    Best-effort: never raises; returns ``None`` if TG isn't configured.
+    Best-effort: never raises; returns ``None`` if no review surface is configured.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping locked-takeover post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping locked-takeover post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning(
             "no review chat_id — skipping locked-takeover post for %s", article_id
         )
@@ -628,11 +1438,21 @@ def post_locked_takeover(article_id: str) -> dict[str, Any] | None:
         _log.warning("locked-takeover render failed for %s: %s", article_id, err)
         return None
 
-    try:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    except Exception as err:
-        _log.warning("locked-takeover send failed for %s: %s", article_id, err)
-        return None
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        try:
+            sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+        except Exception as err:
+            _log.warning("locked-takeover send failed for %s: %s", article_id, err)
+            if not _lark_app_primary():
+                return None
+    _emit_lark_locked_takeover_card(
+        article_id=article_id,
+        short_id=sid,
+        title=title,
+        rewrite_count=rewrite_count,
+        telegram_message_id=sent.get("message_id"),
+    )
 
     return {
         "gate": "L",
@@ -763,7 +1583,7 @@ def post_critique(article_id: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Gate C — post a cover-review card after `af image-gate`
+# Gate C — post a cover-review card after `blogflow image-gate`
 # ---------------------------------------------------------------------------
 
 
@@ -788,7 +1608,7 @@ def mark_published(
     to STATE_PUBLISHED, and post a final TG confirmation message.
 
     Designed for the manual flow: user pastes the article into Medium, copies
-    the resulting URL, then runs ``af review-publish-mark <article> <url>``.
+    the resulting URL, then runs ``blogflow review-publish-mark <article> <url>``.
     """
     from datetime import datetime
     from agentflow.agent_d4.storage import append_publish_record
@@ -945,7 +1765,7 @@ def mark_published(
 
 
 def _af_argv(*args: str) -> list[str]:
-    """Build an argv that invokes ``af`` reliably from a subprocess.
+    """Build an argv that invokes the media/blog CLI from a subprocess.
 
     Avoids ``python -m agentflow.cli.commands`` because that loads the
     commands module twice (once as ``__main__``, once as
@@ -953,16 +1773,20 @@ def _af_argv(*args: str) -> list[str]:
     (medium_commands / review_commands / onboard_commands / …) register
     against the wrong ``cli`` group and their commands look unregistered.
 
-    Prefers the ``af`` entry-point script in the same venv as ``sys.executable``;
+    Prefers the ``blogflow`` / ``mediaflow`` entry-point scripts in the same
+    venv as ``sys.executable``. ``af`` is kept only as a legacy fallback for
+    older installs; new packages intentionally avoid that generic name.
     falls back to ``python -c "from agentflow.cli.commands import cli; cli()"``
     for environments without a venv layout.
     """
     import sys
     from pathlib import Path
 
-    af_script = Path(sys.executable).parent / "af"
-    if af_script.exists():
-        return [str(af_script), *args]
+    bin_dir = Path(sys.executable).parent
+    for script_name in ("blogflow", "mediaflow", "af"):
+        cli_script = bin_dir / script_name
+        if cli_script.exists():
+            return [str(cli_script), *args]
     return [
         sys.executable, "-c",
         "import sys; from agentflow.cli.commands import cli; cli(args=sys.argv[1:])",
@@ -1014,11 +1838,11 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
 
     Terminal state for v0.1 — user manually pastes into Medium browser.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping publish-ready post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping publish-ready post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping publish-ready post for %s", article_id)
         return None
 
@@ -1143,13 +1967,15 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
         warnings=warnings,
     )
 
-    if cover_path and Path(cover_path).exists():
-        sent = tg_client.send_photo(
-            chat_id, cover_path, caption=caption, reply_markup=kb,
-        )
-    else:
-        sent = tg_client.send_message(chat_id, caption, reply_markup=kb)
-    tg_client.send_document(chat_id, package_path, parse_mode=None)
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        if cover_path and Path(cover_path).exists():
+            sent = tg_client.send_photo(
+                chat_id, cover_path, caption=caption, reply_markup=kb,
+            )
+        else:
+            sent = tg_client.send_message(chat_id, caption, reply_markup=kb)
+        tg_client.send_document(chat_id, package_path, parse_mode=None)
 
     # State: image_approved → ready_to_publish. `af medium-package` may have
     # already advanced the state while generating package.md, so avoid a
@@ -1165,7 +1991,7 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
                 to_state=_state.STATE_READY_TO_PUBLISH,
                 actor="daemon",
                 decision="auto_advance",
-                tg_chat_id=int(chat_id),
+                tg_chat_id=int(chat_id) if chat_id is not None else None,
                 tg_message_id=int(sent.get("message_id") or 0) or None,
                 notes="auto-package on Gate C approve",
                 force=True,
@@ -1193,22 +2019,23 @@ def post_publish_ready(article_id: str) -> dict[str, Any] | None:
 
 
 def post_gate_c(article_id: str) -> dict[str, Any] | None:
-    if not _tg_configured():
-        _log.info("TG not configured — skipping Gate C post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping Gate C post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping Gate C post for %s", article_id)
         return None
 
-    _revoke_prior_card_keyboard("C", article_id, chat_id)
+    if chat_id is not None:
+        _revoke_prior_card_keyboard("C", article_id, chat_id)
 
     _ensure_state(
         article_id,
         target=_state.STATE_IMAGE_PENDING_REVIEW,
         path=_IMAGE_PATH,
         gate="C",
-        notes="auto-trigger from af image-gate",
+        notes="auto-trigger from blogflow image-gate",
     )
 
     meta = _read_metadata(article_id)
@@ -1232,9 +2059,24 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
         brand_overlay_anchor="bottom_left",
         inline_body_count=0,
     )
-    sent = tg_client.send_photo(chat_id, summary["cover_path"], caption=caption, reply_markup=kb)
-    message_id = sent.get("message_id")
-    _sid.attach_message_id(sid, message_id)
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        sent = tg_client.send_photo(chat_id, summary["cover_path"], caption=caption, reply_markup=kb)
+        message_id = sent.get("message_id")
+        _sid.attach_message_id(sid, message_id)
+    else:
+        message_id = None
+    _emit_lark_gate_c_card(
+        article_id=article_id,
+        short_id=sid,
+        title=title,
+        cover_path=str(summary["cover_path"]),
+        cover_size=cover_size,
+        overlay_status=overlay_status,
+        self_check_lines=self_lines,
+        blockers=blockers,
+        telegram_message_id=message_id,
+    )
 
     try:
         _state.transition(
@@ -1243,7 +2085,7 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
             to_state=_state.STATE_IMAGE_PENDING_REVIEW,
             actor="daemon",
             decision="post_card",
-            tg_chat_id=int(chat_id),
+            tg_chat_id=int(chat_id) if chat_id is not None else None,
             tg_message_id=int(message_id) if message_id else None,
             notes=f"short_id={sid}, blockers={blockers}",
         )
@@ -1262,15 +2104,16 @@ def post_gate_c(article_id: str) -> dict[str, Any] | None:
 def post_image_gate_picker(article_id: str) -> dict[str, Any] | None:
     """Send the image-gate picker card after Gate B ✅. Soft prompt — does
     NOT transition state (article stays at draft_approved until the user
-    picks a mode or runs ``af image-gate`` manually).
+    picks a mode or runs ``blogflow image-gate`` manually).
     """
-    if not _tg_configured():
+    if not _review_surface_enabled():
         _log.info(
-            "TG not configured — skipping image-gate picker for %s", article_id
+            "no review surface configured — skipping image-gate picker for %s",
+            article_id,
         )
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning(
             "no review chat_id — skipping image-gate picker for %s", article_id
         )
@@ -1295,15 +2138,24 @@ def post_image_gate_picker(article_id: str) -> dict[str, Any] | None:
         )
         return None
 
-    try:
-        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    except Exception as err:  # pragma: no cover
-        _log.warning(
-            "image-gate picker send_message failed for %s: %s", article_id, err
-        )
-        return None
-
-    _sid.attach_message_id(sid, sent.get("message_id"))
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        try:
+            sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+        except Exception as err:  # pragma: no cover
+            _log.warning(
+                "image-gate picker send_message failed for %s: %s", article_id, err
+            )
+            if not _lark_app_primary():
+                return None
+        else:
+            _sid.attach_message_id(sid, sent.get("message_id"))
+    _emit_lark_image_picker_card(
+        article_id=article_id,
+        short_id=sid,
+        title=title,
+        telegram_message_id=sent.get("message_id"),
+    )
     return {
         "gate": "I",
         "article_id": article_id,
@@ -1373,7 +2225,7 @@ def _collect_dispatch_results(article_id: str, platforms: list[str]) -> list[dic
                 "platform": p,
                 "status": "missing",
                 "url": None,
-                "reason": "no record (check `af publish` logs)",
+                "reason": "no record (check `blogflow publish` logs)",
             })
     return out
 
@@ -1392,15 +2244,16 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
     carries the per-card ``available`` + ``selected`` lists, so toggle
     callbacks can mutate selection without re-registering.
     """
-    if not _tg_configured():
-        _log.info("TG not configured — skipping Gate D post for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping Gate D post for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping Gate D post for %s", article_id)
         return None
 
-    _revoke_prior_card_keyboard("D", article_id, chat_id)
+    if chat_id is not None:
+        _revoke_prior_card_keyboard("D", article_id, chat_id)
 
     try:
         meta = _read_metadata(article_id)
@@ -1469,9 +2322,21 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
         selected=set(selected),
         short_id=sid,
     )
-    sent = tg_client.send_message(chat_id, text, reply_markup=kb)
-    message_id = sent.get("message_id")
-    _sid.attach_message_id(sid, message_id)
+    sent: dict[str, Any] = {}
+    if chat_id is not None:
+        sent = tg_client.send_message(chat_id, text, reply_markup=kb)
+        message_id = sent.get("message_id")
+        _sid.attach_message_id(sid, message_id)
+    else:
+        message_id = None
+    _emit_lark_gate_d_card(
+        article_id=article_id,
+        short_id=sid,
+        title=title,
+        available=available,
+        selected=list(selected),
+        telegram_message_id=message_id,
+    )
 
     try:
         _state.transition(
@@ -1480,7 +2345,7 @@ def post_gate_d(article_id: str) -> dict[str, Any] | None:
             to_state=_state.STATE_CHANNEL_PENDING_REVIEW,
             actor="daemon",
             decision="post_card",
-            tg_chat_id=int(chat_id),
+            tg_chat_id=int(chat_id) if chat_id is not None else None,
             tg_message_id=int(message_id) if message_id else None,
             notes=f"short_id={sid}, available={','.join(available)}",
         )
@@ -1613,11 +2478,11 @@ def post_publish_dispatch(
     from datetime import datetime
     from agentflow.agent_review.daemon import _audit, _notify_spawn_failure
 
-    if not _tg_configured():
-        _log.info("TG not configured — skipping publish dispatch for %s", article_id)
+    if not _review_surface_enabled():
+        _log.info("no review surface configured — skipping publish dispatch for %s", article_id)
         return None
-    chat_id = _daemon.get_review_chat_id()
-    if chat_id is None:
+    chat_id = _review_chat_id()
+    if _tg_configured() and chat_id is None and not _lark_app_primary():
         _log.warning("no review chat_id — skipping publish dispatch for %s", article_id)
         return None
 
@@ -1628,14 +2493,15 @@ def post_publish_dispatch(
 
     # Q3: 入口 ETA 自适应通知
     eta = _estimate_eta_seconds(platforms)
-    try:
-        tg_client.send_message(
-            chat_id,
-            f"⏳ 分发中... 预计 ~{eta}s ({len(platforms)} 平台 ETA)\n\n云端实际可能浮动。",
-            parse_mode=None,
-        )
-    except Exception:
-        pass
+    if chat_id is not None:
+        try:
+            tg_client.send_message(
+                chat_id,
+                f"⏳ 分发中... 预计 ~{eta}s ({len(platforms)} 平台 ETA)\n\n云端实际可能浮动。",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
 
     env = os.environ.copy()
     results: dict[str, Any] = {}
@@ -1650,11 +2516,21 @@ def post_publish_dispatch(
     # Q2: preview 失败 → 阻断 publish + 通知 operator
     if res is None or res.returncode != 0:
         err_tail = (res.stderr if res else "").strip()[-500:] if res else "(timeout/oserr)"
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"❌ preview 失败, dispatch 已阻断  ·  article={article_id}\n\n{err_tail}",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
         try:
-            tg_client.send_message(
-                chat_id,
-                f"❌ preview 失败, dispatch 已阻断  ·  article={article_id}\n\n{err_tail}",
-                parse_mode=None,
+            from agentflow.shared import lark_webhook
+            lark_webhook.notify_spawn_failure(
+                label="dispatch-preview",
+                target_id=article_id,
+                error_tail=err_tail,
             )
         except Exception:
             pass
@@ -1768,14 +2644,15 @@ def post_publish_dispatch(
             _log.warning("dispatch_results.json write failed: %s", err)
             results_path = None
 
-        try:
-            tg_client.send_message(
-                chat_id,
-                f"ℹ 摘要超长 ({estimated_len} 字符)，完整结果见附件 dispatch_results.json",
-                parse_mode=None,
-            )
-        except Exception:
-            pass
+        if chat_id is not None:
+            try:
+                tg_client.send_message(
+                    chat_id,
+                    f"ℹ 摘要超长 ({estimated_len} 字符)，完整结果见附件 dispatch_results.json",
+                    parse_mode=None,
+                )
+            except Exception:
+                pass
 
         truncated_results = []
         for r in dispatch_results:
@@ -1788,18 +2665,20 @@ def post_publish_dispatch(
             results=truncated_results,
         )
 
-    try:
-        tg_client.send_message(
-            chat_id, summary_md, reply_markup=retry_kb if retry_kb else None,
-        )
-    except Exception as err:  # pragma: no cover
-        _log.warning("dispatch summary TG send failed: %s", err)
+    if chat_id is not None:
+        try:
+            tg_client.send_message(
+                chat_id, summary_md, reply_markup=retry_kb if retry_kb else None,
+            )
+        except Exception as err:  # pragma: no cover
+            _log.warning("dispatch summary TG send failed: %s", err)
 
     if results_path and results_path.exists():
-        try:
-            tg_client.send_document(chat_id, results_path, parse_mode=None)
-        except Exception as err:  # pragma: no cover
-            _log.warning("dispatch_results.json send_document failed: %s", err)
+        if chat_id is not None:
+            try:
+                tg_client.send_document(chat_id, results_path, parse_mode=None)
+            except Exception as err:  # pragma: no cover
+                _log.warning("dispatch_results.json send_document failed: %s", err)
 
     if retry_sid:
         results["retry_short_id"] = retry_sid
@@ -1810,12 +2689,12 @@ def post_publish_dispatch(
         meta_for_title = _read_metadata(article_id)
         succeeded_plats = [
             r["platform"] for r in dispatch_results
-            if r.get("status") in {"published", "manual"}
+            if r.get("status") in {"success", "published", "manual"}
         ]
         failed_plats = [
             (r["platform"], str(r.get("reason") or r.get("status") or ""))
             for r in dispatch_results
-            if r.get("status") not in {"published", "manual"}
+            if r.get("status") not in {"success", "published", "manual"}
         ]
         lark_webhook.notify_dispatch_result(
             article_id=article_id,

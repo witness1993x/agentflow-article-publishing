@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentflow"
-version = "1.1.1"
+name = "agentflow-media"
+version = "1.1.9"
 description = "AgentFlow Article Publishing - single-user writing/publishing automation"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -33,7 +33,8 @@ dependencies = [
 ]
 
 [project.scripts]
-af = "agentflow.cli.commands:cli"
+blogflow = "agentflow.cli.commands:cli"
+mediaflow = "agentflow.cli.commands:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

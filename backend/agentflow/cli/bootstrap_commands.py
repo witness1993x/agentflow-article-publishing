@@ -1,22 +1,22 @@
-"""`af bootstrap` — one-shot first-run setup.
+"""`blogflow bootstrap` — one-shot first-run setup.
 
 Condenses the multi-step install ritual (venv check, .env from template, skill
 harness install, onboard pointer, profile/style hints) into a single command.
 
 Each step runs independently and reports its own status — a failure in one
 step does NOT abort the rest. This matches the "graceful guidance" tone of
-the README walkthrough rather than the strict gate behavior of `af doctor`.
+the README walkthrough rather than the strict gate behavior of `blogflow doctor`.
 
 New flags (--mock / --start-daemon / --first-run) extend bootstrap into a
 fully automated first-run path:
 
-    af bootstrap --mock --first-run --start-daemon
+    blogflow bootstrap --mock --first-run --start-daemon
         → set MOCK_LLM=true, prompt TG creds, install skills, start daemon,
-          verify heartbeat, kick a hotspots run.
-    af bootstrap --first-run --start-daemon
-        → run interactive `af onboard`, install skills, start daemon,
-          kick hotspots.
-    af bootstrap --start-daemon
+          verify heartbeat, kick an article-hotspots run.
+    blogflow bootstrap --first-run --start-daemon
+        → run interactive `blogflow onboard`, install skills, start daemon,
+          kick article hotspots.
+    blogflow bootstrap --start-daemon
         → assume already-onboarded; just spawn daemon + verify heartbeat.
 """
 
@@ -57,15 +57,17 @@ def _repo_root() -> Path:
 
 
 def _af_argv(*args: str) -> list[str]:
-    """Build an argv that invokes ``af`` from a subprocess.
+    """Build an argv that invokes the media/blog CLI from a subprocess.
 
     Local copy of ``agent_review.triggers._af_argv`` — we can't import that
     here without risking a circular import (triggers pulls in the cli during
     its own setup paths in some configurations).
     """
-    af_script = Path(sys.executable).parent / "af"
-    if af_script.exists():
-        return [str(af_script), *args]
+    bin_dir = Path(sys.executable).parent
+    for script_name in ("blogflow", "mediaflow", "af"):
+        cli_script = bin_dir / script_name
+        if cli_script.exists():
+            return [str(cli_script), *args]
     return [
         sys.executable,
         "-c",
@@ -248,7 +250,7 @@ def _step_mock_env(env_path: Path) -> dict[str, Any]:
         # Append with banner
         if text and not text.endswith("\n"):
             text += "\n"
-        text += "\n# Mock mode (set by af bootstrap --mock)\nMOCK_LLM=true\n"
+        text += "\n# Mock mode (set by blogflow bootstrap --mock)\nMOCK_LLM=true\n"
         _write_env_text(env_path, text)
         res["status"] = "set"
         res["detail"] = "appended MOCK_LLM=true"
@@ -339,12 +341,12 @@ def _step_tg_creds_prompt(env_path: Path) -> dict[str, Any]:
 
 
 def _step_skill_install(mode: str) -> dict[str, Any]:
-    """Run `af skill-install --mode <mode>` via subprocess.
+    """Run `blogflow skill-install --mode <mode>` via subprocess.
 
     Subprocess-only: directly importing skill_commands.skill_install would
     pull in click's command machinery and require a synthetic Context, which
     is more fragile than just shelling out. We use `_af_argv` so it works
-    with or without an installed `af` script.
+    with or without an installed `blogflow` script.
     """
     res = _step("skill-install")
     argv = _af_argv("skill-install", "--mode", mode)
@@ -372,12 +374,12 @@ def _step_skill_install(mode: str) -> dict[str, Any]:
 
 
 def _step_run_onboard() -> dict[str, Any]:
-    """Run `af onboard` interactively, inheriting tty.
+    """Run `blogflow onboard` interactively, inheriting tty.
 
     Triggered by --first-run AND not --mock.
 
     We deliberately do NOT capture stdout/stderr/stdin: click prompts inside
-    `af onboard` need direct access to the controlling terminal so the user
+    `blogflow onboard` need direct access to the controlling terminal so the user
     can read questions and type answers. `subprocess.run` without any
     stream-redirection kwargs inherits the parent's stdio fds, which is what
     we want.
@@ -406,8 +408,8 @@ def _step_onboard_pointer() -> dict[str, Any]:
     """Print onboard guidance — never auto-run (it's interactive)."""
     res = _step("onboard-pointer")
     msg = (
-        "下一步: 跑 `af onboard` 凭据向导 (10 sections), "
-        "或手 vim backend/.env 后跑 `af doctor` 验"
+        "下一步: 跑 `blogflow onboard` 凭据向导 (10 sections), "
+        "或手 vim backend/.env 后跑 `blogflow doctor` 验"
     )
     click.echo(msg)
     res["status"] = "info"
@@ -419,8 +421,8 @@ def _step_profile_pointer() -> dict[str, Any]:
     """Print optional profile / style guidance."""
     res = _step("profile-pointer")
     msg = (
-        "可选: `af topic-profile init -i --profile <id>` + "
-        "`af learn-from-handle <handle> --profile <id>`"
+        "可选: `blogflow topic-profile init -i --profile <id>` + "
+        "`blogflow learn-from-handle <handle> --profile <id>`"
     )
     click.echo(msg)
     res["status"] = "info"
@@ -429,7 +431,7 @@ def _step_profile_pointer() -> dict[str, Any]:
 
 
 def _step_start_daemon() -> dict[str, Any]:
-    """Spawn `af review-daemon` detached and verify heartbeat within 30s.
+    """Spawn `blogflow review-daemon` detached and verify heartbeat within 30s.
 
     Detached via `start_new_session=True` + DEVNULL on all three std streams,
     so the daemon survives this bootstrap process exiting and never blocks
@@ -481,7 +483,7 @@ def _step_start_daemon() -> dict[str, Any]:
     res["status"] = "no_heartbeat"
     res["pid"] = proc.pid
     res["hint"] = (
-        "daemon 启动后 30s 内没写心跳; 检查 .env / af doctor"
+        "daemon 启动后 30s 内没写心跳; 检查 .env / blogflow doctor"
     )
     res["detail"] = f"daemon pid={proc.pid} but no heartbeat after 30s"
     return res
@@ -509,7 +511,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
 
         while result["stage"] != "ready":
             run(result["next_command"])
-            result = af bootstrap --next-step --json
+            result = blogflow bootstrap --next-step --json
 
     Each branch is graceful — IO errors collapse to ``unknown`` rather than
     raising, so a partial-failure environment still produces actionable
@@ -517,7 +519,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
 
     Two operating modes (auto-detected from credentials presence):
 
-    * **harness** (Mode A) — Claude Code / Cursor drives ``af`` directly via
+    * **harness** (Mode A) — Claude Code / Cursor drives ``blogflow`` directly via
       the skill harness. No Telegram bot, no daemon. The default for new
       operators. Detection: ``TELEGRAM_BOT_TOKEN`` not set anywhere.
     * **tg_review** (Mode B/C) — operator wants phone-based approval gates.
@@ -526,12 +528,12 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
 
     Detection order (first non-``ready`` match wins):
 
-      1. .env missing                       → seed via ``af bootstrap``
-      2. ~/.claude/skills or ~/.cursor/     → ``af skill-install``
+      1. .env missing                       → seed via ``blogflow bootstrap``
+      2. ~/.claude/skills or ~/.cursor/     → ``blogflow skill-install``
          skills missing
-      3. real keys requested but missing    → ``af onboard --section <id>``
+      3. real keys requested but missing    → ``blogflow onboard --section <id>``
          (LLM_PROVIDER set + MOCK_LLM!=true)
-      4. topic_profiles.yaml missing or no  → ``af topic-profile init -i``
+      4. topic_profiles.yaml missing or no  → ``blogflow topic-profile init -i``
          healthy profile
       [TG only — Mode B/C detected]
       5. TELEGRAM_BOT_TOKEN: declared by mode detection above; if user wants
@@ -540,17 +542,17 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
       6. config.json missing or chat_id     → user sends /start to bot
          empty
       [End TG-only]
-      7. heartbeat missing or > 5min stale  → ``af review-daemon &``
+      7. heartbeat missing or > 5min stale  → ``blogflow review-daemon &``
          (only emitted when mode==tg_review; stage="optional", not "init",
          so an agent in Mode A skips it)
-      8. all good                           → ``af hotspots ...``
+      8. all good                           → ``blogflow article-hotspots ...``
     """
     # 1. .env (or secrets file) existence
     if not env_path.exists():
         return {
             "current_state": "no_env",
             "next_command": (
-                "af bootstrap   # seeds ~/.agentflow/secrets/.env from template"
+                "blogflow bootstrap   # seeds ~/.agentflow/secrets/.env from template"
             ),
             "reason": f".env missing at {env_path}",
             "stage": "init",
@@ -563,7 +565,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
     except OSError as err:
         return {
             "current_state": "unknown",
-            "next_command": "af doctor",
+            "next_command": "blogflow doctor",
             "reason": f"could not read {env_path}: {err}",
             "stage": "init",
             "mode": "unknown",
@@ -576,7 +578,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
     # 4. skill harness install — only relevant for Mode A (harness). Mode B/C
     # operators interact via Telegram, never via Claude Code / Cursor, so the
     # skill harness is informational at most. Blocking /start on it makes a
-    # pure-TG operator see "go run af skill-install in your terminal" even
+    # pure-TG operator see "go run blogflow skill-install in your terminal" even
     # though they may have no terminal access at all (e.g. running daemon
     # inside a sandbox / container with no Claude Code installed).
     if mode == "harness":
@@ -594,7 +596,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         if not (claude_ok or cursor_ok):
             return {
                 "current_state": "skills_not_installed",
-                "next_command": "af skill-install",
+                "next_command": "blogflow skill-install",
                 "reason": (
                     "neither ~/.claude/skills nor ~/.cursor/skills has any skills"
                 ),
@@ -607,7 +609,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
     llm_provider = (_env_var_value(env_text, "LLM_PROVIDER") or "").strip()
     if mock_llm != "true" and llm_provider:
         # Cheap, conservative probe: only flag the obvious LLM-key-by-provider.
-        # Detailed key matrix lives in `af doctor`; we just point at it here.
+        # Detailed key matrix lives in `blogflow doctor`; we just point at it here.
         provider_key_map = {
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
@@ -621,11 +623,11 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
                 return {
                     "current_state": "missing_real_keys",
                     "next_command": (
-                        f"af onboard --section {llm_provider.lower()}"
+                        f"blogflow onboard --section {llm_provider.lower()}"
                     ),
                     "reason": (
                         f"LLM_PROVIDER={llm_provider} set but "
-                        f"{expected_key} empty (run af doctor for full matrix)"
+                        f"{expected_key} empty (run blogflow doctor for full matrix)"
                     ),
                     "stage": "init",
                     "mode": mode,
@@ -638,7 +640,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         if not profiles_yaml.exists():
             return {
                 "current_state": "missing_profile",
-                "next_command": "af topic-profile init -i --profile <name>",
+                "next_command": "blogflow topic-profile init -i --profile <name>",
                 "reason": "~/.agentflow/topic_profiles.yaml does not exist",
                 "stage": "init",
                 "mode": mode,
@@ -649,7 +651,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         if not profiles:
             return {
                 "current_state": "missing_profile",
-                "next_command": "af topic-profile init -i --profile <name>",
+                "next_command": "blogflow topic-profile init -i --profile <name>",
                 "reason": "No profile defined in ~/.agentflow/topic_profiles.yaml",
                 "stage": "init",
             }
@@ -674,7 +676,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         if not healthy:
             return {
                 "current_state": "incomplete_profile",
-                "next_command": "af topic-profile init -i --profile <id>  # 或 af topic-profile derive --profile <id>",
+                "next_command": "blogflow topic-profile init -i --profile <id>  # 或 blogflow topic-profile derive --profile <id>",
                 "reason": "no profile in topic_profiles.yaml has complete publisher_account (need brand+voice+do[2]+dont[2]+product_facts[3]+keyword_groups[3])",
                 "stage": "init",
                 "mode": mode,
@@ -730,7 +732,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         if not hb_fresh:
             return {
                 "current_state": "daemon_not_running",
-                "next_command": "af review-daemon &  # or systemd / launchd",
+                "next_command": "blogflow review-daemon &  # or systemd / launchd",
                 "reason": (
                     f"{hb_path} missing or older than 5min "
                     "(only relevant in Mode B/C; Mode A doesn't need the daemon)"
@@ -742,7 +744,7 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
     # 8. all good — both modes converge here.
     payload: dict[str, Any] = {
         "current_state": "ready",
-        "next_command": "af hotspots --gate-a-top-k 3  # 扫第一批 hotspot",
+        "next_command": "blogflow article-hotspots --gate-a-top-k 3  # 扫第一批文章热点",
         "reason": "all init checks pass",
         "stage": "ready",
         "mode": mode,
@@ -753,15 +755,15 @@ def _detect_next_step(env_path: Path) -> dict[str, Any]:
         payload["optional_next"] = (
             "If you later want phone-based Telegram approval, set "
             "TELEGRAM_BOT_TOKEN in ~/.agentflow/secrets/telegram.env, "
-            "send /start to the bot, then `af review-daemon &`."
+            "send /start to the bot, then `blogflow review-daemon &`."
         )
     return payload
 
 
 def _step_kick_hotspots() -> dict[str, Any]:
-    """Fire-and-forget `af hotspots --gate-a-top-k 3` after daemon healthy."""
+    """Fire-and-forget `blogflow article-hotspots --gate-a-top-k 3` after daemon healthy."""
     res = _step("hotspots-kick")
-    argv = _af_argv("hotspots", "--gate-a-top-k", "3")
+    argv = _af_argv("article-hotspots", "--gate-a-top-k", "3")
     try:
         subprocess.Popen(
             argv,
@@ -780,7 +782,7 @@ def _step_kick_hotspots() -> dict[str, Any]:
     res["hint"] = (
         "Gate A 卡应在 60-90s 后到 TG (假设 daemon 已 capture chat_id)"
     )
-    res["detail"] = "hotspots kicked (Gate A top-3)"
+    res["detail"] = "article hotspots kicked (Gate A top-3)"
     return res
 
 
@@ -827,7 +829,7 @@ def _render_summary(
     has_failed = any(s["status"] in {"failed", "spawn_error", "error"} for s in steps)
 
     if has_failed:
-        click.echo("next: see failed step(s) above; re-run `af bootstrap` after fixing")
+        click.echo("next: see failed step(s) above; re-run `blogflow bootstrap` after fixing")
         return
 
     daemon_step = next((s for s in steps if s["step"] == "daemon"), None)
@@ -841,27 +843,27 @@ def _render_summary(
             )
         else:
             click.echo(
-                "next: daemon 心跳异常 — 跑 `af doctor`，确认后再 "
-                "`af review-daemon` 手动启动"
+                "next: daemon 心跳异常 — 跑 `blogflow doctor`，确认后再 "
+                "`blogflow review-daemon` 手动启动"
             )
     elif start_daemon_flag:
         if daemon_step and daemon_step["status"] == "healthy":
             click.echo(
                 f"next: daemon 已起 (pid={daemon_step.get('pid')}); "
                 f"心跳 {daemon_step.get('heartbeat_age_seconds')}s — "
-                "可跑 `af hotspots` 触发审"
+                "可跑 `blogflow article-hotspots` 触发审"
             )
         else:
             click.echo(
-                "next: daemon 起了但心跳没到; 跑 `af doctor` 看 .env 是否齐"
+                "next: daemon 起了但心跳没到; 跑 `blogflow doctor` 看 .env 是否齐"
             )
     elif mock:
         click.echo(
             "next: MOCK_LLM=true 已设；"
-            "`af bootstrap --start-daemon` 起 daemon 或 `af doctor` 验"
+            "`blogflow bootstrap --start-daemon` 起 daemon 或 `blogflow doctor` 验"
         )
     else:
-        click.echo("next: `af onboard` (interactive), then `af doctor`")
+        click.echo("next: `blogflow onboard` (interactive), then `blogflow doctor`")
 
 
 # ---------------------------------------------------------------------------
@@ -875,14 +877,14 @@ def _render_summary(
     "skip_skills",
     is_flag=True,
     default=False,
-    help="Skip the `af skill-install` step.",
+    help="Skip the `blogflow skill-install` step.",
 )
 @click.option(
     "--skip-onboard",
     "skip_onboard",
     is_flag=True,
     default=False,
-    help="Skip printing the `af onboard` pointer.",
+    help="Skip printing the `blogflow onboard` pointer.",
 )
 @click.option(
     "--skill-mode",
@@ -890,7 +892,7 @@ def _render_summary(
     type=click.Choice(["symlink", "copy"]),
     default="symlink",
     show_default=True,
-    help="Mode passed through to `af skill-install`.",
+    help="Mode passed through to `blogflow skill-install`.",
 )
 @click.option(
     "--mock",
@@ -904,14 +906,14 @@ def _render_summary(
     "start_daemon_flag",
     is_flag=True,
     default=False,
-    help="Spawn af review-daemon after setup, verify heartbeat within 30s",
+    help="Spawn blogflow review-daemon after setup, verify heartbeat within 30s",
 )
 @click.option(
     "--first-run",
     "first_run",
     is_flag=True,
     default=False,
-    help="Full first-run automation: onboard + start daemon + kick hotspots once",
+    help="Full first-run automation: onboard + start daemon + kick article hotspots once",
 )
 @click.option(
     "--next-step",
@@ -946,8 +948,8 @@ def bootstrap(
     \b
       --mock            auto MOCK_LLM=true (and prompt TG creds w/ --first-run)
       --start-daemon    spawn review-daemon detached + verify heartbeat (30s)
-      --first-run       full automation: run af onboard, start daemon,
-                        kick a hotspots Gate-A pass once
+      --first-run       full automation: run blogflow onboard, start daemon,
+                        kick an article-hotspots Gate-A pass once
       --next-step       detect current init state + emit next command
                         (no setup; safe for AI to call repeatedly)
       --json            machine-readable output
@@ -1028,7 +1030,7 @@ def bootstrap(
         daemon_result = _step_start_daemon()
         steps.append(daemon_result)
 
-    # 7. kick hotspots: --first-run AND daemon healthy
+    # 7. kick article hotspots: --first-run AND daemon healthy
     if first_run and daemon_result is not None and daemon_result.get("status") == "healthy":
         steps.append(_step_kick_hotspots())
     elif first_run:
@@ -1036,7 +1038,7 @@ def bootstrap(
             {
                 "step": "hotspots-kick",
                 "status": "skipped",
-                "detail": "daemon not healthy — skipping hotspots kick",
+                "detail": "daemon not healthy — skipping article-hotspots kick",
             }
         )
 

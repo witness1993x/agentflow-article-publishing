@@ -1,25 +1,25 @@
 [Unit]
-Description=AgentFlow Telegram Review Daemon
+Description=BlogFlow Article Publishing Review Daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=agentflow
-Group=agentflow
+User=blogflow
+Group=blogflow
 # These paths are aligned with `deploy.sh` (which extracts the bundle to
-# /opt/agentflow). If you install elsewhere, edit BOTH WorkingDirectory and
+# /opt/blogflow). If you install elsewhere, edit BOTH WorkingDirectory and
 # ExecStart, or re-run `deploy.sh --prefix /custom/path`.
-WorkingDirectory=/opt/agentflow/backend
-EnvironmentFile=/opt/agentflow/backend/.env
-ExecStart=/opt/agentflow/backend/.venv/bin/af review-daemon
+WorkingDirectory=/opt/blogflow/backend
+EnvironmentFile=/opt/blogflow/backend/.env
+ExecStart=/opt/blogflow/backend/.venv/bin/blogflow review-daemon
 Restart=on-failure
 RestartSec=10
 # Best-effort hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/agentflow/.agentflow /opt/agentflow/backend
+ReadWritePaths=/home/blogflow/.agentflow /opt/blogflow/backend
 PrivateTmp=true
 
 [Install]

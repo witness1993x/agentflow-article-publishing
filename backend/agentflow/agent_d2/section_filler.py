@@ -101,8 +101,14 @@ async def fill_section(
 
     intent = load_current_intent()
     intent_block = render_topic_intent_block(intent)
+    # v1.1.9 — fit_score and/or hotspot can be threaded through context so
+    # the publisher block flips to observer mode on distant topics. Falls
+    # back to no-fit-signal (configured voice unchanged) when neither is
+    # present, preserving backward compat.
     publisher_block = render_publisher_account_block(
-        resolve_publisher_account_from_intent(intent)
+        resolve_publisher_account_from_intent(intent),
+        fit_score=context.get("fit_score"),
+        hotspot=context.get("hotspot"),
     )
 
     substitutions = {

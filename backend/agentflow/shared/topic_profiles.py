@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -244,23 +245,95 @@ def resolve_publisher_account_from_intent(
     return topic_profile_publisher_account(profile)
 
 
-def render_publisher_account_block(publisher: dict[str, Any] | None) -> str:
+def topic_profile_effective_voice(
+    publisher: dict[str, Any] | None,
+    fit_score: float | None,
+) -> tuple[str, str]:
+    """v1.1.9 — resolve the effective writing voice from configured voice + fit.
+
+    Returns ``(effective_voice, reason)``.
+
+    Logic:
+      * fit_score is None → keep configured voice (backward compat;
+        callers without a fit signal don't get downgraded).
+      * fit_score >= AGENTFLOW_VOICE_FIRST_PARTY_MIN_FIT (default 0.20)
+        → keep configured voice. Topic is in our wheelhouse, anchoring back
+        to product_facts is appropriate.
+      * fit_score < that threshold (but the article still made it past the
+        D1 hard gate) → force "observer". Topic is too distant for a
+        first-party-brand voice to be honest; writing must be industry
+        observation, not product story.
+
+    The thresholds are env-tunable; conservative defaults match v1.0.21's
+    hard-gate intuition (0.025 hard floor, 0.10 observer floor, 0.20
+    first-party floor)."""
+    configured = (publisher or {}).get("voice") or "first_party_brand"
+    if fit_score is None:
+        return str(configured), "no_fit_signal"
+    try:
+        first_party_min = float(
+            os.environ.get("AGENTFLOW_VOICE_FIRST_PARTY_MIN_FIT", "0.20")
+            or "0.20"
+        )
+    except (TypeError, ValueError):
+        first_party_min = 0.20
+    if fit_score >= first_party_min:
+        return str(configured), f"fit_score={fit_score:.3f}>=first_party_min({first_party_min:.3f})"
+    return "observer", f"fit_score={fit_score:.3f}<first_party_min({first_party_min:.3f})"
+
+
+def render_publisher_account_block(
+    publisher: dict[str, Any] | None,
+    *,
+    fit_score: float | None = None,
+    hotspot: dict[str, Any] | None = None,
+) -> str:
     """Render publisher_account as a prompt-injectable markdown block.
 
     Returns an empty string when publisher is None / empty so the placeholder
     collapses cleanly in templates.
+
+    v1.1.9: ``fit_score`` (or ``hotspot``, computed inline) determines the
+    effective voice. Distant topics (low fit) flip the prompt to observer
+    mode — different pronoun, no product_facts anchor block, explicit
+    "do not graft this onto our product story" rule. This kills the
+    forced-analogy failure where every off-topic hotspot got rewritten
+    into "我们 ChainStream 做的是…".
     """
     if not publisher:
         return ""
+    if fit_score is None and hotspot is not None:
+        try:
+            from agentflow.agent_d1.topic_fit import score_fit  # local import — avoid cycle
+            fit_score = float(score_fit(hotspot, publisher))
+        except Exception:  # pragma: no cover — defensive
+            fit_score = None
+    effective_voice, voice_reason = topic_profile_effective_voice(
+        publisher, fit_score,
+    )
+    is_observer = effective_voice == "observer"
     lines: list[str] = ["## Publisher 账号身份（写作视角硬约束）", ""]
     brand = str(publisher.get("brand") or "").strip()
     voice = str(publisher.get("voice") or "").strip()
     pronoun = str(publisher.get("pronoun") or "").strip()
+    if is_observer:
+        # Observer mode: swap pronoun to first-person personal, never
+        # corporate "我们". The previous configured pronoun is recorded
+        # in the reason line so a reader of the prompt knows what's
+        # being overridden.
+        pronoun = "我（个人观察）"
     output_language = str(publisher.get("output_language") or "zh-Hans").strip()
     if brand:
         lines.append(f"- **品牌**: {brand}")
     if voice:
-        lines.append(f"- **口吻 voice**: {voice}")
+        if is_observer:
+            lines.append(
+                f"- **口吻 voice**: observer "
+                f"（配置为 `{voice}`，但根据当前话题与品牌距离自动降档；"
+                f"原因：{voice_reason}）"
+            )
+        else:
+            lines.append(f"- **口吻 voice**: {voice}")
     if pronoun:
         lines.append(f"- **第一人称代词**: {pronoun}（写作时优先使用）")
     if output_language:
@@ -305,11 +378,35 @@ def render_publisher_account_block(publisher: dict[str, Any] | None) -> str:
         for item in dont:
             lines.append(f"- {item}")
     facts = publisher.get("product_facts") or []
-    if facts:
+    if facts and not is_observer:
+        # Observer mode INTENTIONALLY drops the product_facts anchor list.
+        # Listing them here is a temptation for the LLM to paste-and-pivot:
+        # "this article is about X, and X reminds me of our product fact
+        # Y, which is why ChainStream…". When the topic is genuinely close
+        # to our domain, anchoring is the right thing. When it's not, it
+        # produces the v1.1.7 forced-analogy failure mode (硬套预言机).
         lines.append("")
         lines.append("**可引用的产品事实** (这些都是 publisher 自家的事，可以直接陈述):")
         for fact in facts:
             lines.append(f"- {fact}")
+    if is_observer:
+        lines.append("")
+        lines.append("## ⚠ 当前为 observer 模式（行业观察口吻）")
+        lines.append("")
+        lines.append(
+            "本条话题与本品牌产品域的相似度较低，**不要把它强行嫁接回我们的"
+            " product_facts**。请按下面的规则写作："
+        )
+        lines.append("")
+        lines.append("- 用「我」（第一人称个人观察）开口，**不要**用「我们」/「ChainStream 做的是」")
+        lines.append("- 写成行业观察、判断或评论，可以引用公开资料和现象")
+        lines.append("- **禁止**做出代表 publisher 的承诺式陈述（"
+                     "如「我们已经支持」「我们的方案是」），即便正文里有任何"
+                     " product_facts 候选，也不要把它当作必引锚点")
+        lines.append("- **禁止**把当前话题硬转成 publisher 自家产品的一面来讲；"
+                     "即便能找到 0.5 步之外的类比，也保持观察口吻")
+        lines.append("- 文末可以收一句「这件事和我们做的也有点关系」式的轻锚，"
+                     "但全文重心放在话题本身、不是放在自家产品上")
     lines.append("")
     return "\n".join(lines)
 

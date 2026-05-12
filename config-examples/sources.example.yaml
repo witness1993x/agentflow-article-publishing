@@ -13,7 +13,7 @@
 #
 # Companion env knobs (in your .env):
 #   AGENTFLOW_SIGNAL_DOMAIN_THRESHOLD=0.03   # per-signal coverage gate
-#   AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=0.05  # per-cluster Jaccard gate
+#   AGENTFLOW_TOPIC_FIT_HARD_THRESHOLD=0.025 # per-cluster Jaccard gate
 #   AGENTFLOW_TWITTER_KOL_ONLY_HIGH=false    # restrict to weight: high
 #
 # Tightly-scoped publishers (crypto-infra, B2B SaaS, regulated finance,
@@ -153,6 +153,36 @@ rss_feeds:
   - url: "https://messari.io/rss"
     name: "Messari Research"
     relevance_to_series: ["C"]
+
+# ============================================================
+# Brave Web Search (v1.1.9, optional)
+# ============================================================
+# Independent web discovery via the Brave Search API. Surfaces vendor
+# blogs / GitHub READMEs / Substack drops that don't show up in Twitter
+# or HN.
+#
+# Required envs to enable:
+#   AGENTFLOW_BRAVE_SEARCH_ENABLED=true
+#   BRAVE_API_KEY=<your_brave_search_api_key>
+#
+# Free tier is 1 qps / 2k month — keep this list short. Paid tier is
+# 20 qps. The collector self-paces at 1.1s between calls regardless.
+#
+# `weight` semantics match twitter_kols / twitter_search:
+#   high   — always run
+#   medium — run unless AGENTFLOW_BRAVE_SEARCH_ONLY_HIGH=true
+#   blocked — never run (slot kept for posterity)
+#
+# Operators tune queries to their publisher_account.keyword_groups.
+# Example queries below mirror a generic crypto-infra publisher; a
+# brand-neutral install should replace these wholesale.
+brave_search:
+  - query: "<your_core_keyword>"
+    weight: medium
+    count: 10
+  # - query: "real-time on-chain data infrastructure"
+  #   weight: high
+  #   count: 12
 
 # ============================================================
 # HackerNews

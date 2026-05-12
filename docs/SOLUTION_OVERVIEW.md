@@ -30,7 +30,7 @@ AgentFlow 当前是 **skill-first + `af` CLI + 本地文件系统** 的方案，
 
 | 产品目标 | 当前系统实现 |
 |---|---|
-| 从热点快速进入写作 | D1 (`af hotspots`) → skill 收集 `hotspot_id + angle` → D2 (`af write --auto-pick`) |
+| 从文章热点快速进入写作 | D1 (`blogflow article-hotspots`) → skill 收集 `hotspot_id + angle` → D2 (`blogflow write --auto-pick`) |
 | 默认先拿到完整稿件 | `af write --auto-pick` 一次性 skeleton + `0/0/0` fill |
 | 局部人工干预 | `af edit --section N [--paragraph M] --command "..."`；重选后 `af fill --title/opening/closing` |
 | 多平台改写与发布 | D3 (`af preview`) → D4 (`af publish`)；`agentflow-publish` skill 分 8 步编排 |
@@ -204,8 +204,8 @@ flowchart LR
 | 命令 | 作用 | 写 memory |
 |---|---|---|
 | `learn-style` | D0 入口 | `learn_style` |
-| `hotspots` | D1 完整 scan | — |
-| `hotspot-show` | 单 hotspot 详情 | — |
+| `article-hotspots` | D1 文章热点搜索 | — |
+| `article-hotspot-show` | 单个文章热点详情 | — |
 | `write` | D2 skeleton +（可选）auto-fill | `article_created` + `fill_choices` |
 | `fill` | 重新 fill 已存在 skeleton | `fill_choices` |
 | `edit` | section/paragraph 自然语言编辑 | `section_edit` |
@@ -223,7 +223,7 @@ flowchart LR
 |---|---|---|
 | `agentflow` | — | 入口总览 / 路由 |
 | `agentflow-style` | `learn-style` | D0 风格学习 |
-| `agentflow-hotspots` | `hotspots`, `hotspot-show` | 选 hotspot + angle |
+| `agentflow-hotspots` | `article-hotspots`, `article-hotspot-show` | 选文章热点 + angle |
 | `agentflow-write` | `write`, `fill`, `edit`, `image-resolve`, `draft-show` | 交互式写作循环 |
 | `agentflow-publish` | `draft-show`, `image-resolve`, `preview`, `publish`, `publish-rollback` | 8 步 + Step 1b pre-publish overview |
 
@@ -302,7 +302,7 @@ rollback 全部平台后 `status=preview_ready`、`published_at` 清空、`publi
 
 ### 8.2 热点到自动成稿（D1 + D2 / `/agentflow-hotspots` + `/agentflow-write`）
 
-1. `af hotspots --json` → 拉 Twitter/RSS/HN → Jina 聚类 → Kimi 挖 angles → 写 `hotspots/<date>.json`
+1. `blogflow article-hotspots --json` → 拉 Twitter/RSS/HN → Jina 聚类 → Kimi 挖 angles → 写 `hotspots/<date>.json`
 2. 用户选 `hotspot_id + angle_index`
 3. `af write <hid> --auto-pick --json` → 生成 skeleton → 立即 `0/0/0` fill → 落盘 draft + metadata
 4. 写 `article_created` + `fill_choices`
@@ -378,7 +378,7 @@ CLI 启动时 `_load_dotenv_once()` 从 `backend/.env` 加载；`os.environ` 已
 
 | 步骤 | 命令 | 结果 |
 |---|---|---|
-| D1 | `MOCK_LLM=true af hotspots --json` | 5 hotspots ✓ |
+| D1 | `MOCK_LLM=true blogflow article-hotspots --json` | 5 article hotspots ✓ |
 | D2 | `MOCK_LLM=true af write <hid> --auto-pick --json` | draft 齐全 ✓ |
 | D3 | `MOCK_LLM=true af preview <aid> --json` | 2 平台 md ✓ |
 | D4 | `MOCK_LLM=true af publish <aid> --force-strip-images --json` | 2 平台 success ✓ |

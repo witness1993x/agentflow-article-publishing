@@ -30,12 +30,12 @@
 ### 3) Act
 
 - 仅改必要文件；保持 brand-neutral
-- 触及 state.py / daemon.py 时同步检查 state_machine.md 和 TG_BOT_FLOWS.md 是否需要联动
+- 触及 state.py / daemon.py 时同步检查 `state_machine.md`、`docs/flows/LARK_FIRST_REVIEW_FLOWS.md` 和 `TG_BOT_FLOWS.md` 是否需要联动
 
 ### 4) Verify
 
-- `pytest tests/test_v02_workflows.py -q` 应 42+ passed
-- 涉及凭据 / daemon 时跑 `af doctor`
+- `pytest tests/test_v02_workflows.py -q` 应通过当前全量用例
+- 涉及凭据 / daemon 时跑 `blogflow doctor`
 - mock pass 不等于 real-key ready
 
 ### 5) Report

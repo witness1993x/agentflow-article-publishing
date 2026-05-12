@@ -123,8 +123,9 @@ class RejectBTests(_AgentflowHomeTestCase):
 
 
 class RefillTests(_AgentflowHomeTestCase):
-    def test_refill_returns_reply_card_no_state_mutation(self) -> None:
-        with patch.object(lark_callback.review_state, "transition") as mock_trans:
+    def test_refill_transitions_and_spawns_auto_pick_fill(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans, \
+                patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
             res = lark_callback.handle_event(
                 event_kind="card_action",
                 article_id="art-7",
@@ -134,9 +135,41 @@ class RefillTests(_AgentflowHomeTestCase):
             )
         self.assertTrue(res["ack"])
         self.assertIsNotNone(res["reply_card"])
-        self.assertIn("Telegram", res["reply_card"]["elements"][0]["text"]["content"])
-        mock_trans.assert_not_called()
-        self.assertIn("refill_deferred_to_tg", res["side_effects"])
+        self.assertIn("refill_spawned", res["side_effects"])
+        mock_trans.assert_called_once()
+        args, kwargs = mock_trans.call_args
+        self.assertEqual(args[0], "art-7")
+        self.assertEqual(kwargs["gate"], "B")
+        self.assertEqual(kwargs["to_state"], review_state.STATE_DRAFTING)
+        self.assertEqual(kwargs["actor"], "lark:ou_xxx_test")
+        self.assertEqual(kwargs["decision"], "refill_via_lark")
+
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("fill", argv)
+        self.assertIn("art-7", argv)
+        self.assertIn("--skeleton-only", argv)
+        self.assertIn("--auto-pick", argv)
+        self.assertIn("--json", argv)
+        self.assertEqual(mock_spawn.call_args.kwargs["article_id"], "art-7")
+        self.assertEqual(mock_spawn.call_args.kwargs["action"], "refill")
+
+    def test_refill_returns_already_handled_on_state_error(self) -> None:
+        with patch.object(
+            lark_callback.review_state,
+            "transition",
+            side_effect=StateError("already rejected"),
+        ), patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art-7",
+                action="refill",
+                payload={},
+                operator=_OPERATOR,
+            )
+        self.assertTrue(res["ack"])
+        self.assertEqual(res["side_effects"], ["already_handled"])
+        self.assertIsNotNone(res["reply_card"])
+        mock_spawn.assert_not_called()
 
 
 class TakeoverTests(_AgentflowHomeTestCase):
@@ -451,6 +484,102 @@ class GateBEditTests(_AgentflowHomeTestCase):
         body = res["reply_card"]["elements"][0]["text"]["content"]
         self.assertIn("section=1", body)
 
+    def test_edit_with_inline_text_spawns_edit_command(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="gate_b_edit",
+                payload={
+                    "section_index": 1,
+                    "paragraph_index": 0,
+                    "comment": "第二段补一个数据例子",
+                },
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_b_edit_spawned", res["side_effects"])
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("edit", argv)
+        self.assertIn("art_e", argv)
+        self.assertIn("--section", argv)
+        self.assertIn("1", argv)
+        self.assertIn("--paragraph", argv)
+        self.assertIn("0", argv)
+        self.assertIn("--command", argv)
+        self.assertIn("第二段补一个数据例子", argv)
+        self.assertIn("--post-review", argv)
+
+    def test_edit_with_inline_text_requires_target(self) -> None:
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="gate_b_edit",
+                payload={"comment": "整体改得更锋利"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("gate_b_edit_missing_target", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "orange")
+        mock_spawn.assert_not_called()
+
+    def test_apply_pending_edit_uses_latest_gate_b_slot(self) -> None:
+        memory.append_memory_event(
+            "lark_edit_pending",
+            article_id="art_e",
+            payload={
+                "operator_open_id": _OPERATOR["open_id"],
+                "section_index": 2,
+                "paragraph_index": 1,
+            },
+        )
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="apply_pending_edit",
+                payload={"text": "这里加一个反例"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("apply_pending_edit_spawned", res["side_effects"])
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("edit", argv)
+        self.assertIn("--section", argv)
+        self.assertIn("2", argv)
+        self.assertIn("--paragraph", argv)
+        self.assertIn("1", argv)
+        self.assertIn("--post-review", argv)
+        self.assertIn("这里加一个反例", argv)
+
+    def test_apply_pending_edit_does_not_reuse_consumed_slot(self) -> None:
+        memory.append_memory_event(
+            "lark_edit_pending",
+            article_id="art_e",
+            payload={
+                "operator_open_id": _OPERATOR["open_id"],
+                "section_index": 2,
+            },
+        )
+        with patch.object(lark_callback, "_spawn_async", return_value=True):
+            first = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="apply_pending_edit",
+                payload={"text": "补一个例子"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("apply_pending_edit_spawned", first["side_effects"])
+
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            second = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_e",
+                action="apply_pending_edit",
+                payload={"text": "再补一次"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("pending_edit_not_found", second["side_effects"])
+        mock_spawn.assert_not_called()
+
 
 class GateBDiffTests(_AgentflowHomeTestCase):
     def test_diff_renders_audit_event(self) -> None:
@@ -521,6 +650,23 @@ class GateCTests(_AgentflowHomeTestCase):
         self.assertIn("logo_centric", argv)
         self.assertIn("gate_c_regen_spawned", res["side_effects"])
 
+    def test_regen_passes_inline_prompt_to_image_gate(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="gate_c_regen",
+                payload={
+                    "mode": "cover-only",
+                    "prompt": "更像链上数据雷达，不要抽象机器人",
+                },
+                operator=_OPERATOR,
+            )
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("--cover-description", argv)
+        self.assertIn("更像链上数据雷达，不要抽象机器人", argv)
+        self.assertIn("gate_c_regen_spawned", res["side_effects"])
+
     def test_full_renders_image_placeholder_list(self) -> None:
         _make_meta(self.home, "art_c", {
             "image_placeholders": [
@@ -537,6 +683,35 @@ class GateCTests(_AgentflowHomeTestCase):
         )
         body = res["reply_card"]["elements"][0]["text"]["content"]
         self.assertIn("封面 hero", body)
+
+    def test_image_picker_cover_only_spawns_image_gate(self) -> None:
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="image_gate_pick",
+                payload={"mode": "cover-only"},
+                operator=_OPERATOR,
+            )
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("image-gate", argv)
+        self.assertIn("--mode", argv)
+        self.assertIn("cover-only", argv)
+        self.assertIn("image_gate_pick_spawned", res["side_effects"])
+
+    def test_image_picker_skip_posts_gate_d(self) -> None:
+        with patch.object(lark_callback.review_state, "transition") as mock_trans, \
+             patch.object(lark_callback.review_triggers, "post_gate_d") as post_d:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_c",
+                action="image_gate_pick",
+                payload={"mode": "none"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("image_gate_skipped", res["side_effects"])
+        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "image_skipped")
+        post_d.assert_called_once_with("art_c")
 
 
 # ---------------------------------------------------------------------------
@@ -594,10 +769,9 @@ class GateDTests(_AgentflowHomeTestCase):
         self.assertIn("empty_selection", res["side_effects"])
         mock_spawn.assert_not_called()
 
-    def test_confirm_with_selection_transitions_then_spawns_publish(self) -> None:
+    def test_confirm_with_selection_spawns_dispatch_chain(self) -> None:
         _make_meta(self.home, "art_d", {"gate_d_selection": ["medium", "ghost"]})
-        with patch.object(lark_callback.review_state, "transition") as mock_trans, \
-             patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+        with patch.object(lark_callback, "_spawn_publish_dispatch", return_value=True) as mock_spawn:
             res = lark_callback.handle_event(
                 event_kind="card_action",
                 article_id="art_d",
@@ -605,11 +779,10 @@ class GateDTests(_AgentflowHomeTestCase):
                 payload={},
                 operator=_OPERATOR,
             )
-        self.assertIn("gate_d_publish_spawned", res["side_effects"])
-        argv = mock_spawn.call_args.args[0]
-        self.assertIn("publish", argv)
-        self.assertIn("medium,ghost", argv)
-        self.assertEqual(mock_trans.call_args.kwargs["to_state"], "ready_to_publish")
+        self.assertIn("gate_d_dispatch_spawned", res["side_effects"])
+        mock_spawn.assert_called_once_with(
+            "art_d", ["medium", "ghost"], operator=_OPERATOR
+        )
 
     def test_save_default_writes_preferences_file(self) -> None:
         _make_meta(self.home, "art_d", {"gate_d_selection": ["medium", "ghost"]})
@@ -652,6 +825,40 @@ class LockedTakeoverTests(_AgentflowHomeTestCase):
         self.assertIn("rewrite", body)
         self.assertIn("all over the place", body)
 
+    def test_apply_pending_locked_edit_parses_prefixed_section(self) -> None:
+        memory.append_memory_event(
+            "lark_locked_edit_pending",
+            article_id="art_l",
+            payload={"operator_open_id": _OPERATOR["open_id"]},
+        )
+        with patch.object(lark_callback, "_spawn_async", return_value=True) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_l",
+                action="apply_pending_edit",
+                payload={"text": "2 重写这一节，让论点更直接"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("apply_pending_edit_spawned", res["side_effects"])
+        argv = mock_spawn.call_args.args[0]
+        self.assertIn("--section", argv)
+        self.assertIn("2", argv)
+        self.assertIn("--command", argv)
+        self.assertIn("重写这一节，让论点更直接", argv)
+
+    def test_apply_pending_edit_without_slot_returns_grey_card(self) -> None:
+        with patch.object(lark_callback, "_spawn_async") as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_l",
+                action="apply_pending_edit",
+                payload={"text": "2 重写这一节"},
+                operator=_OPERATOR,
+            )
+        self.assertIn("pending_edit_not_found", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "grey")
+        mock_spawn.assert_not_called()
+
     def test_give_up_transitions_to_draft_rejected(self) -> None:
         with patch.object(lark_callback.review_state, "transition") as mock_trans:
             res = lark_callback.handle_event(
@@ -683,6 +890,272 @@ class DeferTests(_AgentflowHomeTestCase):
         self.assertIn("deferred", res["side_effects"])
         self.assertEqual(res["reply_card"]["header"]["template"], "grey")
         mock_trans.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Free-text @-mention routing — v1.1.7 anti-hallucination guard.
+#
+# These tests pin the deterministic shape of lark_message replies so the
+# Lark-side bot never has to fabricate a response. Every input must produce
+# either a concrete handler dispatch or a structured "I don't understand"
+# card — never silence.
+# ---------------------------------------------------------------------------
+
+
+class _FreeTextRoutingHelper(_AgentflowHomeTestCase):
+    """Shared scaffolding for tests that need a draft_pending_review article."""
+
+    def _create_article_in_state(self, aid: str, current_state: str) -> None:
+        _make_meta(self.home, aid, {"title": aid, "gate_history": []})
+        review_state.transition(
+            aid, gate="A", to_state=review_state.STATE_TOPIC_APPROVED,
+            actor="lark:test", decision="seed",
+        )
+        review_state.transition(
+            aid, gate="A", to_state=review_state.STATE_DRAFTING,
+            actor="lark:test", decision="seed",
+        )
+        if current_state == review_state.STATE_DRAFT_PENDING_REVIEW:
+            review_state.transition(
+                aid, gate="B", to_state=review_state.STATE_DRAFT_PENDING_REVIEW,
+                actor="lark:test", decision="seed",
+            )
+        elif current_state == review_state.STATE_IMAGE_PENDING_REVIEW:
+            review_state.transition(
+                aid, gate="B", to_state=review_state.STATE_DRAFT_PENDING_REVIEW,
+                actor="lark:test", decision="seed",
+            )
+            review_state.transition(
+                aid, gate="B", to_state=review_state.STATE_DRAFT_APPROVED,
+                actor="lark:test", decision="seed",
+            )
+            review_state.transition(
+                aid, gate="C", to_state=review_state.STATE_IMAGE_PENDING_REVIEW,
+                actor="lark:test", decision="seed",
+            )
+
+
+class FreeTextIntentClassifierTests(unittest.TestCase):
+    """White-box tests on _classify_intent — keyword matrix lives here so a
+    drift in the table is caught before the integration tests fire."""
+
+    def test_chinese_approve_maps_to_approve_b(self) -> None:
+        self.assertEqual(lark_callback._classify_intent("通过"), "approve_b")
+
+    def test_english_approve_maps_to_approve_b(self) -> None:
+        self.assertEqual(lark_callback._classify_intent("approve"), "approve_b")
+
+    def test_reject_chinese(self) -> None:
+        self.assertEqual(lark_callback._classify_intent("拒绝"), "reject_b")
+
+    def test_rewrite(self) -> None:
+        self.assertEqual(lark_callback._classify_intent("整篇重写"), "gate_b_rewrite")
+
+    def test_advance_chinese(self) -> None:
+        self.assertEqual(
+            lark_callback._classify_intent("这篇推进到下个 gate"), "_advance"
+        )
+
+    def test_unknown_returns_none(self) -> None:
+        self.assertIsNone(lark_callback._classify_intent("天气怎么样"))
+
+    def test_normalize_strips_lark_at_user_placeholder(self) -> None:
+        # Lark delivers @-mentions as @_user_N placeholders; the human-
+        # readable name is supplied separately in `at_users`.
+        self.assertEqual(lark_callback._normalize_text("@_user_1 通过"), "通过")
+        self.assertEqual(lark_callback._normalize_text("  @bot 推进  "), "推进")
+
+    def test_normalize_strips_inline_mentions_so_substrings_do_not_match(self) -> None:
+        # Regression: the literal hallucination from the v1.1.7 screenshot
+        # used to false-match ``audit`` inside ``@CSAuditContentPostBot``.
+        text = "完成！Gate B 卡片已发到 TG @CSAuditContentPostBot"
+        self.assertIsNone(lark_callback._classify_intent(
+            lark_callback._normalize_text(text)
+        ))
+
+    def test_ascii_keyword_matches_only_on_word_boundary(self) -> None:
+        # ``edit`` should match ``please edit`` but not ``editorial``.
+        self.assertEqual(lark_callback._classify_intent("please edit it"), "gate_b_edit")
+        self.assertIsNone(lark_callback._classify_intent("editorial board"))
+
+
+class FreeTextRouterTests(_FreeTextRoutingHelper):
+
+    def test_unknown_intent_returns_help_card_not_silence(self) -> None:
+        """Anti-hallucination: any unparseable @-mention must produce a
+        deterministic help card so the Lark bot doesn't fabricate a 'Gate B
+        completed' reply."""
+        res = lark_callback.handle_event(
+            event_kind="message",
+            article_id=None,
+            action=None,
+            payload={"text": "完成！Gate B 卡片已发到 TG"},
+            operator=_OPERATOR,
+        )
+        self.assertTrue(res["ack"])
+        self.assertIn("unknown_intent", res["side_effects"])
+        self.assertIsNotNone(res["reply_card"])
+        self.assertIn("没看懂", res["reply_card"]["elements"][0]["text"]["content"])
+
+    def test_empty_message_returns_help_card(self) -> None:
+        res = lark_callback.handle_event(
+            event_kind="message", article_id=None, action=None,
+            payload={"text": "   "}, operator=_OPERATOR,
+        )
+        self.assertIn("empty_message", res["side_effects"])
+
+    def test_advance_with_no_active_article_returns_friendly_card(self) -> None:
+        res = lark_callback.handle_event(
+            event_kind="message", article_id=None, action=None,
+            payload={"text": "推进到下个 gate"}, operator=_OPERATOR,
+        )
+        self.assertIn("no_active_article", res["side_effects"])
+        self.assertIsNotNone(res["reply_card"])
+
+    def test_advance_at_draft_pending_review_calls_approve_b(self) -> None:
+        aid = "art_advance_b"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        res = lark_callback.handle_event(
+            event_kind="message", article_id=None, action=None,
+            payload={"text": "推进到下个 gate"}, operator=_OPERATOR,
+        )
+        self.assertIn("approve_b", res["side_effects"])
+
+    def test_approve_intent_at_draft_pending_review_dispatches(self) -> None:
+        aid = "art_approve_intent"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        res = lark_callback.handle_event(
+            event_kind="message", article_id=None, action=None,
+            payload={"text": "通过"}, operator=_OPERATOR,
+        )
+        self.assertIn("approve_b", res["side_effects"])
+
+    def test_chat_id_propagates_into_telemetry(self) -> None:
+        aid = "art_chatid"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        chat_id = "oc_lark_chat_42"
+        lark_callback.handle_event(
+            event_kind="message", article_id=None, action=None,
+            payload={"text": "通过", "chat_id": chat_id},
+            operator=_OPERATOR,
+        )
+        events = memory.read_memory_events(article_id=aid, event_type="lark_callback")
+        chat_seen = any(
+            (ev.get("payload") or {}).get("chat_id") == chat_id for ev in events
+        )
+        self.assertTrue(chat_seen, "chat_id must be threaded into telemetry payloads")
+
+    def test_pending_edit_priority_over_intent_match(self) -> None:
+        """Free text routes to apply_pending_edit when a pending slot exists,
+        even if the text otherwise looks like an intent keyword."""
+        aid = "art_pending_first"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        memory.append_memory_event(
+            "lark_edit_pending",
+            article_id=aid,
+            payload={"operator_open_id": _OPERATOR["open_id"]},
+        )
+        with patch.object(
+            lark_callback, "_handle_apply_pending_edit",
+            wraps=lark_callback._handle_apply_pending_edit,
+        ) as wrapped:
+            lark_callback.handle_event(
+                event_kind="message", article_id=None, action=None,
+                payload={"text": "改一下第二段措辞"},
+                operator=_OPERATOR,
+            )
+        wrapped.assert_called_once()
+
+
+class FanOutClosureTests(_FreeTextRoutingHelper):
+    """v1.1.8 closure regression: every Gate-state transition that has a
+    natural follow-up card on the TG side must also fire that card on the
+    Lark side. Otherwise the operator approves Gate B and gets stranded
+    with no Gate C card waiting."""
+
+    def test_approve_b_spawns_image_gate_picker(self) -> None:
+        aid = "art_fan_b"
+        self._create_article_in_state(aid, review_state.STATE_DRAFT_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="approve_b", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="image_picker")
+        self.assertIn("image_picker_spawned", res["side_effects"])
+
+    def test_gate_c_approve_spawns_gate_d(self) -> None:
+        aid = "art_fan_c_approve"
+        self._create_article_in_state(aid, review_state.STATE_IMAGE_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="gate_c_approve", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="gate_d")
+        self.assertIn("gate_d_spawned", res["side_effects"])
+
+    def test_gate_c_skip_spawns_gate_d(self) -> None:
+        aid = "art_fan_c_skip"
+        self._create_article_in_state(aid, review_state.STATE_IMAGE_PENDING_REVIEW)
+        with patch.object(
+            lark_callback, "_spawn_next_gate_card",
+        ) as mock_spawn:
+            res = lark_callback.handle_event(
+                event_kind="card_action", article_id=aid,
+                action="gate_c_skip", payload={}, operator=_OPERATOR,
+            )
+        mock_spawn.assert_called_once_with(aid, kind="gate_d")
+        self.assertIn("gate_d_spawned", res["side_effects"])
+
+
+class LarkAuthGateTests(_FreeTextRoutingHelper):
+    """Per-action auth parity with TG's _ACTION_REQ."""
+
+    def test_unauthorized_open_id_for_publish_action_is_denied(self) -> None:
+        from agentflow.agent_review import auth as review_auth
+
+        # Configure a closed Lark allowlist: explicit operator + one allowed
+        # reviewer that does NOT have publish grant.
+        review_auth.lark_add(
+            "ou_reviewer", name="Reviewer", allowed_actions=["review"],
+        )
+        with patch.dict(
+            os.environ, {"LARK_OPERATOR_OPEN_ID": "ou_admin"}, clear=False,
+        ):
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_x",
+                action="gate_d_confirm",  # requires publish
+                payload={},
+                operator={"open_id": "ou_reviewer", "name": "Reviewer"},
+            )
+        self.assertIn("not_authorized", res["side_effects"])
+        self.assertEqual(res["reply_card"]["header"]["template"], "red")
+
+    def test_operator_open_id_always_authorized(self) -> None:
+        with patch.dict(
+            os.environ, {"LARK_OPERATOR_OPEN_ID": "ou_admin"}, clear=False,
+        ):
+            with patch.object(
+                lark_callback.review_state, "transition"
+            ) as mock_trans:
+                res = lark_callback.handle_event(
+                    event_kind="card_action",
+                    article_id="art_x",
+                    action="approve_b",
+                    payload={},
+                    operator={"open_id": "ou_admin", "name": "Admin"},
+                )
+        self.assertNotIn("not_authorized", res["side_effects"])
+        mock_trans.assert_called_once()
+
+
+import os  # noqa: E402  — used by LarkAuthGateTests env patches
 
 
 if __name__ == "__main__":  # pragma: no cover

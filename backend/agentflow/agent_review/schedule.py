@@ -1,24 +1,26 @@
-"""Daemon-internal time-slot scheduler for ``af hotspots``.
+"""Daemon-internal time-slot scheduler for ``blogflow article-hotspots``.
 
-The legacy ``af review-cron-install`` is macOS-only (writes a launchd
+The legacy ``blogflow review-cron-install`` is macOS-only (writes a launchd
 plist). Linux deployments — including the autopost OpenClaw sandbox and
 any systemd VM — had no working scheduling path, so twice-daily
-hotspots scans never fired. This module replaces it with a cross-OS
+article-hotspots scans never fired. This module replaces it with a cross-OS
 internal scheduler driven by the daemon's existing 60-second
 housekeeping tick.
 
 Configuration (env-driven, no extra CLI flags needed):
 
-* ``AGENTFLOW_HOTSPOTS_SCHEDULE`` — comma-separated ``HH:MM`` local
+* ``BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE`` — comma-separated ``HH:MM`` local
   times. Empty / unset = scheduler disabled.
   Example: ``"09:00,18:00"``.
-* ``AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K`` — int, default 3.
+* ``BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE_TOP_K`` — int, default 5.
+  The older ``AGENTFLOW_HOTSPOTS_*`` names are still accepted as legacy
+  fallbacks, but new installs should use the BlogFlow-specific names.
 
 State persistence:
 ``~/.agentflow/review/scheduled_state.json`` keyed by ``"HH:MM"`` →
 ISO-8601 timestamp of the last fire. Used to skip a slot when daemon
 is restarted within the same minute and to expose status via
-``af review-schedule-status``.
+``blogflow review-schedule-status``.
 """
 
 from __future__ import annotations
@@ -39,6 +41,26 @@ _log = get_logger("agent_review.schedule")
 # 60s housekeeping ticks from missing a slot when the tick lands a few
 # seconds after the wall-clock minute.
 _FIRE_WINDOW_SECONDS = 90.0
+_SCHEDULE_ENV = "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE"
+_SCHEDULE_TOP_K_ENV = "BLOGFLOW_ARTICLE_HOTSPOTS_SCHEDULE_TOP_K"
+_LEGACY_SCHEDULE_ENV = "AGENTFLOW_HOTSPOTS_SCHEDULE"
+_LEGACY_SCHEDULE_TOP_K_ENV = "AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K"
+
+
+def _schedule_env_value() -> str:
+    return (
+        os.environ.get(_SCHEDULE_ENV)
+        or os.environ.get(_LEGACY_SCHEDULE_ENV)
+        or ""
+    )
+
+
+def _top_k_env_value() -> str:
+    return (
+        os.environ.get(_SCHEDULE_TOP_K_ENV)
+        or os.environ.get(_LEGACY_SCHEDULE_TOP_K_ENV)
+        or "5"
+    )
 
 
 def _state_path() -> Path:
@@ -126,9 +148,7 @@ def due_slots(
     side effects — so the daemon can call this in a hot loop and tests
     can drive it with arbitrary clock + state."""
     if schedule is None:
-        schedule = _parse_schedule(
-            os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE"),
-        )
+        schedule = _parse_schedule(_schedule_env_value())
     schedule = list(schedule)
     if not schedule:
         return []
@@ -157,8 +177,7 @@ def stamp_fire(slot: tuple[int, int], *, now: datetime | None = None) -> None:
 
 
 def fire_due(spawn: Callable[[int], None], *, top_k: int | None = None) -> list[str]:
-    """Daemon entry point. Resolve ``AGENTFLOW_HOTSPOTS_SCHEDULE`` +
-    ``AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K``, fire each due slot via
+    """Daemon entry point. Resolve the article-hotspots schedule env vars, fire each due slot via
     ``spawn(top_k)``, stamp it, and return the list of fired slot
     labels for logging.
 
@@ -168,7 +187,7 @@ def fire_due(spawn: Callable[[int], None], *, top_k: int | None = None) -> list[
     """
     if top_k is None:
         try:
-            top_k = int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "5"))
+            top_k = int(_top_k_env_value())
         except (TypeError, ValueError):
             top_k = 5
     fired: list[str] = []
@@ -177,19 +196,19 @@ def fire_due(spawn: Callable[[int], None], *, top_k: int | None = None) -> list[
             spawn(top_k)
         except Exception as err:  # pragma: no cover
             _log.warning(
-                "scheduled hotspots spawn failed for slot %s: %s",
+                "scheduled article-hotspots spawn failed for slot %s: %s",
                 _slot_label(slot), err,
             )
             continue
         stamp_fire(slot)
         fired.append(_slot_label(slot))
-        _log.info("scheduled hotspots fired for slot %s", _slot_label(slot))
+        _log.info("scheduled article-hotspots fired for slot %s", _slot_label(slot))
     return fired
 
 
 def status() -> dict[str, Any]:
-    """Snapshot for `af review-schedule-status` and ``af doctor``."""
-    raw = os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE", "")
+    """Snapshot for `blogflow review-schedule-status` and ``blogflow doctor``."""
+    raw = _schedule_env_value()
     schedule = _parse_schedule(raw)
     state = _read_state()
     now = datetime.now().astimezone()
@@ -209,7 +228,8 @@ def status() -> dict[str, Any]:
     return {
         "enabled": bool(schedule),
         "raw": raw,
-        "top_k": int(os.environ.get("AGENTFLOW_HOTSPOTS_SCHEDULE_TOP_K", "5") or 3),
+        "env_var": _SCHEDULE_ENV if os.environ.get(_SCHEDULE_ENV) else _LEGACY_SCHEDULE_ENV,
+        "top_k": int(_top_k_env_value() or 5),
         "slots": rows,
         "now": now.isoformat(),
     }

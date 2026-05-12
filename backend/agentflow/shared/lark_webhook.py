@@ -118,6 +118,30 @@ def _is_configured() -> bool:
     return bool(os.environ.get("LARK_WEBHOOK_URL", "").strip())
 
 
+def _lark_app_primary() -> bool:
+    raw = (os.environ.get("AGENTFLOW_LARK_APP_PRIMARY") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _emit_notify_event(
+    event_type: str,
+    *,
+    article_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from agentflow.shared.agent_bridge import emit_agent_event
+
+        emit_agent_event(
+            source="agentflow.lark_notify",
+            event_type=f"notify.{event_type}",
+            article_id=article_id,
+            payload=payload or {},
+        )
+    except Exception:  # pragma: no cover — notification fan-out is best-effort
+        _log.warning("agent notify event emit failed: %s", event_type, exc_info=True)
+
+
 def _sign(timestamp: int, secret: str) -> str:
     """HmacSHA256(timestamp + "\\n" + secret) → b64. Per Lark Custom Bot
     spec: the body data passed to HMAC is empty; the secret used as KEY
@@ -321,6 +345,17 @@ def notify_dispatch_result(
     failed: list[tuple[str, str]],
 ) -> None:
     """Post-D4 fan-out: who got the article, who didn't."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "dispatch_result",
+            article_id=article_id,
+            payload={
+                "title": title,
+                "succeeded": list(succeeded),
+                "failed": [{"platform": p, "reason": r} for p, r in failed],
+            },
+        )
+        return
     if not _is_configured():
         return
     if failed:
@@ -348,8 +383,11 @@ def notify_dispatch_result(
             r = reason if len(reason) <= reason_cap else reason[: reason_cap - 1] + "…"
             body_lines.append(f"- ❌ {plat} — {r}")
     actions: list[tuple[str, str]] = []
-    if failed:
-        # Only nudge to TG when there's something the operator must act on.
+    if failed and not _lark_app_primary():
+        # Legacy Custom Bot mode only: nudge to TG. In Lark-app-primary
+        # mode the OpenClaw-rendered notify.dispatch_result card already
+        # carries Lark-native retry buttons, so a TG link would just split
+        # operator attention.
         actions.append(("🔁 去 TG 重试 / 处理", _tg_bot_url()))
     actions.append(("📊 查看 draft", _dashboard_url(article_id)))
     send_card(
@@ -364,6 +402,13 @@ def notify_publish_ready(*, article_id: str, title: str) -> None:
     """Medium-only branch: an article is ready for the operator's
     manual paste step. URL-only nudge, no actionable button (the
     real button lives on the TG side as PR:mark)."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "publish_ready",
+            article_id=article_id,
+            payload={"title": title},
+        )
+        return
     if not _is_configured():
         return
     body = (
@@ -371,19 +416,26 @@ def notify_publish_ready(*, article_id: str, title: str) -> None:
         f"`{article_id}`\n\n"
         f"等待 operator 在 Telegram bot 点 [📌 我已粘贴] 并回 Medium URL."
     )
+    actions: list[tuple[str, str]] = []
+    if not _lark_app_primary():
+        actions.append(("📌 去 TG 标记", _tg_bot_url()))
+    actions.append(("📊 查看 draft", _dashboard_url(article_id)))
     send_card(
         title="📌 AgentFlow · 待 publish-mark",
         body_md=body,
         accent="blue",
-        url_actions=[
-            ("📌 去 TG 标记", _tg_bot_url()),
-            ("📊 查看 draft", _dashboard_url(article_id)),
-        ],
+        url_actions=actions,
     )
 
 
 def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
     """Daily 09:00 / 20:00 scheduled scan completed."""
+    if _lark_app_primary():
+        _emit_notify_event(
+            "hotspots_digest",
+            payload={"scan_count": scan_count, "top_titles": list(top_titles)},
+        )
+        return
     if not _is_configured():
         return
     if scan_count == 0:
@@ -395,11 +447,19 @@ def notify_hotspots_digest(*, scan_count: int, top_titles: list[str]) -> None:
         for i, t in enumerate(top_titles, 1):
             lines.append(f"{i}. {t}")
         lines.append("")
-        lines.append("Gate A 卡已推送到 Telegram 待审核.")
+        lines.append(
+            "这是 legacy Custom Bot 扫描摘要，不是 Lark 审核卡。"
+        )
+        lines.append(
+            "若要在 Lark 内审核，请启用 AGENTFLOW_LARK_APP_PRIMARY=true "
+            "并监听 review.gate_a_card。"
+        )
         body = "\n".join(lines)
-        accent = "green"
-        # Only show "去选题" when there's actually something to pick.
-        actions = [("📝 去 TG 选题", _tg_bot_url())]
+        accent = "orange"
+        actions = []
+        tg_url = _tg_bot_url()
+        if tg_url:
+            actions.append(("📝 legacy TG 审核", tg_url))
     send_card(
         title="🔎 AgentFlow · 今日热点扫描",
         body_md=body,
@@ -426,13 +486,38 @@ def notify_draft_ready(
     ``mirror_url`` (a read-only mirror — typically the dashboard's
     draft preview, or the operator's intranet markdown server).
 
-    Audit (Gate B remains the action surface — Lark is read-only). When
-    ``mirror_url`` is empty, the mirror button is omitted.
+    In legacy Custom Bot mode this remains push-only. In Lark App primary
+    mode (``AGENTFLOW_LARK_APP_PRIMARY=true``), this function emits a
+    ``notify.draft_ready`` agent event so OpenClaw can render the actionable
+    Gate B card.
 
     Behavior is gated by ``AGENTFLOW_LARK_DRAFT_FANOUT`` (default off).
-    Gate B's TG card is the source of truth and always fires; this
-    function is a parallel fan-out, never a replacement.
+    Gate B state transitions remain the source of truth; the notification
+    surface can be Lark-first with TG as fallback.
     """
+    if _lark_app_primary():
+        md = draft_md
+        if md is None and draft_md_path:
+            try:
+                with open(draft_md_path, "r", encoding="utf-8") as fh:
+                    md = fh.read()
+            except OSError:
+                md = None
+        md = (md or "").strip()
+        _emit_notify_event(
+            "draft_ready",
+            article_id=article_id,
+            payload={
+                "title": title,
+                "audit_summary": audit_summary,
+                "mirror_url": mirror_url,
+                "draft_md_path": draft_md_path,
+                "draft_excerpt": md[:2000],
+                "draft_length": len(md),
+                "draft_truncated": len(md) > 2000,
+            },
+        )
+        return
     if not _is_configured():
         return
     if not _draft_fanout_enabled():
@@ -483,7 +568,10 @@ def notify_draft_ready(
     actions: list[tuple[str, str]] = []
     if mirror_url:
         actions.append(("📄 完整稿件", mirror_url))
-    actions.append(("📌 去 TG 审稿", _tg_bot_url()))
+    if not _lark_app_primary():
+        # In app-primary mode, the actionable Gate B card is rendered by
+        # OpenClaw from the notify.draft_ready event — no TG redirect needed.
+        actions.append(("📌 去 TG 审稿", _tg_bot_url()))
     actions.append(("📊 查看 draft", _dashboard_url(article_id)))
 
     send_card(
@@ -503,6 +591,14 @@ def notify_spawn_failure(*, label: str, target_id: str, error_tail: str) -> None
     """Mirror of daemon._notify_spawn_failure into Lark for the on-call
     channel. Operator sees both TG and Lark; whichever they monitor first
     triggers triage."""
+    if _lark_app_primary():
+        tail = error_tail[-_stderr_maxlen():] if error_tail else "(no stderr)"
+        _emit_notify_event(
+            "spawn_failure",
+            article_id=target_id,
+            payload={"label": label, "target_id": target_id, "error_tail": tail},
+        )
+        return
     if not _is_configured():
         return
     tail = error_tail[-_stderr_maxlen():] if error_tail else "(no stderr)"
@@ -510,12 +606,13 @@ def notify_spawn_failure(*, label: str, target_id: str, error_tail: str) -> None
         f"`{label}` 失败 · target=`{target_id}`\n\n"
         f"```\n{tail}\n```"
     )
+    actions: list[tuple[str, str]] = []
+    if not _lark_app_primary():
+        actions.append(("🔧 去 TG 看详情", _tg_bot_url()))
+    actions.append(("📊 查看 draft", _dashboard_url(target_id)))
     send_card(
         title="❌ AgentFlow · 子任务失败",
         body_md=body,
         accent="red",
-        url_actions=[
-            ("🔧 去 TG 看详情", _tg_bot_url()),
-            ("📊 查看 draft", _dashboard_url(target_id)),
-        ],
+        url_actions=actions,
     )

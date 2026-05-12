@@ -122,11 +122,21 @@ Each transition appends an object:
   "timestamp": "2026-04-25T08:00:00+00:00",
   "tg_chat_id": 123456,
   "tg_message_id": 789,
+  "lark_chat_id": "oc_lark_chat_42",
+  "lark_card_id": "om_xxx",
   "callback_data": "B:approve:abc123",
   "round": 0,
   "notes": "free-form, optional"
 }
 ```
+
+The two surface-identifier families — `tg_chat_id` / `tg_message_id` and
+`lark_chat_id` / `lark_card_id` — are independently optional. Exactly one
+surface family is populated per entry in single-surface mode; both may be
+present in dual-emission mode (when the same gate decision is mirrored to
+both Telegram and Lark cards). Older entries written before the Lark
+parity migration carry only the `tg_*` fields; readers must tolerate
+either set being absent.
 
 This gives a complete audit trail — what was approved by whom and when, what
 was rewritten, what was deferred. Useful for the `af report` command to

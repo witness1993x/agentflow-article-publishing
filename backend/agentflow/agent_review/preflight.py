@@ -145,6 +145,11 @@ def _env_present(*names: str) -> str | None:
     return None
 
 
+def _bool_env(name: str) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _probe(
     name: str,
     fn: Callable[[], tuple[bool, str, dict[str, Any] | None]],
@@ -391,6 +396,57 @@ def check_review_chat_id() -> CheckResult:
     return cr
 
 
+def check_lark_app_primary() -> CheckResult:
+    """Synthetic check: Lark-first review cards must use event webhook."""
+    primary = _bool_env("AGENTFLOW_LARK_APP_PRIMARY")
+    event_url = _env_present("AGENTFLOW_AGENT_EVENT_WEBHOOK_URL")
+    auth = _env_present("AGENTFLOW_AGENT_EVENT_AUTH_HEADER")
+    legacy_webhook = _env_present("LARK_WEBHOOK_URL")
+    app_hint = _env_present("LARK_APP_ID", "LARK_APP_SECRET", "LARK_TARGET_CHAT_ID")
+
+    cr = CheckResult(name="Lark App primary", env_var="AGENTFLOW_LARK_APP_PRIMARY")
+    cr.extra = {
+        "primary": primary,
+        "event_webhook_configured": bool(event_url),
+        "event_auth_header_configured": bool(auth),
+        "legacy_custom_bot_configured": bool(legacy_webhook),
+    }
+
+    if primary:
+        cr.present = True
+        if not event_url:
+            cr.valid = False
+            cr.message = (
+                "AGENTFLOW_LARK_APP_PRIMARY=true but "
+                "AGENTFLOW_AGENT_EVENT_WEBHOOK_URL is not set; review.*_card "
+                "events cannot reach OpenClaw"
+            )
+            return cr
+        cr.valid = True
+        cr.message = "review.*_card events enabled"
+        if legacy_webhook:
+            cr.message += (
+                "; LARK_WEBHOOK_URL is also set, so old Custom Bot digest cards "
+                "may still appear as fallback/status messages"
+            )
+        if not auth:
+            cr.message += "; AGENTFLOW_AGENT_EVENT_AUTH_HEADER not set"
+        return cr
+
+    if event_url or app_hint:
+        cr.present = True
+        cr.valid = None
+        cr.message = (
+            "Lark App settings detected but AGENTFLOW_LARK_APP_PRIMARY is not true; "
+            "AgentFlow will keep using legacy notification paths. If Lark shows "
+            "'go to Telegram' digest copy, enable primary mode."
+        )
+        return cr
+
+    cr.message = "not enabled; Telegram/legacy Custom Bot path is active"
+    return cr
+
+
 def check_daemon_liveness(stale_seconds: float = 120.0) -> CheckResult:
     """Read ~/.agentflow/review/last_heartbeat.json — fail if missing/stale."""
     cr = CheckResult(name="review-daemon liveness", env_var=None)
@@ -556,6 +612,7 @@ def all_checks(*, fresh: bool = False) -> list[CheckResult]:
         check_hotspots_mock_leak(),
         check_telegram(fresh=fresh),
         check_review_chat_id(),
+        check_lark_app_primary(),
         check_atlas(),
         check_moonshot(fresh=fresh),
         check_anthropic(fresh=fresh),
@@ -570,6 +627,8 @@ def all_checks(*, fresh: bool = False) -> list[CheckResult]:
 
 
 def critical_for_review_daemon(*, fresh: bool = False) -> list[CheckResult]:
+    if _bool_env("AGENTFLOW_LARK_APP_PRIMARY"):
+        return [check_lark_app_primary()]
     return [check_telegram(fresh=fresh), check_review_chat_id()]
 
 

@@ -25,7 +25,7 @@ agent_review/
 
 | Gate | Triggered after | Required for | Default mode |
 |------|-----------------|--------------|--------------|
-| A | `af hotspots` (cron or manual) | `af write` | 🟡 medium-risk → human approves |
+| A | `blogflow article-hotspots` (cron or manual) | `blogflow write` | 🟡 medium-risk → human approves |
 | B | `af fill` completes | `af image-gate` | 📝 long-form → human approves (always) |
 | C | `af image-gate --mode cover-only/cover-plus-body` finishes | `af preview` + `af medium-package` | 🟢 self-check, prompt only if image generation actually ran |
 

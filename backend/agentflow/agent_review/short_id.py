@@ -135,6 +135,32 @@ def attach_message_id(short_id: str, tg_message_id: int | None) -> bool:
         return True
 
 
+def attach_lark_card(short_id: str, lark_card_id: str, lark_chat_id: str) -> bool:
+    """Record the Lark interactive card identity for short_id ``short_id``.
+
+    Mirrors :func:`attach_message_id` but for the Lark surface. Stores
+    ``lark_card_id`` (Lark message id, e.g. ``om_xxx``) and ``lark_chat_id``
+    (e.g. ``oc_lark_chat_42``) under the entry so daemon-side code can later
+    edit / disable the rendered card on callback. Coexists with any
+    pre-existing ``tg_message_id`` on the same entry (dual-emission mode).
+
+    Returns False if the entry is missing / expired / revoked, or if either
+    identifier is empty.
+    """
+    if not lark_card_id or not lark_chat_id:
+        return False
+    with _LOCK:
+        index = _read()
+        entry = index.get(short_id)
+        if not entry or _is_expired(entry) or entry.get("revoked_at"):
+            return False
+        entry["lark_card_id"] = str(lark_card_id)
+        entry["lark_chat_id"] = str(lark_chat_id)
+        index[short_id] = entry
+        _write(index)
+        return True
+
+
 def set_extra(short_id: str, key: str, value: Any) -> bool:
     """Mutate a single key in entry['extra']. Returns False if entry missing/expired.
 

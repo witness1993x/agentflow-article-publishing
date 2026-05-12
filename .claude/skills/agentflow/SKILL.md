@@ -16,21 +16,21 @@ When the user invokes this skill without a clear subtask, print a short overview
 
 ## The sibling skills
 
-- `agentflow-style` — teach or refresh the voice profile from past articles (`af learn-style`).
-- `agentflow-hotspots` — scan trending topics and pick one (`af hotspots`, `af hotspot-show`).
-- `agentflow-write` — turn a hotspot into a finished draft (`af write`, `af fill`, `af edit`, `af image-resolve`).
-- `agentflow-publish` — preview on each platform, fix images, publish, and roll back if needed (`af preview`, `af publish`, `af publish-rollback`).
-- `agentflow-tweet` — Twitter/X 短形分发 helpers（包 `af tweet-*` 子命令）.
-- `agentflow-newsletter` — newsletter 分发 helpers（包 `af newsletter-*` 子命令）.
+- `agentflow-style` — teach or refresh the voice profile from past articles (`blogflow learn-style`).
+- `agentflow-hotspots` — run article hotspot search and pick one (`blogflow article-hotspots`, `blogflow article-hotspot-show`).
+- `agentflow-write` — turn a hotspot into a finished draft (`blogflow write`, `blogflow fill`, `blogflow edit`, `blogflow image-resolve`).
+- `agentflow-publish` — preview on each platform, fix images, publish, and roll back if needed (`blogflow preview`, `blogflow publish`, `blogflow publish-rollback`).
+- `agentflow-tweet` — Twitter/X 短形分发 helpers（包 `blogflow tweet-*` 子命令）.
+- `agentflow-newsletter` — newsletter 分发 helpers（包 `blogflow newsletter-*` 子命令）.
 
 ## Main flow
 
 0. First run / profile drift check:
-   - `af doctor` — confirm runtime account config (`.env`, LLM, Telegram, webhook, Medium manual default, optional Ghost/LinkedIn channels).
-   - `af topic-profile show --profile <id> --json` — inspect missing publisher/profile fields.
-   - If missing fields exist, complete the Telegram profile setup session or run `af topic-profile init --profile <id> --from-file <patch.yaml>`.
-   - Optional enrichment: `af topic-profile update --profile <id> --from-file <patch.yaml>` for search queries, avoid terms, tags, image hints, canonical domain.
-   - Learning updates stay suggestion-first: review with `af topic-profile suggestion-list/review/apply` or `/suggestions`.
+   - `blogflow doctor` — confirm runtime account config (`.env`, LLM, Lark/OpenClaw or Telegram fallback, Medium manual default, optional Ghost/LinkedIn channels).
+   - `blogflow topic-profile show --profile <id> --json` — inspect missing publisher/profile fields.
+   - If missing fields exist, complete the Lark/TG profile setup session or run `blogflow topic-profile init --profile <id> --from-file <patch.yaml>`.
+   - Optional enrichment: `blogflow topic-profile update --profile <id> --from-file <patch.yaml>` for search queries, avoid terms, tags, image hints, canonical domain.
+   - Learning updates stay suggestion-first: review with `blogflow topic-profile suggestion-list/review/apply` or `/suggestions`.
 1. (Once a week) `/agentflow-style` — update the voice profile from past articles.
 2. `/agentflow-hotspots` — pick today's topic.
 3. `/agentflow-write <hotspot_id>` — auto or manual skeleton, then edit loop.
@@ -50,7 +50,7 @@ Only `publisher_profile_pending` is blocking for first use. The learning sources
 - `search_results/*.json` — archived search-result bundles for traceability and later recall.
 - `drafts/<article_id>/metadata.json` — skeleton + filled sections + image placeholders.
 - `drafts/<article_id>/draft.md` — the assembled article.
-- `drafts/<article_id>/skeleton.json` — stashed so `af fill` can re-run with new indices.
+- `drafts/<article_id>/skeleton.json` — stashed so `blogflow fill` can re-run with new indices.
 - `drafts/<article_id>/d3_output.json` — per-platform adapted versions.
 - `drafts/<article_id>/platform_versions/<platform>.md` — human-readable preview per platform.
 - `memory/events.jsonl` — append-only log of every mutation (article_created, fill_choices, section_edit, hotspot_review, preview, publish, publish_rolled_back, image_resolved, learn_style, topic_profile_updated, topic_profile_suggestion_*).
@@ -62,23 +62,23 @@ Only `publisher_profile_pending` is blocking for first use. The learning sources
 - `constraint_sessions/*.json` — Telegram profile-setup sessions in progress.
 - `logs/agentflow.log` — surface the tail on any CLI failure.
 
-## Running `af`
+## Running `blogflow`
 
 The venv is at `backend/.venv/`. From the project root (or wherever cwd is):
 
 ```bash
 cd /Users/witness/Desktop/experimental/medium\&blog_posting_agent/agentflow-article-publishing/backend
 source .venv/bin/activate
-PYTHONPATH=. af <subcommand>
+PYTHONPATH=. blogflow <subcommand>
 ```
 
-If the shell session is already initialised, just `af <subcommand>` works.
+If the shell session is already initialised, just `blogflow <subcommand>` works.
 
 The CLI auto-loads `backend/.env` on startup (without overriding already-set env vars), so real-key runs don't need an explicit `source .env`.
 
 ## MOCK_LLM toggle
 
-Prefix any `af` call with `MOCK_LLM=true` to run the full flow against canned fixtures (deterministic, instant). Drop the env var for real LLM calls.
+Prefix any `blogflow` call with `MOCK_LLM=true` to run the full flow against canned fixtures (deterministic, instant). Drop the env var for real LLM calls.
 
 `.env` ships with `MOCK_LLM=false`; set `MOCK_LLM=true` inline to force mock for a single command.
 
@@ -86,26 +86,26 @@ Prefix any `af` call with `MOCK_LLM=true` to run the full flow against canned fi
 
 Gate D defaults to Medium manual publishing because Medium package generation is always available without platform credentials. Ghost and LinkedIn are optional configured channels; include them only when the user selects them or project preferences/env make them ready.
 
-When Ghost is selected, `af publish` publishes Ghost posts live (`status=published`) by default. Set `GHOST_STATUS=draft` in env to create a hidden draft instead — useful for smoke tests. `af publish-rollback` works on both.
+When Ghost is selected, `blogflow publish` publishes Ghost posts live (`status=published`) by default. Set `GHOST_STATUS=draft` in env to create a hidden draft instead — useful for smoke tests. `blogflow publish-rollback` works on both.
 
 ## --json output contract
 
-`af <cmd> --json` prints pure JSON on stdout. All logs (collector progress, LLM calls, SSL warnings, compliance messages) go to **stderr**. When piping, redirect stderr: `af hotspots --json 2>/dev/null | jq .`.
+`blogflow <cmd> --json` prints pure JSON on stdout. All logs (collector progress, LLM calls, SSL warnings, compliance messages) go to **stderr**. When piping, redirect stderr: `blogflow article-hotspots --json 2>/dev/null | jq .`.
 
 ## Cross-cutting rules for ALL AgentFlow skills
 
-- NEVER bypass the CLI by importing agentflow Python modules directly. The `af` CLI is the contract.
+- NEVER bypass the CLI by importing agentflow Python modules directly. The `blogflow` CLI is the contract.
 - Prefer `--json` output and parse it inline. Use the `Read` tool when the payload is too large to fit conversationally.
-- On any `af` command failure, `tail -n 20 ~/.agentflow/logs/agentflow.log` and surface the output to the user.
+- On any `blogflow` command failure, `tail -n 20 ~/.agentflow/logs/agentflow.log` and surface the output to the user.
 - MOCK_LLM=true in env means deterministic mock — great for dry runs. Remove it for real.
-- For topic/profile constraint changes, use `af topic-profile show/init/update/suggestion-list/review/apply` instead of editing `topic_profiles.yaml` manually.
+- For topic/profile constraint changes, use `blogflow topic-profile show/init/update/suggestion-list/review/apply` instead of editing `topic_profiles.yaml` manually.
 - Keep generated article output in the profile's `publisher_account.output_language`; default is `zh-Hans` and should be treated as a hard prompt constraint.
 
 ### Topic intent — a cross-flow concept
 
 When the user's message implies a specific topic (not a broad scan), treat that topic as a **TopicIntent** that threads through the whole session:
 
-- `agentflow-hotspots` → run with `af hotspots --filter <regex>`.
+- `agentflow-hotspots` → run with `blogflow article-hotspots --filter <regex>`.
 - `agentflow-write` → mention the intent in the edit prompt so the article stays on-topic (and avoids the kind of hallucination where a hotspot about "consciousness" became an article about "quantum entanglement" because the LLM drifted).
 - `agentflow-publish` → Step 1b should note whether the final article still reflects the original intent.
 

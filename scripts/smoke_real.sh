@@ -4,7 +4,7 @@
 # Purpose: verify that your live API keys work by running D1 (hotspots) →
 # D2 (write --auto-pick) → D3 (preview). STOPS before publish so we don't
 # accidentally ship a test article. After it finishes, inspect the output
-# and run `af publish <article_id> ...` manually if you want to actually
+# and run `blogflow publish <article_id> ...` manually if you want to actually
 # post.
 #
 # Usage:
@@ -77,8 +77,8 @@ tmp_scan=$(mktemp -t smoke_scan.XXXXXX.json)
 trap 'rm -f "$tmp_scan"' EXIT
 
 echo
-echo "[1/4] af hotspots — scan + cluster + viewpoint mining"
-af hotspots --json > "$tmp_scan"
+echo "[1/4] blogflow article-hotspots — scan + cluster + viewpoint mining"
+blogflow article-hotspots --json > "$tmp_scan"
 hcount=$(python3 -c "import json; print(len(json.load(open('$tmp_scan'))['hotspots']))")
 hid=$(python3 -c "import json; print(json.load(open('$tmp_scan'))['hotspots'][0]['id'])")
 htopic=$(python3 -c "import json; print(json.load(open('$tmp_scan'))['hotspots'][0]['topic_one_liner'][:60])")
@@ -86,15 +86,15 @@ echo "  ok: $hcount hotspots"
 echo "  picked: $hid — \"$htopic\""
 
 echo
-echo "[2/4] af write --auto-pick — skeleton + full fill"
-write_out=$(af write "$hid" --auto-pick --json)
+echo "[2/4] blogflow write --auto-pick — skeleton + full fill"
+write_out=$(blogflow write "$hid" --auto-pick --json)
 aid=$(echo "$write_out" | python3 -c "import sys,json; print(json.load(sys.stdin)['article_id'])")
 words=$(echo "$write_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('draft',{}).get('total_word_count','?'))")
 echo "  ok: article_id=$aid  (~$words words)"
 
 echo
-echo "[3/4] af preview — D3 adapt for ghost_wordpress"
-af preview "$aid" --platforms ghost_wordpress --json > /dev/null
+echo "[3/4] blogflow preview — D3 adapt for ghost_wordpress"
+blogflow preview "$aid" --platforms ghost_wordpress --json > /dev/null
 preview_file="$HOME/.agentflow/drafts/$aid/platform_versions/ghost_wordpress.md"
 if [ ! -f "$preview_file" ]; then
   echo "  FAIL: preview file not written at $preview_file"
@@ -115,9 +115,9 @@ echo "  article_id:  $aid"
 echo "  draft dir:   ~/.agentflow/drafts/$aid/"
 echo "  next:"
 echo "    # inspect the draft, then manually publish when you're happy:"
-echo "    af publish $aid --platforms ghost_wordpress --force-strip-images --json"
+echo "    blogflow publish $aid --platforms ghost_wordpress --force-strip-images --json"
 echo "    #                                               ^ strips mock [IMAGE:] placeholders."
-echo "    # for a REAL draft, resolve images first via  af image-resolve <id> <ph> <path>"
+echo "    # for a REAL draft, resolve images first via  blogflow image-resolve <id> <ph> <path>"
 echo
 echo "  logs:"
 echo "    tail -n 40 ~/.agentflow/logs/agentflow.log"

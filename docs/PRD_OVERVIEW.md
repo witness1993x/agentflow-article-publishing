@@ -29,7 +29,7 @@
 | Module | Existing Capability | Delta | Change Magnitude | Evidence |
 |---|---|---|---|---|
 | Style learning (D0) | `af learn-style --dir / --show / --recompute`；已过实 Key（Kimi 分析 samples） | 缺 style 结果对默认写作策略的自动反哺 | M | `backend/agentflow/agent_d0/`, `samples/` |
-| Hotspot discovery (D1) | `af hotspots --json`；Twitter+RSS+HN + Jina 聚类 + Kimi 观点挖掘；实 Key 过 | 缺 sources 管理 CLI、定时扫描、采集失败分层 | M | `backend/agentflow/agent_d1/`, `~/.agentflow/sources.yaml` |
+| Article hotspot discovery (D1) | `blogflow article-hotspots --json`；Twitter+RSS+HN + Jina 聚类 + Kimi 观点挖掘；实 Key 过 | 缺 sources 管理 CLI、定时扫描、采集失败分层 | M | `backend/agentflow/agent_d1/`, `~/.agentflow/sources.yaml` |
 | Write workspace (D2) | `af write --auto-pick`、`af fill`、`af edit`；default auto-fill 0/0/0；实 Key 过 | 缺版本历史、局部 regenerate 粒度、Kimi 生成段落长度 overshoot | M-L | `backend/agentflow/agent_d2/`, prompts |
 | Platform adapt (D3) | `af preview`；Ghost/LinkedIn/Medium adapter；实 Key 过 | tag 抽取仍靠 heuristic（本轮修过头尾虚词），缺 semantic tag | S | `backend/agentflow/agent_d3/` |
 | Publish (D4) | `af publish`；Ghost 实 Key 过、可选 `GHOST_STATUS=draft`；LinkedIn 缺 token | 缺凭证健康预检、publish-before checklist 的代码形式 | M | `backend/agentflow/agent_d4/publishers/` |
@@ -146,7 +146,7 @@ Claude Code（唯一入口）
 │   └── 包装 af learn-style
 │
 ├── /agentflow-hotspots                 （每日，选 hotspot + angle）
-│   └── 包装 af hotspots / af hotspot-show
+│   └── 包装 blogflow article-hotspots / blogflow article-hotspot-show
 │
 ├── /agentflow-write <hotspot_id>       （每篇一次）
 │   ├── 包装 af write --auto-pick
@@ -199,7 +199,7 @@ Claude Code（唯一入口）
 
 ### 6.1 Feature A — Hotspot Intake
 
-- `af hotspots --json` 输出稳定 schema：`{hotspots: [{id, topic_one_liner, suggested_angles, source_references, recommended_series, freshness_score, depth_potential, ...}]}`
+- `blogflow article-hotspots --json` 输出稳定 schema：`{hotspots: [{id, topic_one_liner, suggested_angles, source_references, recommended_series, freshness_score, depth_potential, ...}]}`
 - 日内多次调用复用当天文件（`~/.agentflow/hotspots/<YYYY-MM-DD>.json`）
 - `/agentflow-hotspots` skill 不直接写 memory event（只是读取）
 - `source_references[]` 必须被下游 Step 1b 能取到

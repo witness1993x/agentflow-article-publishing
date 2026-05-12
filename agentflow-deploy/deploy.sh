@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# AgentFlow one-shot deploy script for Linux.
+# BlogFlow one-shot deploy script for Linux.
 #
 # Run after extracting the deploy tarball:
-#   tar xzf agentflow-deploy-*.tar.gz -C /opt
-#   sudo bash /opt/agentflow-deploy/deploy.sh
+#   tar xzf blogflow-deploy-*.tar.gz -C /opt
+#   sudo bash /opt/blogflow-deploy/deploy.sh
 #
 # What this does:
-#   1. Move bundle to canonical install path /opt/agentflow/   (matches .service)
-#   2. Create system user `agentflow`                          (idempotent)
+#   1. Move bundle to canonical install path /opt/blogflow/    (matches .service)
+#   2. Create system user `blogflow`                           (idempotent)
 #   3. Create venv + pip install -e backend/                    (idempotent)
 #   4. Bootstrap .env from .env.template if missing             (chmod 600)
 #   5. Install systemd unit + daemon-reload + enable + start
@@ -17,13 +17,13 @@
 
 set -euo pipefail
 
-PREFIX="${PREFIX:-/opt/agentflow}"
-USER_NAME="${AGENTFLOW_USER:-agentflow}"
+PREFIX="${PREFIX:-/opt/blogflow}"
+USER_NAME="${BLOGFLOW_USER:-blogflow}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-SERVICE_NAME="agentflow-review"
+SERVICE_NAME="blogflow-review"
 
 # 0. Where am I running from? Bundle layout looks like:
-#       /opt/agentflow-deploy/{backend,config-examples,*.service,deploy.sh}
+#       /opt/blogflow-deploy/{backend,config-examples,*.service,deploy.sh}
 #    We move everything except deploy.sh into PREFIX/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log() { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
@@ -54,13 +54,13 @@ fi
 
 # 3. venv + install
 VENV="$PREFIX/backend/.venv"
-if [ -x "$VENV/bin/af" ]; then
+if [ -x "$VENV/bin/blogflow" ]; then
   log "venv already populated at $VENV — running pip install -e to pick up changes"
 else
   log "creating venv at $VENV"
   sudo -u "$USER_NAME" "$PYTHON_BIN" -m venv "$VENV"
 fi
-log "pip install -U pip + agentflow"
+log "pip install -U pip + agentflow-media"
 sudo -u "$USER_NAME" "$VENV/bin/pip" install -q -U pip
 sudo -u "$USER_NAME" "$VENV/bin/pip" install -q -e "$PREFIX/backend"
 
@@ -86,7 +86,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # 5. systemd unit
-UNIT_SRC="$PREFIX/agentflow-review.service"
+UNIT_SRC="$PREFIX/blogflow-review.service"
 UNIT_DST="/etc/systemd/system/${SERVICE_NAME}.service"
 [ -f "$UNIT_SRC" ] || fail "missing $UNIT_SRC; bundle is broken"
 log "installing systemd unit at $UNIT_DST"
@@ -101,7 +101,7 @@ systemctl --no-pager --lines=20 status "$SERVICE_NAME" || true
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────
-✓ AgentFlow deploy complete
+✓ BlogFlow deploy complete
 
 Install path:    $PREFIX
 Service name:    $SERVICE_NAME
@@ -114,6 +114,6 @@ Next:
      MOONSHOT_API_KEY, JINA_API_KEY, ATLASCLOUD_API_KEY (publisher keys optional)
      Make sure MOCK_LLM=false and AGENTFLOW_MOCK_PUBLISHERS=false (template default)
   2. systemctl restart $SERVICE_NAME
-  3. From a logged-in shell on this VM:  sudo -u $USER_NAME $VENV/bin/af doctor
+  3. From a logged-in shell on this VM:  sudo -u $USER_NAME $VENV/bin/blogflow doctor
 ────────────────────────────────────────────────────────────────────
 EOF

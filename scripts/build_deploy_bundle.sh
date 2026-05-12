@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a production-clean agentflow-deploy.tar.gz.
+# Build a production-clean blogflow-deploy.tar.gz.
 #
 # Excluded from the bundle (these would otherwise leak into prod and surface
 # fake URLs / fake LLM outputs / test data in TG digests):
@@ -20,20 +20,20 @@
 #
 # Usage:
 #   bash scripts/build_deploy_bundle.sh [output_path]
-# Default output: ~/Desktop/agentflow-deploy.tar.gz
+# Default output: ~/Desktop/blogflow-deploy.tar.gz
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT="${1:-$HOME/Desktop/agentflow-deploy.tar.gz}"
-STAGE="$(mktemp -d -t agentflow-deploy-XXXXXX)"
+OUTPUT="${1:-$HOME/Desktop/blogflow-deploy.tar.gz}"
+STAGE="$(mktemp -d -t blogflow-deploy-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 
-DEST="$STAGE/agentflow-deploy"
+DEST="$STAGE/blogflow-deploy"
 mkdir -p "$DEST/backend"
 
 # --- Top-level deploy assets ---
-cp "$REPO_ROOT/agentflow-deploy/agentflow-review.service"  "$DEST/" 2>/dev/null || true
+cp "$REPO_ROOT/agentflow-deploy/blogflow-review.service"   "$DEST/" 2>/dev/null || true
 cp "$REPO_ROOT/agentflow-deploy/INSTALL_LINUX.md"          "$DEST/"
 cp "$REPO_ROOT/agentflow-deploy/SECURITY.md"               "$DEST/"
 cp "$REPO_ROOT/agentflow-deploy/deploy.sh"                 "$DEST/"
@@ -124,7 +124,7 @@ for required in "config-examples/style_profile.example.yaml" \
                 "backend/pyproject.toml" \
                 "backend/requirements.txt" \
                 "backend/agentflow/shared/mocks/d2-skeleton.json" \
-                "agentflow-review.service" \
+                "blogflow-review.service" \
                 "deploy.sh"; do
   if [ ! -e "$DEST/$required" ]; then
     echo "FATAL: missing required file in bundle: $required" >&2
@@ -138,14 +138,14 @@ if ! grep -qE '^[Pp]illow' "$DEST/backend/requirements.txt"; then
 fi
 # Sanity: .service file must point inside the install prefix (not a hard-coded
 # user homedir from the developer's machine)
-if grep -qE '/home/[^/]+/agentflow-article-publishing' "$DEST/agentflow-review.service" 2>/dev/null; then
-  echo "FATAL: agentflow-review.service still has dev-machine path /home/<user>/agentflow-article-publishing" >&2
+if grep -qE '/home/[^/]+/agentflow-article-publishing' "$DEST/blogflow-review.service" 2>/dev/null; then
+  echo "FATAL: blogflow-review.service still has dev-machine path /home/<user>/agentflow-article-publishing" >&2
   fail=1
 fi
 [ "$fail" -eq 0 ] || exit 1
 
 # --- Tarball ---
-tar -C "$STAGE" -czf "$OUTPUT" agentflow-deploy
+tar -C "$STAGE" -czf "$OUTPUT" blogflow-deploy
 size_kb=$(du -k "$OUTPUT" | cut -f1)
 file_count=$(tar -tzf "$OUTPUT" | wc -l | tr -d ' ')
 echo "✓ wrote $OUTPUT  (${size_kb} KB, ${file_count} entries)"
@@ -153,4 +153,4 @@ echo
 echo "next:"
 echo "  scp $OUTPUT user@vm:/tmp/"
 echo "  ssh user@vm 'cd /opt && tar xzf /tmp/$(basename "$OUTPUT")'"
-echo "  ssh user@vm 'systemctl restart agentflow-review'"
+echo "  ssh user@vm 'systemctl restart blogflow-review'"

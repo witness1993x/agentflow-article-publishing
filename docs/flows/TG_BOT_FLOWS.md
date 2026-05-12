@@ -1,6 +1,15 @@
-# TG Bot Flows
+# TG Bot / Fallback Flows
 
-本文件覆盖 `backend/agentflow/agent_review/` 下 review daemon 的内部调用图：从 TG 入站事件 / 内部 timer / CLI subprocess 触发，到 `_route` 分发、各 `_spawn_*` helper 落到 `triggers.post_*` 与子进程，再到出站 TG 消息与磁盘副作用。源文件：`daemon.py` / `triggers.py` / `render.py`。
+本文件覆盖 `backend/agentflow/agent_review/` 下 Telegram fallback 的内部
+调用图：从 TG 入站事件 / 内部 timer / CLI subprocess 触发，到 `_route`
+分发、各 `_spawn_*` helper 落到 `triggers.post_*` 与子进程，再到出站
+TG 消息与磁盘副作用。
+
+当前主链路是 Lark-first：`blogflow review-daemon` 在
+`AGENTFLOW_LARK_APP_PRIMARY=true` 时内置 `/api/commands` bridge，OpenClaw
+渲染 `review.*_card`，按钮 callback 回到 daemon-owned bridge。主链路流程图
+见 `docs/flows/LARK_FIRST_REVIEW_FLOWS.md`。本文仍是 TG fallback 和
+daemon 内部 `_route` 细节的参考。
 
 ## 1. Daemon 事件路由总览
 
@@ -12,7 +21,7 @@ flowchart TD
     Tloop["run loop<br/>poll_interval≈5s"]
     Theartbeat["_write_heartbeat<br/>每轮 poll"]
     Ttimeout["_scan_timeouts<br/>每 60s"]
-    CLI["CLI subprocess<br/>af hotspots/fill/image-gate<br/>review-post-b/c/d<br/>review-publish-stats"]
+    CLI["CLI subprocess<br/>blogflow article-hotspots/fill/image-gate<br/>review-post-b/c/d<br/>review-publish-stats"]
 
     %% --- daemon dispatch ---
     Hmsg["_handle_message<br/>daemon.py"]

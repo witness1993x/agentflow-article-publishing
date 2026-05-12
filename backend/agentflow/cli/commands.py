@@ -1,4 +1,4 @@
-"""`af` CLI entry point.
+"""`blogflow` / `mediaflow` CLI entry point.
 
 Every subcommand:
 
@@ -27,16 +27,18 @@ import click
 
 
 def _af_version() -> str:
-    try:
-        return _pkg_version("agentflow")
-    except PackageNotFoundError:
-        return "unknown"
+    for dist_name in ("agentflow-media", "agentflow"):
+        try:
+            return _pkg_version(dist_name)
+        except PackageNotFoundError:
+            continue
+    return "unknown"
 
 
 # Per-service secret files we'll auto-load from ``~/.agentflow/secrets/`` in
 # addition to the catch-all ``~/.agentflow/secrets/.env``. Order doesn't matter
 # (all use override=False so first-write-wins) but listing them makes the
-# precedence explicit and lets ``af keys-where`` enumerate the search space.
+# precedence explicit and lets ``blogflow keys-where`` enumerate the search space.
 _SECRET_SERVICES: tuple[str, ...] = (
     "telegram",
     "atlascloud",
@@ -52,7 +54,7 @@ _SECRET_SERVICES: tuple[str, ...] = (
 )
 
 
-# Populated by ``_load_dotenv_once`` so ``af doctor`` / ``af keys-where`` can
+# Populated by ``_load_dotenv_once`` so ``blogflow doctor`` / ``blogflow keys-where`` can
 # tell the operator which file each env var was resolved from. Maps env-var
 # name -> absolute path of the file that first defined it.
 _resolved_sources: dict[str, str] = {}
@@ -660,8 +662,8 @@ def _merge_profile_search_outputs(
 # ---------------------------------------------------------------------------
 
 
-@click.group(help="AgentFlow Article Publishing CLI")
-@click.version_option(_af_version(), prog_name="af")
+@click.group(help="AgentFlow Media / Blog Publishing CLI")
+@click.version_option(_af_version())
 def cli() -> None:
     pass
 
@@ -1108,11 +1110,11 @@ def _derive_style_signature(
 
 
 # ---------------------------------------------------------------------------
-# af hotspots
+# article-hotspots
 # ---------------------------------------------------------------------------
 
 
-@cli.command("hotspots", help="Run Agent D1 hotspot scan.")
+@cli.command("article-hotspots", help="Run Agent D1 article hotspot scan.")
 @click.option(
     "--scan-window-hours",
     type=int,
@@ -1125,14 +1127,14 @@ def _derive_style_signature(
     type=int,
     default=20,
     show_default=True,
-    help="Target number of hotspots to emit (upper bound).",
+    help="Target number of article hotspots to emit (upper bound).",
 )
 @click.option(
     "--filter",
     "filter_pattern",
     type=str,
     default=None,
-    help="Regex (case-insensitive) to keep only matching hotspots. Matched "
+    help="Regex (case-insensitive) to keep only matching article hotspots. Matched "
     "against topic_one_liner, suggested_angles titles, and source_reference "
     "text snippets. See docs/backlog/TOPIC_INTENT_FRAMEWORK.md.",
 )
@@ -1212,8 +1214,8 @@ def hotspots(
             _pf.assert_ready_for_hotspots()
         except Exception as _err:
             raise click.ClickException(
-                f"hotspots preflight failed: {_err}\n"
-                "Run `af doctor` for details, or set MOCK_LLM=true."
+                f"article-hotspots preflight failed: {_err}\n"
+                "Run `blogflow doctor` for details, or set MOCK_LLM=true."
             )
 
     active_intent = _load_current_intent_safe()
@@ -1295,7 +1297,7 @@ def hotspots(
             "topic_intent_used",
             article_id=None,
             payload={
-                "command": "hotspots",
+                "command": "article-hotspots",
                 "mode": "hybrid_recall",
                 "query": effective_filter_pattern,
                 "queries": search_queries,
@@ -1341,7 +1343,7 @@ def hotspots(
             "topic_intent_used",
             article_id=None,
             payload={
-                "command": "hotspots",
+                "command": "article-hotspots",
                 "mode": "regex",
                 "query": effective_filter_pattern,
                 "source": filter_source,
@@ -1456,6 +1458,17 @@ def hotspots(
             "label": _profile_meta(resolved_profile_id, topic_profile)["profile_label"],
         }
     click.echo(_json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+cli.add_command(
+    click.Command(
+        "hotspots",
+        callback=hotspots.callback,
+        params=hotspots.params,
+        help="Legacy alias for `article-hotspots`.",
+        hidden=True,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1663,11 +1676,11 @@ def search(
 
 
 # ---------------------------------------------------------------------------
-# af hotspot-show
+# article-hotspot-show
 # ---------------------------------------------------------------------------
 
 
-@cli.command("hotspot-show", help="Print a full hotspot record (JSON) by id.")
+@cli.command("article-hotspot-show", help="Print a full article hotspot record (JSON) by id.")
 @click.argument("hotspot_id")
 @click.option(
     "--date",
@@ -1679,6 +1692,17 @@ def search(
 def hotspot_show(hotspot_id: str, date: str | None) -> None:
     hs = _find_hotspot(hotspot_id, date=date)
     _emit_json(hs)
+
+
+cli.add_command(
+    click.Command(
+        "hotspot-show",
+        callback=hotspot_show.callback,
+        params=hotspot_show.params,
+        help="Legacy alias for `article-hotspot-show`.",
+        hidden=True,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2026,18 +2050,40 @@ def write(
 
 @cli.command("fill", help="Fill all sections of a skeleton-only draft.")
 @click.argument("article_id")
-@click.option("--title", "chosen_title", type=int, required=True)
-@click.option("--opening", "chosen_opening", type=int, required=True)
-@click.option("--closing", "chosen_closing", type=int, required=True)
+@click.option("--title", "chosen_title", type=int, required=False)
+@click.option("--opening", "chosen_opening", type=int, required=False)
+@click.option("--closing", "chosen_closing", type=int, required=False)
+@click.option(
+    "--skeleton-only",
+    is_flag=True,
+    default=False,
+    help="Explicitly fill the persisted skeleton for this article.",
+)
+@click.option(
+    "--auto-pick",
+    is_flag=True,
+    default=False,
+    help="Auto-pick title/opening/closing defaults before filling.",
+)
+@click.option(
+    "--ignore-prefs",
+    is_flag=True,
+    default=False,
+    help="Ignore ~/.agentflow/preferences.yaml and force 0/0/0 for --auto-pick.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def fill(
     article_id: str,
-    chosen_title: int,
-    chosen_opening: int,
-    chosen_closing: int,
+    chosen_title: int | None,
+    chosen_opening: int | None,
+    chosen_closing: int | None,
+    skeleton_only: bool,
+    auto_pick: bool,
+    ignore_prefs: bool,
     as_json: bool,
 ) -> None:
     from agentflow.agent_d2.main import fill_all_sections
+    from agentflow.shared import preferences as _prefs_mod
     from agentflow.shared.memory import append_memory_event
     from agentflow.shared.models import SkeletonOutput
 
@@ -2075,13 +2121,69 @@ def fill(
         except Exception:
             hotspot_id = ""
 
+    chosen_title_idx = 0
+    chosen_opening_idx = 0
+    chosen_closing_idx = 0
+    defaults_source = "hardcoded"
+    defaults_source_events: int | None = None
+    defaults_confidence: float | None = None
+    any_explicit_override = any(
+        v is not None for v in (chosen_title, chosen_opening, chosen_closing)
+    )
+    if auto_pick:
+        if not ignore_prefs and not any_explicit_override:
+            prefs_data = _prefs_mod.get_defaults()
+            picked = _prefs_mod.pick_write_indices(prefs_data)
+            write_section = (
+                prefs_data.get("write") if isinstance(prefs_data, dict) else None
+            )
+            if any(v is not None for v in picked.values()):
+                defaults_source = "preferences"
+                if isinstance(write_section, dict):
+                    defaults_source_events = write_section.get("_source_events")
+                    defaults_confidence = write_section.get("_confidence")
+                if picked["title_idx"] is not None:
+                    chosen_title_idx = int(picked["title_idx"])
+                if picked["opening_idx"] is not None:
+                    chosen_opening_idx = int(picked["opening_idx"])
+                if picked["closing_idx"] is not None:
+                    chosen_closing_idx = int(picked["closing_idx"])
+    elif not all(v is not None for v in (chosen_title, chosen_opening, chosen_closing)):
+        raise click.ClickException(
+            "Pass --title/--opening/--closing or use --auto-pick."
+        )
+
+    if chosen_title is not None:
+        chosen_title_idx = chosen_title
+        defaults_source = "hardcoded"
+    if chosen_opening is not None:
+        chosen_opening_idx = chosen_opening
+        defaults_source = "hardcoded"
+    if chosen_closing is not None:
+        chosen_closing_idx = chosen_closing
+        defaults_source = "hardcoded"
+
+    if skeleton_only and not as_json:
+        click.echo("using persisted skeleton", err=True)
+    if auto_pick and not as_json:
+        if defaults_source == "preferences":
+            click.echo(
+                f"using historical default: title={chosen_title_idx} "
+                f"opening={chosen_opening_idx} closing={chosen_closing_idx} "
+                f"(based on {defaults_source_events} past runs, "
+                f"confidence {defaults_confidence})",
+                err=True,
+            )
+        elif not ignore_prefs and not any_explicit_override:
+            click.echo("no preferences yet, using 0/0/0", err=True)
+
     try:
         draft = asyncio.run(
             fill_all_sections(
                 skeleton=skeleton,
-                chosen_title=chosen_title,
-                chosen_opening=chosen_opening,
-                chosen_closing=chosen_closing,
+                chosen_title=chosen_title_idx,
+                chosen_opening=chosen_opening_idx,
+                chosen_closing=chosen_closing_idx,
                 style_profile=_load_style_profile_safe(),
                 article_id=article_id,
             )
@@ -2098,9 +2200,9 @@ def fill(
         meta.update(
             {
                 "status": "draft_ready",
-                "chosen_title_index": chosen_title,
-                "chosen_opening_index": chosen_opening,
-                "chosen_closing_index": chosen_closing,
+                "chosen_title_index": chosen_title_idx,
+                "chosen_opening_index": chosen_opening_idx,
+                "chosen_closing_index": chosen_closing_idx,
                 "updated_at": _now_iso(),
             }
         )
@@ -2114,10 +2216,11 @@ def fill(
         article_id=article_id,
         hotspot_id=hotspot_id,
         payload={
-            "chosen_title_index": chosen_title,
-            "chosen_opening_index": chosen_opening,
-            "chosen_closing_index": chosen_closing,
-            "mode": "manual_refill",
+            "chosen_title_index": chosen_title_idx,
+            "chosen_opening_index": chosen_opening_idx,
+            "chosen_closing_index": chosen_closing_idx,
+            "mode": "auto_skeleton_refill" if auto_pick else "manual_refill",
+            "defaults_source": defaults_source,
         },
     )
 
@@ -2159,6 +2262,11 @@ def fill(
 
     draft_dict = draft.to_dict()
     if as_json:
+        draft_dict["chosen_title_index"] = chosen_title_idx
+        draft_dict["chosen_opening_index"] = chosen_opening_idx
+        draft_dict["chosen_closing_index"] = chosen_closing_idx
+        draft_dict["defaults_source"] = defaults_source
+        draft_dict["defaults_source_events"] = defaults_source_events
         _emit_json(draft_dict)
         return
 
@@ -2191,6 +2299,12 @@ def fill(
 @click.option("--command", "edit_command", type=str, required=False, default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option(
+    "--post-review",
+    is_flag=True,
+    default=False,
+    help="After editing, post a fresh Gate B review card.",
+)
+@click.option(
     "--from-file",
     "from_file",
     type=click.Path(exists=True, dir_okay=False),
@@ -2205,6 +2319,7 @@ def edit(
     paragraph_index: int | None,
     edit_command: str | None,
     as_json: bool,
+    post_review: bool,
     from_file: str | None,
 ) -> None:
     overrides = _load_yaml_overrides(from_file)
@@ -2277,6 +2392,12 @@ def edit(
         )
 
         section_dict = new_section.to_dict()
+        if post_review:
+            try:
+                from agentflow.agent_review import triggers as _triggers
+                _triggers.post_gate_b(article_id)
+            except Exception as _err:  # pragma: no cover
+                click.echo(f"(Gate B auto-post skipped: {_err})", err=True)
         if as_json:
             _emit_json(section_dict)
             return
@@ -2340,6 +2461,13 @@ def edit(
         hotspot_id=hotspot_id,
         payload={"target": target, "command": edit_command},
     )
+
+    if post_review:
+        try:
+            from agentflow.agent_review import triggers as _triggers
+            _triggers.post_gate_b(article_id)
+        except Exception as _err:  # pragma: no cover
+            click.echo(f"(Gate B auto-post skipped: {_err})", err=True)
 
     if as_json:
         _emit_json({"target": target, "old": old_value, "new": new_value})
@@ -2933,7 +3061,7 @@ def _intents_path() -> Path:
 
 @cli.command(
     "intent-set",
-    help="Set the current TopicIntent — subsequent af hotspots/search "
+    help="Set the current TopicIntent — subsequent blogflow article-hotspots/search "
     "read it as a default filter. See docs/backlog/TOPIC_INTENT_FRAMEWORK.md.",
 )
 @click.argument("query", required=False)

@@ -3,14 +3,14 @@ name: agentflow-tweet
 description: |
   Generate, review, publish a Twitter single or thread from a hotspot or article.
 
-  TRIGGER: "/agentflow-tweet", "af tweet-*", "twitter", "thread", "推文", "X 平台".
+  TRIGGER: "/agentflow-tweet", "blogflow tweet-*", "af tweet-*", "twitter", "thread", "推文", "X 平台".
 
   SKIP for: editing Twitter API credentials (.env); modifying the D3 twitter adapter internals.
 ---
 
 # agentflow-tweet — from idea to a posted thread
 
-Wraps `af tweet-draft`, `tweet-show`, `tweet-edit`, `tweet-publish`, `tweet-rollback`, `tweet-list`. Goal: take either a `<hotspot_id>` or an `<article_id>` and ship a single tweet or a thread, with an explicit review gate before publish. This is a separate flow from long-form `af publish`.
+Wraps `blogflow tweet-draft`, `tweet-show`, `tweet-edit`, `tweet-publish`, `tweet-rollback`, `tweet-list`. Goal: take either a `<hotspot_id>` or an `<article_id>` and ship a single tweet or a thread, with an explicit review gate before publish. This is a separate flow from long-form `blogflow publish`.
 
 ## Input
 
@@ -23,7 +23,7 @@ cd /Users/witness/Desktop/experimental/medium\&blog_posting_agent/agentflow-arti
 source .venv/bin/activate
 ```
 
-Prefix `af` with `PYTHONPATH=.`.
+Prefix `blogflow` with `PYTHONPATH=.`.
 
 ## Step 0 — detect form
 
@@ -37,18 +37,18 @@ Read the user's intent from their message:
 ## Step 1 — draft
 
 ```bash
-PYTHONPATH=. af tweet-draft <source_id> --form <form> [--from-article] [--angle N] --json
+PYTHONPATH=. blogflow tweet-draft <source_id> --form <form> [--from-article] [--angle N] --json
 ```
 
-- From a hotspot: `af tweet-draft <hotspot_id> --form thread --json`
-- From an article: `af tweet-draft <article_id> --form thread --from-article --json`
+- From a hotspot: `blogflow tweet-draft <hotspot_id> --form thread --json`
+- From an article: `blogflow tweet-draft <article_id> --form thread --from-article --json`
 
 Parse the returned `tweet_id`; keep it for every later step.
 
 ## Step 2 — review (Step 1b Twitter edition)
 
 ```bash
-PYTHONPATH=. af tweet-show <tweet_id> --json
+PYTHONPATH=. blogflow tweet-show <tweet_id> --json
 ```
 
 Summarise for the user:
@@ -69,11 +69,11 @@ End with:
 
 Map user commands:
 
-- `改短 tweet N` → `af tweet-edit <tid> --index N --command "改短"`
+- `改短 tweet N` -> `blogflow tweet-edit <tid> --index N --command "改短"`
 - `去AI味 tweet 0` → same pattern
-- `把第 2 条拆成两条` → `af tweet-edit <tid> --split 1`
-- `合并第 2 和第 3 条` → `af tweet-edit <tid> --merge 1,2`
-- `重排 0,3,1,2,4` → `af tweet-edit <tid> --reorder 0,3,1,2,4`
+- `把第 2 条拆成两条` -> `blogflow tweet-edit <tid> --split 1`
+- `合并第 2 和第 3 条` -> `blogflow tweet-edit <tid> --merge 1,2`
+- `重排 0,3,1,2,4` -> `blogflow tweet-edit <tid> --reorder 0,3,1,2,4`
 - `regen` → re-run Step 1 (creates a new tweet_id; old one stays on disk)
 
 After each edit: re-run Step 2 condensed — show only the changed tweet(s) with old/new char counts.
@@ -99,19 +99,19 @@ Then ask literally: `"type 'yes send' to publish, or 'cancel'"`. Anything else i
 If user wants an extra safety net:
 
 ```bash
-PYTHONPATH=. af tweet-publish <tweet_id> --dry-run --json
+PYTHONPATH=. blogflow tweet-publish <tweet_id> --dry-run --json
 ```
 
 Real publish:
 
 ```bash
-PYTHONPATH=. af tweet-publish <tweet_id> --json
+PYTHONPATH=. blogflow tweet-publish <tweet_id> --json
 ```
 
 Parse `status`:
 
 - `success` → show `published_url`
-- `partial_success` → show how many posted + the `failure_reason`. Offer: "retry from tweet N" (run `af tweet-publish` again is not safe for partial; surface the posted ids and let user decide next step)
+- `partial_success` -> show how many posted + the `failure_reason`. Offer: "retry from tweet N" (running `blogflow tweet-publish` again is not safe for partial; surface the posted ids and let user decide next step)
 - `failed` → show reason; common: `missing TWITTER_CONSUMER_KEY` (go to `.env`), `tweepy not installed` (run `pip install tweepy`)
 
 ## Step 6 — report
@@ -128,7 +128,7 @@ Thread tw_20260424_... posted:
 Trigger on: "delete / undo / rollback / 删掉 / 撤下".
 
 ```bash
-PYTHONPATH=. af tweet-rollback <tweet_id> --json
+PYTHONPATH=. blogflow tweet-rollback <tweet_id> --json
 ```
 
 Always confirm first: `"This deletes N tweets from your timeline. Proceed? (yes / cancel)"`.
