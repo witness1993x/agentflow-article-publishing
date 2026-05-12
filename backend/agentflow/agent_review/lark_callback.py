@@ -913,13 +913,70 @@ def _handle_gate_a_expand(
 def _handle_defer(
     *, article_id: str, operator: dict[str, Any], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Generic defer — operator put the decision on hold. No state mutation."""
+    """Defer the gate by N hours via the deferred-repost store.
+
+    Mirrors `_handle_chrome_defer` (L-3) but for the per-card `lark_defer`
+    button. Writes a real entry to ~/.agentflow/review/deferred_reposts.json
+    so the daemon sweeper re-emits the gate card on schedule. Without this,
+    the button was ack-only — operators saw '已延后' but the card never
+    reposted (latent bug discovered during L-3 implementation).
+
+    payload.gate (required): "A" | "B" | "C" | "D"
+    payload.hours (default 4): re-post the gate card after this many hours
+    """
     response = _empty_response()
-    gate = str(payload.get("gate") or "")
+    gate = str(payload.get("gate") or "").strip()
+    if gate not in {"A", "B", "C", "D"}:
+        response["side_effects"].append("bad_gate")
+        response["reply_card"] = _make_card(
+            title="❌ defer 参数错误",
+            body=f"gate 必须是 A/B/C/D，收到: `{gate}`",
+            template="red",
+        )
+        return response
+    try:
+        hours = float(payload.get("hours") or 4)
+    except (TypeError, ValueError):
+        hours = 4.0
+    if hours <= 0:
+        response["side_effects"].append("bad_hours")
+        response["reply_card"] = _make_card(
+            title="❌ defer hours 参数错",
+            body=f"hours 必须为正数: `{hours}`",
+            template="red",
+        )
+        return response
+    # Wire to the real deferred-repost store (same one TG /defer and
+    # chrome_defer feed). Lazy import to keep daemon out of module-load chain.
+    try:
+        from agentflow.agent_review import daemon as _daemon_mod
+        _daemon_mod._schedule_deferred_repost(
+            gate=gate,
+            article_id=article_id,
+            batch_path=None,
+            hours=hours,
+            source_sid=f"lark_button:{operator.get('open_id') or '?'}",
+        )
+    except Exception as err:
+        response["side_effects"].append("schedule_failed")
+        response["reply_card"] = _make_card(
+            title="❌ defer 调度失败",
+            body=str(err)[:300],
+            template="red",
+        )
+        _telemetry(
+            event_kind="card_action",
+            action="defer",
+            article_id=article_id,
+            operator=operator,
+            outcome="schedule_failed",
+            extra={"hours": hours, "gate": gate, "error": str(err)[:200]},
+        )
+        return response
     response["side_effects"].append("deferred")
     response["reply_card"] = _make_card(
-        title=f"Gate {gate or '?'} 已延后",
-        body=f"`{article_id}` 决定延后，可稍后再处理。",
+        title=f"⏰ Gate {gate} 已推迟 {hours}h",
+        body=f"`{article_id}` Gate {gate} 已推迟 `{hours}h`，到时会重新推卡。",
         template="grey",
     )
     _telemetry(
@@ -928,7 +985,7 @@ def _handle_defer(
         article_id=article_id,
         operator=operator,
         outcome="ok",
-        extra={"gate": gate},
+        extra={"gate": gate, "hours": hours},
     )
     return response
 
@@ -2141,6 +2198,79 @@ def _question_text_for(field: str) -> str:
     return f"请输入 `{field}` 的值。"
 
 
+# Map: dotted-key (used in Lark missing_fields[] / collected[]) → friendly
+# slot name (used by ``build_patch_from_answers``). The friendly slots are
+# the keys ``build_patch_from_answers`` reads from the ``answers`` dict:
+# brand / voice / output_language / do / dont / product_facts / core_terms
+# / search_queries / avoid_terms. The dotted keys come from
+# ``profile_missing_fields`` and the ``_PROFILE_FIELD_QUESTIONS`` table.
+_PROFILE_FIELD_TO_SLOT: dict[str, str] = {
+    "publisher_account.brand": "brand",
+    "publisher_account.voice": "voice",
+    "publisher_account.output_language": "output_language",
+    "publisher_account.product_facts": "product_facts",
+    "publisher_account.do": "do",
+    "publisher_account.dont": "dont",
+    "publisher_account.default_tags": "default_tags",
+    "keyword_groups.core": "core_terms",
+    "search_queries": "search_queries",
+    "avoid_terms": "avoid_terms",
+}
+
+
+# Friendly slots that should be parsed as a list. ``build_patch_from_answers``
+# routes these through ``_flatten_terms`` which keeps a single string as a
+# single-item list — so we must pre-split comma/newline-separated free-form
+# operator answers before handing them off.
+_LIST_VALUED_SLOTS: frozenset[str] = frozenset(
+    {
+        "do",
+        "dont",
+        "product_facts",
+        "default_tags",
+        "core_terms",
+        "search_queries",
+        "avoid_terms",
+    }
+)
+
+
+def _split_profile_terms(raw: str) -> list[str]:
+    """Split a free-form operator answer into a list of terms.
+
+    Mirrors TG's ``daemon._split_profile_terms`` separator policy: comma
+    (ASCII + 中文), semicolon (ASCII + 中文), enumeration comma 、, newline.
+    Strips per-line bullet/leading dash whitespace.
+    """
+    text = (
+        str(raw or "")
+        .replace("；", "\n")
+        .replace(";", "\n")
+        .replace("、", "\n")
+        .replace(",", "\n")
+        .replace("，", "\n")
+    )
+    lines = [line.strip(" -\t") for line in text.splitlines()]
+    return [line for line in lines if line]
+
+
+def _collected_to_slot_dict(collected: dict[str, Any]) -> dict[str, Any]:
+    """Translate dotted-key answers to a friendly-slot ``answers`` dict.
+
+    Unknown dotted keys pass through unchanged so a future field addition
+    doesn't silently drop the answer. List-valued slots receive a
+    comma/newline split if the operator submitted a single string blob.
+    """
+    out: dict[str, Any] = {}
+    for key, value in (collected or {}).items():
+        slot = _PROFILE_FIELD_TO_SLOT.get(str(key), str(key))
+        if slot in _LIST_VALUED_SLOTS and isinstance(value, str):
+            out[slot] = _split_profile_terms(value)
+        else:
+            out[slot] = value
+    return out
+
+
 def _session_id_from_path(session_path: str) -> str:
     """Extract the session id from a session JSON path.
 
@@ -2409,6 +2539,46 @@ def _handle_profile_advance(
     # No more questions — apply answers + release + notify.
     completed_fields = sorted((session.get("collected") or {}).keys())
 
+    # Writeback: translate dotted-key collected[] → friendly-slot answers
+    # dict, build the profile patch, and persist it to topic_profiles.yaml.
+    # Failures are non-fatal — the session must still be released and the
+    # downstream notify event must still emit so the rest of the pipeline
+    # (D1 scan, etc.) is not blocked. The card body surfaces the warning.
+    writeback_warning: str | None = None
+    writeback_field_count: int | None = None
+    try:
+        from agentflow.shared.topic_profile_lifecycle import (
+            build_patch_from_answers,
+            seed_profile,
+            upsert_profile,
+            user_profile_bootstrap_state,
+        )
+
+        target_profile_id = str(session.get("profile_id") or profile_id or "").strip()
+        if not target_profile_id:
+            raise ValueError("session has no profile_id; cannot write back")
+        slot_answers = _collected_to_slot_dict(session.get("collected") or {})
+        existing = user_profile_bootstrap_state(target_profile_id).get("current_profile")
+        if not isinstance(existing, dict):
+            existing = seed_profile(target_profile_id)
+        patch = build_patch_from_answers(
+            target_profile_id,
+            slot_answers,
+            existing_profile=existing,
+        )
+        upsert_profile(
+            target_profile_id,
+            patch,
+            replace_lists=False,
+            source=f"lark_profile_advance:{session_id}",
+        )
+        writeback_field_count = len(completed_fields)
+    except Exception as err:
+        _log.warning("profile yaml writeback failed", exc_info=True)
+        writeback_warning = (
+            f"答案已保存，但 profile 写回失败: {str(err)[:200]}"
+        )
+
     try:
         release_session_lark(session_id, status="completed")
     except Exception:  # pragma: no cover — release best-effort
@@ -2432,12 +2602,20 @@ def _handle_profile_advance(
         _log.warning("notify.profile_setup_done emit failed", exc_info=True)
 
     response["side_effects"].append("profile_advance_completed")
+    if writeback_warning is None:
+        response["side_effects"].append("profile_yaml_written")
+    else:
+        response["side_effects"].append("profile_yaml_writeback_failed")
     body_lines = [
         f"Profile `{session.get('profile_id') or profile_id}` 已补全 "
         f"{len(completed_fields)} 项。",
     ]
     if completed_fields:
         body_lines.append("已收集字段：" + "、".join(f"`{f}`" for f in completed_fields))
+    if writeback_warning is None and writeback_field_count is not None:
+        body_lines.append(f"✓ profile 已更新 {writeback_field_count} 个字段")
+    elif writeback_warning is not None:
+        body_lines.append(writeback_warning)
     response["reply_card"] = _make_card(
         title="✅ Profile setup 完成",
         body="\n".join(body_lines),
@@ -2912,6 +3090,12 @@ def _handle_chrome_defer(
     article_id: str | None = None,
     hours: float | None = None,
 ) -> dict[str, Any]:
+    """Defer the article's *current* gate by ``hours``. Writes a real entry
+    into the deferred-repost store (same path TG ``/defer`` uses); the daemon
+    sweeper drains it on schedule and re-emits the gate card via
+    ``triggers.post_gate_b`` / ``post_gate_c`` (which already dual-emit on
+    both TG + Lark surfaces — design (b), no schema change required).
+    """
     response = _empty_response()
     deny = _chrome_unauthorized("chrome_defer", operator)
     if deny is not None:
@@ -2933,8 +3117,8 @@ def _handle_chrome_defer(
             template="red",
         )
         return response
-    # Re-use generic _handle_defer's ack-only behaviour. Gate inferred from
-    # current state for telemetry symmetry with the TG slash command.
+    # Resolve the article's current gate. Defer is only valid in
+    # *_pending_review states (mirrors TG ``_slash_defer`` semantics).
     try:
         cur = review_state.current_state(aid)
     except Exception:
@@ -2944,7 +3128,51 @@ def _handle_chrome_defer(
         STATE_IMAGE_PENDING_REVIEW: "C",
         STATE_CHANNEL_PENDING_REVIEW: "D",
     }
-    gate = gate_for_state.get(str(cur or ""), "?")
+    gate = gate_for_state.get(str(cur or ""))
+    if gate is None:
+        response["side_effects"].append("wrong_state")
+        response["reply_card"] = _make_card(
+            title="❌ /defer 状态错误",
+            body=f"`/defer` 仅对 *_pending_review 生效, 当前 state=`{cur}`",
+            template="red",
+        )
+        _telemetry(
+            event_kind="message",
+            action="chrome_defer",
+            article_id=aid,
+            operator=operator,
+            outcome="wrong_state",
+            extra={"hours": float(hours), "state": str(cur)},
+        )
+        return response
+    # Wire to the real deferred-repost store (same one TG ``/defer`` and the
+    # ``lark_defer`` button feed). Import locally to avoid a hard import-time
+    # dep on daemon.py.
+    try:
+        from agentflow.agent_review import daemon as _daemon_mod
+        _daemon_mod._schedule_deferred_repost(
+            gate=gate,
+            article_id=aid,
+            batch_path=None,
+            hours=float(hours),
+            source_sid=f"lark_chrome:{operator.get('open_id') or '?'}",
+        )
+    except Exception as err:
+        response["side_effects"].append("schedule_failed")
+        response["reply_card"] = _make_card(
+            title="❌ defer 调度失败",
+            body=str(err)[:300],
+            template="red",
+        )
+        _telemetry(
+            event_kind="message",
+            action="chrome_defer",
+            article_id=aid,
+            operator=operator,
+            outcome="schedule_failed",
+            extra={"hours": float(hours), "gate": gate, "error": str(err)[:200]},
+        )
+        return response
     try:
         append_memory_event(
             "lark_chrome_defer",
@@ -2959,8 +3187,10 @@ def _handle_chrome_defer(
         _log.warning("chrome_defer audit append failed", exc_info=True)
     response["side_effects"].append("chrome_defer_applied")
     response["reply_card"] = _make_card(
-        title=f"⏰ Gate {gate} 已延后",
-        body=f"`{aid}` 已 defer `{hours}h`。",
+        title=f"⏰ Gate {gate} 已推迟 {hours}h",
+        body=(
+            f"`{aid}` Gate {gate} 已推迟 `{hours}h`，到时会重新推卡。"
+        ),
         template="grey",
     )
     _telemetry(
@@ -3383,10 +3613,19 @@ def _authorize_or_deny(
     article_id: str | None,
     event_kind: str,
 ) -> dict[str, Any] | None:
-    """Return a deny response if the operator lacks the required action verb,
-    or ``None`` to let the caller proceed. No-op when the action has no
-    auth requirement registered (e.g. card_action vocab outside the gate
-    matrix), keeping behaviour open-by-default for unmapped actions."""
+    """LEGACY: kept for backwards compatibility with code outside this module.
+
+    All in-module handlers were migrated to :func:`_authorize_or_deny_v2` in
+    Phase 2 closure (L-4). New handlers MUST use ``_authorize_or_deny_v2`` —
+    the legacy ``is_lark_authorized`` path silently allows traffic when the
+    ``lark_auth.json`` file is empty AND no ``LARK_OPERATOR_OPEN_ID`` env is
+    set, which is unsafe for Phase 2 deployments where any bridge-token
+    holder could otherwise fire arbitrary callbacks.
+
+    This function will be removed in Phase 3 along with the rest of the TG
+    path. Until then, leave it importable so external code (e.g. legacy
+    tests, third-party adapters) doesn't break unexpectedly.
+    """
     required = _LARK_ACTION_REQ.get(action)
     if required is None:
         return None
@@ -3758,7 +3997,7 @@ def _route_message_intent(
         )
         return response
 
-    deny = _authorize_or_deny(
+    deny = _authorize_or_deny_v2(
         action=intent,
         operator=operator,
         article_id=article_id,
@@ -3802,7 +4041,7 @@ def _route_advance(
         cur = None
 
     if cur == STATE_DRAFT_PENDING_REVIEW:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="approve_b", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -3812,7 +4051,7 @@ def _route_advance(
             article_id=article_id, operator=operator, payload=payload or {}
         )
     if cur == STATE_IMAGE_PENDING_REVIEW:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="gate_c_approve", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -3824,7 +4063,7 @@ def _route_advance(
     if cur == STATE_CHANNEL_PENDING_REVIEW:
         return _make_advance_help(article_id, "Gate D 需要你先选择平台再 ✅ 确认发布")
     if cur == STATE_DRAFTING_LOCKED_HUMAN:
-        deny = _authorize_or_deny(
+        deny = _authorize_or_deny_v2(
             action="locked_critique", operator=operator,
             article_id=article_id, event_kind="message",
         )
@@ -4064,7 +4303,7 @@ def handle_event(
         )
         return response
 
-    deny = _authorize_or_deny(
+    deny = _authorize_or_deny_v2(
         action=str(action),
         operator=operator,
         article_id=article_id,

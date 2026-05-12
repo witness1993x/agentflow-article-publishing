@@ -1119,38 +1119,42 @@ class LarkAuthGateTests(_FreeTextRoutingHelper):
     def test_unauthorized_open_id_for_publish_action_is_denied(self) -> None:
         from agentflow.agent_review import auth as review_auth
 
-        # Configure a closed Lark allowlist: explicit operator + one allowed
-        # reviewer that does NOT have publish grant.
-        review_auth.lark_add(
-            "ou_reviewer", name="Reviewer", allowed_actions=["review"],
+        # Configure a closed v2 Lark allowlist (auth.json::lark_operators):
+        # one reviewer with the ``review`` grant only — no ``publish``.
+        # (post-L-4: legacy lark_auth.json + LARK_OPERATOR_OPEN_ID env are
+        # no longer consulted by in-module handlers.)
+        review_auth.lark_operator_add(
+            "ou_reviewer", name="Reviewer", actions=["review"],
         )
-        with patch.dict(
-            os.environ, {"LARK_OPERATOR_OPEN_ID": "ou_admin"}, clear=False,
-        ):
-            res = lark_callback.handle_event(
-                event_kind="card_action",
-                article_id="art_x",
-                action="gate_d_confirm",  # requires publish
-                payload={},
-                operator={"open_id": "ou_reviewer", "name": "Reviewer"},
-            )
+        res = lark_callback.handle_event(
+            event_kind="card_action",
+            article_id="art_x",
+            action="gate_d_confirm",  # requires publish
+            payload={},
+            operator={"open_id": "ou_reviewer", "name": "Reviewer"},
+        )
         self.assertIn("not_authorized", res["side_effects"])
         self.assertEqual(res["reply_card"]["header"]["template"], "red")
 
     def test_operator_open_id_always_authorized(self) -> None:
-        with patch.dict(
-            os.environ, {"LARK_OPERATOR_OPEN_ID": "ou_admin"}, clear=False,
-        ):
-            with patch.object(
-                lark_callback.review_state, "transition"
-            ) as mock_trans:
-                res = lark_callback.handle_event(
-                    event_kind="card_action",
-                    article_id="art_x",
-                    action="approve_b",
-                    payload={},
-                    operator={"open_id": "ou_admin", "name": "Admin"},
-                )
+        from agentflow.agent_review import auth as review_auth
+
+        # Seed an explicit ``["*"]`` Lark operator entry so the v2 fail-closed
+        # path approves the call. The operator-env override no longer applies
+        # to in-module handlers post-L-4.
+        review_auth.lark_operator_add(
+            "ou_admin", name="Admin", actions=["*"],
+        )
+        with patch.object(
+            lark_callback.review_state, "transition"
+        ) as mock_trans:
+            res = lark_callback.handle_event(
+                event_kind="card_action",
+                article_id="art_x",
+                action="approve_b",
+                payload={},
+                operator={"open_id": "ou_admin", "name": "Admin"},
+            )
         self.assertNotIn("not_authorized", res["side_effects"])
         mock_trans.assert_called_once()
 

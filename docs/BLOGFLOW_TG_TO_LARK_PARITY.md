@@ -439,7 +439,7 @@ phase 1 完成后需新增/更新：
 | **L-2** | Profile yaml 实际 mutation | GAP-P2 答案落 `session.collected[]`，未回写 `topic_profiles.yaml`。`build_patch_from_answers` 存在但 key 命名不匹配（`publisher_account.brand` 点路径 vs 友好 slot 名 `brand`）。需补一层翻译 |
 | **L-3** | `chrome_defer` 不真正 schedule | TG 的 `_schedule_deferred_repost` 未在 chrome 路径调用，只 ack + 写 audit memory。需 wire 到现有 deferred-repost store |
 | **L-4** | 旧 `_authorize_or_deny`（fail-open via `is_lark_authorized`）仍在用 | 现存 ~30 个 lark_callback handler 走旧路径。新增 v2 handler 都用 `_authorize_or_deny_v2`，但**全量迁移**未做。Phase 2 步骤 2.x |
-| **L-5** | `blogflow doctor --fresh` 无 TG token 验证 | 在 pytest 范围之外，需要 CLI/Linux box 手验。Phase 2 §6.2 acceptance |
+| **L-5** | ✅ 已闭环 (`tests/test_l5_doctor_no_tg.py`) | 不再需要 Linux box 手验。子进程隔离的 `BlockTgClientFinder` 把 `tg_client` 拦在 import 之前，再用 click `CliRunner` 调 `doctor --fresh`，断言 exit 0 + `TELEGRAM_BOT_TOKEN not set` + 无 ImportError 泄漏。覆盖三种场景：默认、`AGENTFLOW_LARK_APP_PRIMARY=true`、`--json`。|
 
 ### 11.6 给主仓的合并建议
 

@@ -295,7 +295,10 @@ class HandleProfileAdvanceCompleteTests(_ProfileAdvanceTestCase):
 
 class HandleProfileAdvanceAuthTests(_ProfileAdvanceTestCase):
     def test_handle_profile_advance_unauthorized_returns_deny(self) -> None:
-        # No lark_operators entry → fail-closed deny via _authorize_or_deny_v2.
+        # auth.json exists with a different operator → fail-closed deny via
+        # _authorize_or_deny_v2. (post-L-4: file-absent fail-opens, so we
+        # must seed auth.json to exercise the fail-closed branch.)
+        _write_lark_operator(self.home, "ou_other_admin", ["*"])
         session_id = "session_test_unauth"
         path = _seed_session(
             session_id=session_id,

@@ -40,6 +40,35 @@ External agent orchestration:
 - see `docs/integrations/AGENT_BRIDGE.md` for the local HTTP bridge, outbound
   event webhook, and authenticated command API
 
+### Lark-only deployment (v1.2.0+)
+
+As of v1.2.0 the daemon runs cleanly without `TELEGRAM_BOT_TOKEN`. Set:
+
+```dotenv
+AGENTFLOW_LARK_APP_PRIMARY=true
+AGENTFLOW_AGENT_EVENT_WEBHOOK_URL=<OpenClaw event listener URL>
+AGENTFLOW_AGENT_BRIDGE_TOKEN=<shared write token>
+AGENTFLOW_AGENT_BRIDGE_ENABLE_DANGEROUS=true
+AGENTFLOW_REVIEW_BRIDGE_HOST=127.0.0.1
+AGENTFLOW_REVIEW_BRIDGE_PORT=7860
+# DO NOT set TELEGRAM_BOT_TOKEN
+```
+
+Add at least one Lark operator to the whitelist before first use
+(`is_authorized_open_id` is fail-closed when the file exists with an
+empty `lark_operators` section):
+
+```bash
+blogflow review-auth-add-lark ou_xxx --name Alice --actions '*'
+```
+
+Operator ergonomics on Lark — beyond Gate A/B/C/D buttons, send `@bot
+<text>` for: `状态` / `列表` / `已发` / `扫一下` / `任务` / `跳过 <id>`
+/ `推迟 <id> <h>` / `标记已发 <id>` / `取消 <id>` / `审计列表` /
+`鉴权` / `建议`. See `docs/flows/LARK_OPERATOR_INTENTS.md` for the full
+deterministic keyword table. End-to-end verification is in
+`backend/tests/test_e2e_lark_pure.py`.
+
 Skill install (once, so Claude Code can invoke them anywhere):
 
 ```bash

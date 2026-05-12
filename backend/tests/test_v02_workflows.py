@@ -3465,13 +3465,14 @@ class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
         self.assertIn("notify.hotspots_digest", template)
 
     def test_lark_first_flow_reference_documents_daemon_owned_bridge(self) -> None:
-        flow = Path("docs/flows/LARK_FIRST_REVIEW_FLOWS.md").read_text(
+        repo_root = Path(__file__).resolve().parents[2]
+        flow = (repo_root / "docs/flows/LARK_FIRST_REVIEW_FLOWS.md").read_text(
             encoding="utf-8"
         )
-        bridge = Path("docs/integrations/AGENT_BRIDGE.md").read_text(
+        bridge = (repo_root / "docs/integrations/AGENT_BRIDGE.md").read_text(
             encoding="utf-8"
         )
-        openclaw = Path("docs/openclaw_plugin_integration.md").read_text(
+        openclaw = (repo_root / "docs/openclaw_plugin_integration.md").read_text(
             encoding="utf-8"
         )
 
@@ -3484,14 +3485,16 @@ class LarkReviewCardTemplateTests(AgentflowHomeTestCase):
         self.assertIn("LARK_FIRST_REVIEW_FLOWS.md", openclaw)
 
     def test_openclaw_skill_reference_points_to_lark_first_flow(self) -> None:
-        skill = Path(".cursor/skills/agentflow-open-claw-v2/SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        reference = Path(
-            ".cursor/skills/agentflow-open-claw-v2/references/reference.md"
+        repo_root = Path(__file__).resolve().parents[2]
+        skill = (
+            repo_root / ".cursor/skills/agentflow-open-claw-v2/SKILL.md"
+        ).read_text(encoding="utf-8")
+        reference = (
+            repo_root
+            / ".cursor/skills/agentflow-open-claw-v2/references/reference.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("AgentFlow Open Claw v2.9", skill)
+        self.assertIn("AgentFlow Open Claw v3.0", skill)
         self.assertIn("docs/flows/LARK_FIRST_REVIEW_FLOWS.md", skill)
         self.assertIn("34 `lark_*` commands", reference)
         self.assertIn("daemon-owned", reference)
