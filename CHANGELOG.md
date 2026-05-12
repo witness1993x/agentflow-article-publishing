@@ -16,6 +16,183 @@ surface** rather than runtime code parity.
 
 - _no changes yet_
 
+## [1.3.5] — 2026-05-11 — SKILL.md webhook framing rewrite
+
+> Closes a UX bug observed in the wild: even after v1.3.4 made the
+> skill self-contained, the cloud-computer agent was still asking
+> users for `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`, `AGENTFLOW_AGENT_EVENT_AUTH_HEADER`,
+> `AGENTFLOW_AGENT_BRIDGE_TOKEN`, "review-dashboard 怎么起",
+> "Lark callback 到 bridge 再到 daemon 的闭环" — i.e. all the Mode B
+> webhook concepts that don't exist in the file-queue path. The skill
+> framed Mode A and Mode B as equally valid choices, so the agent
+> would happily walk users through Mode B prerequisites that have no
+> meaning in Mode A.
+
+### What changed in `SKILL.md`
+
+- §"Lark Card Rendering" rewritten so Mode A (Agent-Lark Window /
+  file queue) is THE default and described first; opening TL;DR
+  bullet explicitly says "no webhook, no review-dashboard, no
+  bridge token, no auth header — these are Mode A non-issues, do
+  not ask the user about them."
+- Mode B section retitled "Mode B (advanced):Webhook 部署 — 多数 skill
+  agent 不该走这条" with a trigger condition: "OpenClaw runs on a
+  *different* machine from daemon AND you can configure a real
+  webhook URL pointing at it. If you're not sure, it's not." Default
+  remains Mode A.
+- Anti-pattern #11 added: "On cloud-computer / same-host deploy, do
+  NOT ask the user for `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` /
+  `AGENTFLOW_AGENT_EVENT_AUTH_HEADER` / `AGENTFLOW_AGENT_BRIDGE_TOKEN`
+  / review-dashboard port. These are Mode B artifacts — Mode A is
+  zero-config." Existing #11/#12/#13 shifted to #12/#13/#14.
+- §"Required Runtime" `.env` row rewritten: only required vars are
+  `AGENTFLOW_LARK_APP_PRIMARY=true` + at least one LLM/embedding/Atlas
+  key. Webhook / bridge / dashboard mentions removed.
+- §"Required Init Flows" "Lark App 主路径" row rewritten: drops the
+  webhook URL / bridge token / dashboard port requirements; adds
+  "Don't push these on the user" to the NEVER column.
+- Package-contract paragraph rewritten: review-daemon writes to the
+  file queue by default; Lark button callback flows back via
+  `blogflow lark-cli-emit` CLI, no HTTP bridge required.
+- `Repo facts` "入口" line: TG bot reference removed (Phase 3 deleted
+  it); webhook reference replaced with Mode A/B language.
+
+### Bundled artifacts unchanged
+
+- Skill bundle file count (12) and contents (`lark_review_cards.md`,
+  `CLOUD_COMPUTER_DEPLOY.md`) unchanged from v1.3.4 — only SKILL.md
+  text edits.
+
+### Tests
+
+- 297/297 still passing — no test changes.
+
+## [1.3.4] — 2026-05-11 — Skill self-contained for cloud-computer ops
+
+> Closes a hole in v1.3.3: SKILL.md *referenced* `docs/CLOUD_COMPUTER_DEPLOY.md`
+> but skill agents on a constrained cloud computer only see the skill
+> bundle, not the deploy tarball's docs. Ops guidance is now bundled
+> AND inlined in SKILL.md so the skill agent can guide a fresh install
+> without external lookups.
+
+### `references/CLOUD_COMPUTER_DEPLOY.md` bundled into skill
+
+- The 8-step runbook is now copied into the skill bundle's references/
+  alongside `lark_review_cards.md`. Skill agents read both directly from
+  the package — no filesystem access to the deploy tarball needed.
+
+### SKILL.md §"Cloud-Computer First-Time Deploy"
+
+- New top-level section that inlines a condensed 8-step deploy flow
+  (Python → pip → install → .env → doctor → smoke-test → daemon → tail
+  loop → end-to-end verification). Plus a 5-row "stuck symptom →
+  direct line" troubleshooting table.
+- §"Default Entry: First Deployment" gains a Step-0 deployment-form
+  detector: managed install (form A: backend/.venv/bin/blogflow exists)
+  vs cloud computer (form B: ~/.local/bin/blogflow exists, no venv) vs
+  empty machine (form C). Skill agent picks the right walkthrough.
+
+### Tests
+
+- 297/297 still passing (no test changes).
+
+## [1.3.3] — 2026-05-11 — Deliverable mode complete (smoke test + runbook)
+
+> Closes the cloud-computer deployment loop. The Agent-Lark Window
+> architecture from v1.3.2 is now operator-runnable end-to-end without
+> consulting source code: smoke-test command, single-page runbook, and
+> the card schema reference is bundled inside the skill itself.
+
+### `blogflow agent-events-emit-test`
+
+- New CLI: emits a synthetic `review.gate_a_card` event into the queue
+  / webhook for end-to-end smoke verification. Reports the active mode
+  (file / webhook / both), the queue path, and the byte delta after the
+  append. Used as the final verification step in
+  `docs/CLOUD_COMPUTER_DEPLOY.md` step 5.
+
+### Card schema bundled into skill
+
+- `.cursor/skills/agentflow-open-claw-v2/references/lark_review_cards.md`
+  is now a copy of `backend/agentflow/agent_review/templates/lark_review_cards.md`
+  (308 lines). The skill agent no longer needs filesystem access to
+  the deploy backend tree to render cards correctly. SKILL.md updated
+  to reference the bundled path.
+
+### `docs/CLOUD_COMPUTER_DEPLOY.md`
+
+- Single-page operator runbook (≈250 lines) covering the full
+  no-sudo / no-Docker / no-webhook deploy: get-pip.py user-install →
+  unpack tarball → pip install --user -e . → .env config → doctor →
+  smoke-test → daemon foreground / nohup / systemd-user → skill agent
+  side-loop verification. Plus three appendices: portable Python
+  fallback, air-gapped wheel install, and dual-write `MODE=both` mode.
+
+### SKILL.md
+
+- §"模式 A: Agent-Lark Window" prerequisites bullet now points at
+  `docs/CLOUD_COMPUTER_DEPLOY.md` for the end-to-end install steps and
+  at `blogflow agent-events-emit-test` for the one-line smoke probe.
+
+### Tests
+
+- 297/297 still passing (no test changes — pure delivery additions).
+
+## [1.3.2] — 2026-05-11 — Agent-Lark Window mode (no-webhook deploy)
+
+> Targets the constrained-cloud-computer scenario where the operator
+> can install Python (after a `get-pip.py` --user dance) but cannot
+> stand up an HTTP listener for the OpenClaw bridge. The daemon now has
+> a "file queue" delivery mode for `review.*_card` / `notify.*` events
+> — the OpenClaw skill agent tails the queue and pushes Lark cards via
+> its already-mounted Lark window, no inbound webhook required.
+
+### `agent_bridge.emit_agent_event` gains a file-queue fallback
+
+- New env var `AGENTFLOW_AGENT_EVENT_MODE` ∈ {`webhook`, `file`, `both`}.
+  Auto-resolves to `webhook` if `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL` is set,
+  else `file`.
+- `file` mode appends each envelope as one JSON line to
+  `~/.agentflow/agent_events/queue.jsonl`. Append-only, audit-friendly.
+- Webhook mode unchanged. `both` is a migration aid.
+
+### `preflight.check_lark_app_primary` no longer fails on missing webhook
+
+- v1.3.1 returned `valid=False` if `AGENTFLOW_AGENT_EVENT_WEBHOOK_URL`
+  wasn't set. v1.3.2 detects file-queue fallback and reports
+  `valid=True` with a message pointing operators at SKILL.md §"Agent-Lark
+  Window mode". Forced `AGENTFLOW_AGENT_EVENT_MODE=webhook` without a
+  URL still fails (real config error).
+
+### New CLI: `blogflow lark-cli-emit` + `blogflow agent-events-tail`
+
+- `lark-cli-emit` injects a Lark callback (`lark_gate_b_approve`,
+  `lark_message`, etc.) directly into `lark_callback.handle_event` via
+  CLI — no `/api/commands` HTTP server needed. Used by the Agent-Lark
+  Window flow when an operator clicks a Lark button: the OpenClaw skill
+  agent shells out to this command to forward the callback into the
+  daemon.
+- `agent-events-tail` streams the on-disk queue. Supports `--follow` for
+  long-running tails and `--from-start` for replay.
+
+### SKILL.md `agentflow-open-claw-v2`
+
+- New §"Lark Card Rendering — 两种部署模式" section. Mode A
+  (Agent-Lark Window, file queue) is documented as the recommended path
+  for cloud-computer / OpenClaw-with-mounted-Lark-window deployments.
+  Mode B (legacy webhook) is preserved for traditional HTTP server
+  setups. Includes a Python pseudocode tail loop, cursor handling, and
+  the new CLI helpers.
+- Removed the stale "TG fallback" advice — Phase 3 (v1.3.0) deleted
+  Telegram. Constrained environments must use Mode A.
+
+### Tests
+
+- `test_lark_primary_preflight_fails_without_event_webhook` replaced by
+  two finer-grained tests: one for the file-queue fallback, one for
+  `MODE=webhook` without a URL still failing.
+- Test suite: 295 → 297 passing (+2).
+
 ## [1.3.1] — 2026-05-10 — render.py removed + timeout-sweeper regression fix
 
 > v1.3.0 left `render.py` (802 lines, TG-Markdown + inline-keyboard
